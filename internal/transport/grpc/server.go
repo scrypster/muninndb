@@ -48,6 +48,10 @@ type Server struct {
 	authStore *auth.Store
 	gs        *grpc.Server
 	tlsConfig *tls.Config // nil = plain TCP
+
+	// streamRecheck overrides subscribeRecheckInterval when positive. Tests
+	// set it so they do not wait thirty seconds for an idle stream's check.
+	streamRecheck time.Duration
 }
 
 // notCortexUnaryInterceptor turns a write refused by the cluster single-writer
@@ -528,9 +532,37 @@ func (s *Server) Activate(req *pb.ActivateRequest, stream pb.MuninnDB_ActivateSe
 	return nil
 }
 
+// subscribeRecheckInterval is the longest an open Subscribe stream with nothing
+// to deliver goes without asking whether it is still authorised (SEC-23). It is
+// the interval of the REST subscription stream's keepalive, which does the same
+// job there.
+const subscribeRecheckInterval = 30 * time.Second
+
+// subscriptionEnded returns the error an open Subscribe stream ends with once
+// what authorised it no longer holds, and nil while it does.
+func (s *Server) subscriptionEnded(ctx context.Context, vault string) error {
+	if s.authStore == nil {
+		return nil
+	}
+	err := s.authStore.StreamStillAuthorized(ctx, vault)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, auth.ErrVaultNoLongerPublic):
+		return status.Errorf(codes.Unauthenticated, "vault %q requires an API key", vault)
+	default:
+		return status.Error(codes.Unauthenticated, auth.ErrKeyNoLongerValid.Error())
+	}
+}
+
 // Subscribe implements the Subscribe RPC (bidirectional streaming).
 // The client sends one SubscribeRequest; the server streams ActivationPush
 // messages until the client disconnects or the subscription TTL expires.
+//
+// The stream is authorised for as long as what authorised it holds: the server
+// asks again before every push and periodically in between, and ends the
+// stream with Unauthenticated when the key is no longer valid or the vault is
+// no longer public (SEC-23).
 func (s *Server) Subscribe(stream pb.MuninnDB_SubscribeServer) error {
 	ctx := stream.Context()
 	if err := denyWriteOnlyRead(ctx); err != nil {
@@ -586,13 +618,33 @@ func (s *Server) Subscribe(stream pb.MuninnDB_SubscribeServer) error {
 		return err
 	}
 
+	// What authorised this stream when it opened is asked again before every
+	// push, and every subscribeRecheckInterval while there is nothing to push.
+	// The stream ends when the answer is no: a key that was revoked or has
+	// expired, or, for a caller with no key, a vault that is no longer public
+	// (SEC-23). Returning ends the subscription too (the deferred Unsubscribe),
+	// so it stops counting against the vault.
+	interval := subscribeRecheckInterval
+	if s.streamRecheck > 0 {
+		interval = s.streamRecheck
+	}
+	recheck := time.NewTicker(interval)
+	defer recheck.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-recheck.C:
+			if err := s.subscriptionEnded(ctx, vault); err != nil {
+				return err
+			}
 		case push, ok := <-pushCh:
 			if !ok {
 				return nil
+			}
+			if err := s.subscriptionEnded(ctx, vault); err != nil {
+				return err
 			}
 			pbPush := &pb.ActivationPush{
 				SubscriptionId: push.SubscriptionID,

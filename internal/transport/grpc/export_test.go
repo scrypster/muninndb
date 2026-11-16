@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/engine"
 	googlegrpc "google.golang.org/grpc"
@@ -40,3 +41,7 @@ func TestableMapAdjustConfidenceError(err error) error {
 func TestableCallerFromContext(ctx context.Context) string {
 	return callerFromContext(ctx)
 }
+
+// SetStreamRecheckForTest makes an open Subscribe stream ask whether it is
+// still authorised this often while it has nothing to send.
+func (s *Server) SetStreamRecheckForTest(d time.Duration) { s.streamRecheck = d }

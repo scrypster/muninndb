@@ -2750,7 +2750,14 @@ paths:
             default: 10
       responses:
         "200":
-          description: "SSE event stream (text/event-stream)."
+          description: >-
+            SSE event stream (text/event-stream). Events: `subscribed` once,
+            `push` for each delivery, `ping` every 30 seconds, and `error` when
+            the server ends the stream. The stream is authorised for as long as
+            what authorised it holds: before every push and on every ping the
+            server checks the API key again (or, with no key, that the vault is
+            still public) and ends the stream with an `error` event when the
+            key has been revoked or has expired.
           content:
             text/event-stream:
               schema:

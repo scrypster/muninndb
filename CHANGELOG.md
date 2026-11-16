@@ -250,27 +250,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closes its outgoing queue. Requests received before the client left are still carried
   out and their answers are discarded (SEC-22).
 
-- Revoking an API key now ends the MBP connections that are open with it. The MBP
-  transport looked at a key once, when a connection opened. Revoking the key, or the key
-  passing its expiry, stopped new connections only. A connection that was already open
-  kept working (reading, writing and deleting, to the limit of the key's mode) for as
-  long as its holder kept it open, which could be indefinitely.
+- Revoking an API key now ends what is open with it: MBP connections, and the push
+  streams on REST and gRPC. These three looked at a key once, when the connection or
+  stream opened. Revoking the key, or the key passing its expiry, stopped new ones only.
+  An MBP connection that was already open kept working (reading, writing and deleting,
+  to the limit of the key's mode) for as long as its holder kept it open. An open push
+  stream (REST `GET /api/subscribe`, or the gRPC `Subscribe` stream) kept receiving new
+  memories from the vault, content included, while the same key was refused everywhere
+  else. Either could last indefinitely.
   **Who is affected:** anyone who has revoked a key, or issued one with an expiry, whose
-  holder could reach the MBP port (8474), in every release up to v0.11.0. Revocation on
-  those releases did not cut off a holder who was already connected.
+  holder could reach the MBP port (8474), the REST port (8475) or the gRPC port (8477),
+  in every release up to v0.11.0. Revocation on those releases did not cut off a holder
+  who was already connected.
   **What to do:** upgrade. On an affected release, revoke the key and then restart the
-  server, which closes every connection. Revoking alone is not enough. If you revoked a
-  key because it leaked, treat the vault as reachable by whoever held it until the
-  restart or upgrade.
+  server, which closes every connection and stream. Revoking alone is not enough. If you
+  revoked a key because it leaked, treat the vault as readable by whoever held it until
+  the restart or upgrade.
   **What changed:** from this release, every MBP request re-checks the key its connection
   was opened with. After a key is revoked or expires, the next request on any connection
   opened with it is refused with error `4010` ("api key is no longer valid") and the
   server closes the connection. A request that was already being carried out when the
-  key was revoked completes. A connection with no key, on a public vault, is ended the
-  same way when the vault is made private. The check costs about two microseconds per
-  request. Not covered: the push streams (REST `GET /api/subscribe` and the gRPC
-  `Subscribe` stream) are still checked only when they open, so after revoking a key
-  whose holder may have one open, restart the server (SEC-23).
+  key was revoked completes. A push stream re-checks before every push it sends and,
+  when it has nothing to send, every 30 seconds. When the key is no longer valid the
+  stream ends: REST sends an `error` event and closes the response, gRPC ends the call
+  with `Unauthenticated`. A push that was already sent has been delivered. A connection
+  or stream with no key, on a public vault, is ended the same way when the vault is made
+  private. The check costs two to four microseconds per request or push.
+  **What a client will notice:** a client that keeps a stream open on a key that is then
+  revoked, or that expires, now sees the stream end with that error. Reconnecting with
+  the same key fails.
+  **Not covered:** a stream opened from an admin session in the web console is not ended
+  when the session's 24 hours run out (SEC-23).
 
 - An MBP connection now has 15 seconds to complete its handshake. Until now there was no
   limit. A client that connected and sent nothing, or part of a handshake, held a

@@ -89,6 +89,10 @@ type Server struct {
 	server        *http.Server
 	tlsConfig     *tls.Config // nil = plain TCP
 
+	// sseKeepalive overrides sseKeepaliveInterval when positive. Tests set it
+	// so they do not wait thirty seconds for a keepalive.
+	sseKeepalive time.Duration
+
 	// Embedder info — set at construction time, static for the lifetime of the server.
 	embedProvider            string // "ollama", "openai", "voyage", or "none"
 	embedModel               string // model name, or "" if none
@@ -1797,6 +1801,29 @@ func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, http.StatusOK, GuideResponse{Guide: guide})
 }
 
+// subscriptionEnded reports why an open subscription stream is no longer
+// authorised, or "" while it is. A server with no auth store authorised nothing
+// at open and has nothing to ask again.
+func (s *Server) subscriptionEnded(ctx context.Context, vault string) string {
+	if s.authStore == nil {
+		return ""
+	}
+	err := s.authStore.StreamStillAuthorized(ctx, vault)
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, auth.ErrVaultNoLongerPublic):
+		return fmt.Sprintf("vault %q requires an API key", vault)
+	default:
+		return auth.ErrKeyNoLongerValid.Error()
+	}
+}
+
+// sseKeepaliveInterval is how often an open subscription stream is sent a ping.
+// It is also the longest a stream with nothing to deliver goes without asking
+// whether it is still authorised (SEC-23).
+const sseKeepaliveInterval = 30 * time.Second
+
 // handleSubscribe opens a long-lived SSE connection. The client receives
 // ActivationPush events as JSON-encoded server-sent events.
 //
@@ -1813,6 +1840,11 @@ func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
 //	            (alias: "push_on_write", which is what the SDKs send)
 //	ttl       — subscription TTL in seconds, 0 = no expiry
 //	rate      — max pushes/sec, default 10
+//
+// The stream is authorised for as long as what authorised it holds: before
+// every push and on every keepalive the server asks again, and ends the stream
+// with an "error" event when the key is no longer valid or the vault is no
+// longer public (SEC-23).
 func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -1929,18 +1961,43 @@ func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "event: subscribed\ndata: {\"id\":%q}\n\n", subID)
 	flusher.Flush()
 
-	ping := time.NewTicker(30 * time.Second)
+	keepalive := sseKeepaliveInterval
+	if s.sseKeepalive > 0 {
+		keepalive = s.sseKeepalive
+	}
+	ping := time.NewTicker(keepalive)
 	defer ping.Stop()
+
+	// What authorised this stream when it opened is asked again before every
+	// push and on every keepalive, and the stream ends when the answer is no:
+	// a key that was revoked or has expired, or, for a caller with no key, a
+	// vault that is no longer public (SEC-23). Returning ends the subscription
+	// too (the deferred Unsubscribe), so it stops counting against the vault.
+	streamEnded := func() bool {
+		reason := s.subscriptionEnded(r.Context(), vault)
+		if reason == "" {
+			return false
+		}
+		fmt.Fprintf(w, "event: error\ndata: {\"error\":%q}\n\n", reason)
+		flusher.Flush()
+		return true
+	}
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ping.C:
+			if streamEnded() {
+				return
+			}
 			fmt.Fprintf(w, "event: ping\ndata: {}\n\n")
 			flusher.Flush()
 		case push, ok := <-pushCh:
 			if !ok {
+				return
+			}
+			if streamEnded() {
 				return
 			}
 			// T6: Check whether the deliver func has been dropping pushes for this
