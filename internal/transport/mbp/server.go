@@ -58,6 +58,15 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.addr, err)
 	}
+	return s.ServeListener(ctx, ln)
+}
+
+// ServeListener serves on a listener the caller already holds, and blocks until
+// Shutdown is called. It closes ln on return. A caller that binds port 0 itself
+// knows the address before anything is served and knows the listener is its
+// own, which a "pick a free port, release it, bind it again" sequence cannot
+// promise.
+func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
 	if s.tlsConfig != nil {
 		ln = tls.NewListener(ln, s.tlsConfig)
 		slog.Info("mbp: TLS enabled", "addr", ln.Addr().String())

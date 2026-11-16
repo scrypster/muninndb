@@ -162,42 +162,6 @@ type matrixEnv struct {
 	addr  string
 }
 
-type noopEmbedder struct{}
-
-func (noopEmbedder) Embed(context.Context, []string) ([]float32, error) {
-	return make([]float32, 384), nil
-}
-
-func (noopEmbedder) Tokenize(text string) []string { return strings.Fields(text) }
-
-type ftsActivationAdapter struct{ idx *fts.Index }
-
-func (a ftsActivationAdapter) Search(ctx context.Context, ws [8]byte, query string, topK int) ([]activation.ScoredID, error) {
-	results, err := a.idx.Search(ctx, ws, query, topK)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]activation.ScoredID, len(results))
-	for i, r := range results {
-		out[i] = activation.ScoredID{ID: storage.ULID(r.ID), Score: r.Score}
-	}
-	return out, nil
-}
-
-type ftsTriggerAdapter struct{ idx *fts.Index }
-
-func (a ftsTriggerAdapter) Search(ctx context.Context, ws [8]byte, query string, topK int) ([]trigger.ScoredID, error) {
-	results, err := a.idx.Search(ctx, ws, query, topK)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]trigger.ScoredID, len(results))
-	for i, r := range results {
-		out[i] = trigger.ScoredID{ID: storage.ULID(r.ID), Score: r.Score}
-	}
-	return out, nil
-}
-
 // newMatrixEnv starts a real MBP server on an ephemeral loopback port, backed
 // by a real engine and auth store on an in-memory filesystem.
 func newMatrixEnv(t *testing.T) *matrixEnv {
@@ -210,14 +174,14 @@ func newMatrixEnv(t *testing.T) *matrixEnv {
 	}
 	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 1000})
 	ftsIdx := fts.New(db)
-	embedder := noopEmbedder{}
+	embedder := activation.NewNoopEmbedder()
 	authStore := auth.NewStore(db)
 	eng := engine.NewEngine(engine.EngineConfig{
 		Store:            store,
 		AuthStore:        authStore,
 		FTSIndex:         ftsIdx,
-		ActivationEngine: activation.New(store, ftsActivationAdapter{ftsIdx}, nil, embedder),
-		TriggerSystem:    trigger.New(store, ftsTriggerAdapter{ftsIdx}, nil, embedder),
+		ActivationEngine: activation.New(store, activation.NewFTSAdapter(ftsIdx), nil, embedder),
+		TriggerSystem:    trigger.New(store, trigger.NewFTSAdapter(ftsIdx), nil, embedder),
 		Embedder:         embedder,
 	})
 	t.Cleanup(func() {
@@ -225,19 +189,19 @@ func newMatrixEnv(t *testing.T) *matrixEnv {
 		store.Close()
 	})
 
-	// Same pattern as the gRPC server tests: take a free port, release it, and
-	// let the server bind it. dialMBP retries until the listener is up.
+	// The test binds port 0 itself and hands the listener to the server, so the
+	// address is known before anything is served and whatever answers on it is
+	// this server.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("pick a port: %v", err)
+		t.Fatalf("listen: %v", err)
 	}
 	addr := ln.Addr().String()
-	ln.Close()
 
 	rec := &recordingEngine{EngineAPI: eng}
 	srv := mbp.NewServer(addr, rec, authStore, nil)
 	served := make(chan error, 1)
-	go func() { served <- srv.Serve(context.Background()) }()
+	go func() { served <- srv.ServeListener(context.Background(), ln) }()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -264,15 +228,7 @@ type mbpClient struct {
 // credential-less session (auth_method "none").
 func dialMBP(t *testing.T, addr, token, vault string) *mbpClient {
 	t.Helper()
-	var conn net.Conn
-	var err error
-	for i := 0; i < 100; i++ {
-		conn, err = net.DialTimeout("tcp", addr, time.Second)
-		if err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial %s: %v", addr, err)
 	}
