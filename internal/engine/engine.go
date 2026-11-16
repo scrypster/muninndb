@@ -1454,6 +1454,30 @@ func importanceFromRequest(p *float32) float32 {
 	return v
 }
 
+// observeWriteFloor records, per vault, an engram that was persisted with no
+// summary at write time. It reads the ENGRAM rather than the WriteRequest, so it
+// reflects what was actually stored.
+//
+// Skipped when the vault's inline enrichment mode is "background_only": there
+// the caller's fields are discarded by design and a background stage owns the
+// summary, so every write would count as missing one even when the caller sent
+// it.
+//
+// Called only from the sites where an engram genuinely becomes durable without
+// delegating: Write and the direct branch of WriteBatch. Deliberately NOT called
+// from the writeUpsert identical-content branch (a no-op: nothing is stored) nor
+// from upsertCreate (which delegates to Write and would double-count). The
+// upsert-evolve branch is not covered because the successor engram is not in
+// scope there, only its id.
+func observeWriteFloor(vaultName, inlineMode string, eng *storage.Engram) {
+	if eng == nil || inlineMode == "background_only" {
+		return
+	}
+	if strings.TrimSpace(eng.Summary) == "" {
+		metrics.WritesMissingFieldTotal.WithLabelValues(vaultName, "summary").Inc()
+	}
+}
+
 // Write implements mbp.EngineAPI.Write.
 func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
 	// Label pipeline: create/evolve provenance records the writer's hashed
@@ -1978,6 +2002,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	metrics.EngineWritesTotal.Inc()
+	observeWriteFloor(vaultName, inlineMode, eng)
 
 	d := time.Since(writeStart)
 	if e.latencyTracker != nil {
@@ -2817,6 +2842,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 
 		metrics.EngineWritesTotal.Inc()
+		observeWriteFloor(p.vaultName, p.inlineMode, p.eng)
 	}
 
 	return responses, errs
