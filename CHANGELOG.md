@@ -177,16 +177,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memories the key could reach were those of its own vault. REST, gRPC and MCP were not
   affected, and `append` keys were already kept from changing or deleting existing memories
   by the engine, on every transport.
-  **Who is affected:** anyone whose MBP port can be reached by the holder of an `observe` or
-  `write` key. If the only keys you have issued are `full` or `append`, nothing changes for
-  you.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by the holder of an
+  `observe` or `write` key, in every release up to v0.11.0: the MBP transport has never
+  checked a key's mode. If the only keys you have issued are `full` or `append`, nothing
+  changes for you. Whether your MBP port can be reached at all is covered in "Which
+  deployments expose the MBP port" below. Before v0.6.2 the exposure was wider than key
+  modes: the MBP transport did not confine a session to its key's vault and accepted a
+  session with no key at all (fixed in v0.6.2, #484), so on those releases every vault was
+  reachable over MBP by anyone who could reach the port.
   **What to do:** upgrade. Until you have, do not let holders of `observe` or `write` keys
-  reach the MBP port. It listens on `127.0.0.1` by default; it is exposed if you set
-  `--listen-host`/`MUNINN_LISTEN_HOST` or `--mbp-addr` to a routable address, or publish 8474
-  from a container (the bundled `docker-compose.yml` does both). REST, gRPC and MCP enforce
-  the modes and can stay open to those keys. If an `observe` key was exposed that way, treat
-  the memories in its vault as writable by whoever held it, and the vault's contents as
-  readable by whoever held a `write` key.
+  reach the MBP port; REST, gRPC and MCP enforce the modes and can stay open to those keys.
+  If an `observe` key was exposed that way, treat the memories in its vault as writable by
+  whoever held it, and the vault's contents as readable by whoever held a `write` key.
+  Revoking such a key on an affected release stops new connections only: a holder who is
+  already connected over MBP keeps the access described here until the connection closes,
+  so revoke the key and then restart the server. From this release, revoking a key ends
+  the MBP connections opened with it (see the revocation entry below).
   **What changed:** a mutating request from an `observe` key and a reading request from a
   `write` key are now refused with error `4010` ("read-only key cannot write" /
   "write-only key cannot read") before the engine is called, with the same answer whether or
@@ -207,7 +213,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   public, and the `default` vault is public out of the box; with no public vault, any
   valid key of any mode is enough.
   **What a client could do:** exhaust the server's memory with a handful of small frames.
-  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port
+  (see "Which deployments expose the MBP port" below).
   **What changed:** a compressed frame may decode to at most 16 MB — what an uncompressed
   frame may carry; it was 100 MB — and the limit is enforced while decoding, so refusing a
   frame costs memory in proportion to the limit, not to what the frame claims. A compressed
@@ -232,8 +239,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any mode is enough.
   **What a client could do:** stop the server at will, by sending a request and closing
   the connection before the answer.
-  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port,
-  and run the server under something that restarts it. An unexplained exit with
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port
+  (see "Which deployments expose the MBP port" below), and run the server under
+  something that restarts it. An unexplained exit with
   `panic: send on closed channel` in the server log was this.
   **What changed:** a connection now waits for the requests it is handling before it
   closes its outgoing queue. Requests received before the client left are still carried
@@ -260,6 +268,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request. Not covered: the push streams — REST `GET /api/subscribe` and the gRPC
   `Subscribe` stream — are still checked only when they open, so after revoking a key
   whose holder may have one open, restart the server (SEC-23).
+
+- Which deployments expose the MBP port (for the four MBP entries above). The server binds
+  every port, MBP's 8474 included, to `127.0.0.1` unless it is told otherwise, so by
+  default MBP can be reached only from the machine the server runs on. It can be reached
+  from elsewhere when `--listen-host` / `MUNINN_LISTEN_HOST` or `--mbp-addr` is set to a
+  routable address.
+  In a container, publishing the port is not enough on its own. The image sets no listen
+  host, so the server binds the container's own loopback, and a published port
+  (`docker run -p 8474:8474 ...`, as in the README and the self-hosting guide) forwards to
+  an address nothing is listening on. The bundled `docker-compose.yml` is different: it
+  sets `MUNINN_LISTEN_HOST=0.0.0.0` and publishes 8474 on every interface of the host, so
+  a deployment made from it exposes MBP to whatever can reach the host. If you run from
+  that file, or set the listen host yourself, restrict 8474 with a firewall or publish it
+  on loopback only (`127.0.0.1:8474:8474`) unless remote MBP clients are intended.
 
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
