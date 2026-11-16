@@ -124,7 +124,11 @@ and remain the reviewer's job.
     the startup window out of the stream its followers read, silently and permanently.
     Equally: anything that filters keys out of a snapshot (`skipFromSnapshot`) must keep
     replication METADATA flowing — dropping the seq counter restarts a promoted node's log
-    at 1.
+    at 1. And **anything that makes a node leader goes through `handlePromotion`**: its
+    `takeLeaderRole` raises the sequence counter to the node's applied position before the
+    role flips (STO-26). A second place that gave a node the leader role would promote with
+    a stale counter, and every follower would discard that leader's writes as already
+    applied while reporting no lag. `TestOnlyTakeLeaderRoleAssignsThePrimaryRole` fails on it.
 
 12. **A new async worker or fire-and-forget path on the write or scoring path**
     (`internal/engine`, `internal/engine/activation`, `internal/storage`) → give it a

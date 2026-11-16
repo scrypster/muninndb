@@ -178,6 +178,19 @@ func (a *Applier) LastApplied() uint64 {
 	return a.lastApplied
 }
 
+// HoldCursor calls fn with the current apply cursor while no entry can be
+// applied: Apply waits until fn returns. A promotion uses it to read the cursor
+// and take the leader role as one step (ClusterCoordinator.handlePromotion), so
+// an entry still arriving from the previous leader is either counted in the
+// value fn sees or applied only after the role has changed, never in between.
+//
+// fn must not call back into the Applier.
+func (a *Applier) HoldCursor(fn func(lastApplied uint64)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	fn(a.lastApplied)
+}
+
 // ResetTo rebases the apply cursor onto seq, in memory and in Pebble, and is
 // the ONLY way the cursor moves other than applying an entry.
 //

@@ -42,6 +42,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- After a cluster failover, replicas no longer discard the new leader's writes. A replica
+  does not advance its own replication sequence counter while it follows, so a replica that
+  was promoted numbered its writes from wherever that counter had been left. On a node that
+  had never led, that is 1. Every other replica had already applied entries up to the old
+  leader's position and treats anything numbered at or below that as already applied, so it
+  dropped the new leader's writes one after another until the new leader's counter passed
+  the old position. Its health read `ok` and its lag 0 the whole time. On a three-node test
+  cluster, with no log pruning involved, 0 of 10 writes accepted after a failover reached the
+  surviving replica. This affected every failover of a cluster with more than one replica,
+  automatic or operator-triggered. A promoted node now continues the numbering from the last
+  entry it applied (STO-26).
+  - **Already affected:** a replica that followed a promoted leader on an earlier version may
+    be missing the writes that leader accepted first. Upgrading does not put them back.
+    Re-seed such a replica from its leader. The procedure is in `docs/cluster-operations.md`
+    under "What a failover does to replication".
+  - **Upgrade order matters:** the fix runs on the node that is promoted. A promoted node on
+    an older version still restarts the numbering, whatever its replicas run. Upgrade
+    replicas first and fail over to an upgraded one, as the rolling-upgrade procedure already
+    says.
+  - **Still open, and silent unless noted.** This fixes replicas that were level with the
+    node that won. It does not fix these:
+    - A replica that was *ahead* of the node that won holds entries the new leader never
+      received. The new leader's first writes reuse those numbers and that replica skips
+      them.
+    - A replica that was *behind* the node that won misses the entries in between.
+    - A replica that is behind can win an election, because votes do not compare positions.
+    - Entries the old leader still streams after the new one has been promoted are applied
+      by whoever receives them.
+    - Writes the old leader accepted but had not shipped when it went away stay on its disk
+      only.
+    - After a *graceful* failover, replicas other than the handoff target keep reading from
+      the old leader and receive nothing from the new one until the old leader is stopped or
+      restarted. Restart it promptly.
+    - `POST /api/admin/cluster/failover` can answer 500 although the handoff took effect
+      (the old leader's log says "HANDOFF_ACK timeout"). This one is not silent, but it is
+      wrong.
+    - A node can keep a `seed-<addr>` placeholder in its voter list next to the same peer's
+      real id, which raises the quorum by one until that node restarts.
+    - Draining is not enforced, so the old leader keeps accepting writes during a graceful
+      failover.
+    - No replica is sent a snapshot. One that joins after the leader has pruned its log gets
+      only what the log still holds.
+
 - `source_type` on a recall row is the memory's origin again. It was read from the newest
   provenance entry, and the first read or feedback appends an update entry recorded as
   `inferred`, so the field flipped from the writer's source to `inferred` after one access: it

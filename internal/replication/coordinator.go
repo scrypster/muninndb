@@ -822,7 +822,7 @@ func (c *ClusterCoordinator) streamFromCortex(ctx context.Context, conn net.Conn
 		}
 		// After applying a replication entry, report our progress so the Cortex
 		// can track replica lag (#516 part 3). The Cortex reads these acks via
-		// handleClusterConn → HandleIncomingFrame → UpdateReplicaSeq.
+		// ServeConn → HandleIncomingFrame → UpdateReplicaSeq.
 		if frame.Type == mbp.TypeReplEntry {
 			c.sendReplAck(cortexID, conn)
 		}
@@ -1327,7 +1327,7 @@ func (c *ClusterCoordinator) EvictConn(nodeID string, conn net.Conn) {
 // HandleIncomingJoin processes a TypeJoinRequest frame on a raw inbound conn
 // whose node ID is not yet known. It registers the live conn under req.NodeID
 // so that peer.Send works immediately (no dial required), processes the join
-// request, and returns the joining node's stable ID so that handleClusterConn
+// request, and returns the joining node's stable ID so that ServeConn
 // can use it for all subsequent frames on the same connection.
 func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (string, bool, error) {
 	var req mbp.JoinRequest
@@ -1644,9 +1644,7 @@ func (c *ClusterCoordinator) handlePromotion(epoch uint64) {
 			"epoch", epoch, "node", c.cfg.NodeID)
 		return
 	}
-	c.roleMu.Lock()
-	c.role = RolePrimary
-	c.roleMu.Unlock()
+	c.takeLeaderRole(epoch)
 	c.election.mu.Unlock()
 
 	slog.Info("cluster: promoted to Cortex", "epoch", epoch, "node", c.cfg.NodeID)
@@ -1654,6 +1652,67 @@ func (c *ClusterCoordinator) handlePromotion(epoch uint64) {
 	c.pushRoleEvent(roleEvent{promoted: true})
 
 	c.invokeOnBecameCortex(epoch)
+}
+
+// takeLeaderRole makes this node the leader: it brings the replication log's
+// sequence counter up to the node's applied position and then flips the role,
+// in that order and as one step with respect to the applier.
+//
+// Why the counter moves. While this node followed, it applied the leader's
+// entries without appending any of its own (the applier records last_applied
+// only, and LocalAppendFunc suppresses a follower's appends), so its counter is
+// wherever its own last term as leader left it, which is 0 if it has never led. A
+// follower of the previous leader has applied up to that leader's head and
+// skips every entry numbered at or below that (Applier.Apply). Numbered from
+// the stale counter, this node's first writes as leader would all be skipped,
+// by followers reporting no lag. Numbered from its applied position, its first
+// entry is one past everything it has applied.
+//
+// Why before the flip. The role is what lets local writes into the log
+// (LocalAppendFunc appends unless the node is definitively a follower). With
+// the counter raised first, no append can be numbered from the old value.
+//
+// Why under the applier's lock. An entry from the previous leader may still be
+// arriving. Holding the cursor means such an entry has either been counted in
+// the position read here or is applied after the role has changed. It cannot
+// land between the read and the flip and leave the counter one short.
+//
+// What this does not cover:
+//   - A follower that had applied FURTHER than this node. This node cannot
+//     number its way past entries it never saw: its first writes reuse their
+//     numbers, and that follower skips them. Nothing detects that yet.
+//   - Entries the previous leader streams after this point. A leader does not
+//     stop applying what a deposed leader still sends, and another follower
+//     may apply them too. Telling two leaders' entries apart needs positions
+//     tagged with the epoch that wrote them.
+//
+// Caller holds election.mu.
+func (c *ClusterCoordinator) takeLeaderRole(epoch uint64) {
+	flip := func() {
+		c.roleMu.Lock()
+		c.role = RolePrimary
+		c.roleMu.Unlock()
+	}
+	if c.applier == nil || c.repLog == nil {
+		flip()
+		return
+	}
+	c.applier.HoldCursor(func(applied uint64) {
+		previous, err := c.repLog.AdvanceTo(applied)
+		switch {
+		case err != nil:
+			// AdvanceTo keeps the target whichever step failed (see its doc), so
+			// the promotion goes ahead: the claim is already broadcast, and a
+			// leader that then declined the role would leave the cluster
+			// following nobody.
+			slog.Error("cluster: could not record the replication sequence position at promotion (numbering continues from it regardless)",
+				"node", c.cfg.NodeID, "epoch", epoch, "applied", applied, "err", err)
+		case applied > previous:
+			slog.Info("cluster: replication sequence continues from this node's applied position",
+				"node", c.cfg.NodeID, "epoch", epoch, "log_head_was", previous, "log_head", applied)
+		}
+		flip()
+	})
 }
 
 // invokeOnBecameCortex runs OnBecameCortex synchronously on the caller's

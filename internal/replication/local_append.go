@@ -38,8 +38,11 @@ func (c *ClusterCoordinator) IsFollower() bool {
 // still appends, so a leader serving writes before its coordinator settles can
 // never silently drop them out of the stream its followers read.
 //
-// A promoted follower resumes appending the moment its role changes; its own
-// followers rejoin by snapshot, which is already how a role change is healed.
+// A promoted follower resumes appending the moment its role changes. Because
+// it appended nothing while it followed, its sequence counter is stale by then.
+// The promotion raises it to the node's applied position first, so the entries
+// it appends are numbered past everything the node itself has applied
+// (ClusterCoordinator.takeLeaderRole, STO-26).
 //
 // coordinator may be nil (cluster mode with no coordinator), in which case
 // every append proceeds.
