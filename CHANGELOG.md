@@ -171,25 +171,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MBP now enforces API-key modes. The native binary protocol (port 8474) authenticated a key
   and recorded its mode, but nothing checked the mode before acting on a request. Over MBP an
   `observe` (read-only) key could store memories, rewrite an existing one (an upsert under a
-  key that already had a memory), link two memories — including marking them as
-  contradicting each other — and soft- or hard-delete them. A `write` (ingest-only) key could
+  key that already had a memory), link two memories (including marking them as
+  contradicting each other) and soft- or hard-delete them. A `write` (ingest-only) key could
   read a memory by id, run recall across the vault and read statistics. In both cases the
   memories the key could reach were those of its own vault. REST, gRPC and MCP were not
   affected, and `append` keys were already kept from changing or deleting existing memories
   by the engine, on every transport.
   **Who is affected:** anyone whose MBP port (8474) can be reached by the holder of an
-  `observe` or `write` key, in every release up to v0.11.0: the MBP transport has never
+  `observe` or `write` key, in every release up to v0.11.0. The MBP transport has never
   checked a key's mode. If the only keys you have issued are `full` or `append`, nothing
   changes for you. Whether your MBP port can be reached at all is covered in "Which
   deployments expose the MBP port" below. Before v0.6.2 the exposure was wider than key
-  modes: the MBP transport did not confine a session to its key's vault and accepted a
+  modes. The MBP transport did not confine a session to its key's vault and accepted a
   session with no key at all (fixed in v0.6.2, #484), so on those releases every vault was
   reachable over MBP by anyone who could reach the port.
   **What to do:** upgrade. Until you have, do not let holders of `observe` or `write` keys
-  reach the MBP port; REST, gRPC and MCP enforce the modes and can stay open to those keys.
+  reach the MBP port. REST, gRPC and MCP enforce the modes and can stay open to those keys.
   If an `observe` key was exposed that way, treat the memories in its vault as writable by
   whoever held it, and the vault's contents as readable by whoever held a `write` key.
-  Revoking such a key on an affected release stops new connections only: a holder who is
+  Revoking such a key on an affected release stops new connections only. A holder who is
   already connected over MBP keeps the access described here until the connection closes,
   so revoke the key and then restart the server. From this release, revoking a key ends
   the MBP connections opened with it (see the revocation entry below).
@@ -205,37 +205,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - MBP no longer decodes a compressed request before checking how large it is
   (decompression bomb). A compressed frame was decoded in full and only then compared with
-  a 100 MB limit, so the decoder allocated whatever the frame's header claimed: a frame of
+  a 100 MB limit, so the decoder allocated whatever the frame's header claimed. A frame of
   a few kilobytes cost tens of megabytes, and one a little larger cost gigabytes, before
   the server answered. The frame could be a PING, which every session may send.
   **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
-  trust, in every release from v0.2.0 to v0.11.0. No key is needed when any vault is
-  public, and the `default` vault is public out of the box; with no public vault, any
-  valid key of any mode is enough.
+  trust, in every release from v0.2.0 to v0.11.0. v0.1.0 is not in that range because its
+  decompressor never read the frame's payload at all, so it refused every compressed
+  frame without decoding anything. No key is needed when any vault is public, and the
+  `default` vault is public out of the box. With no public vault, any valid key of any
+  mode is enough.
   **What a client could do:** exhaust the server's memory with a handful of small frames.
   **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port
   (see "Which deployments expose the MBP port" below).
-  **What changed:** a compressed frame may decode to at most 16 MB — what an uncompressed
-  frame may carry; it was 100 MB — and the limit is enforced while decoding, so refusing a
-  frame costs memory in proportion to the limit, not to what the frame claims. A compressed
-  payload must be exactly one zstd frame. One connection may have at most 32 MB of decoded
-  payload in flight; a compressed frame that does not fit is answered at once with error
-  `4012` and can be retried when earlier requests have been answered. The other refusals
-  are error `5005` with a message beginning "decompression failed". No request the server
-  accepts is near these limits (an engram's content is at most 16 KB), but a client that
-  concatenated several zstd frames into one payload, compressed with a window over 16 MB
-  (`--ultra` or `--long` modes), or sent more than 16 MB decoded will now get an error
-  (SEC-21).
+  **What changed:** a compressed frame may decode to at most 16 MB, which is what an
+  uncompressed frame may carry. The limit was 100 MB. It is now enforced while decoding,
+  so refusing a frame costs memory in proportion to the limit and not to what the frame
+  claims. A compressed payload must be exactly one zstd frame. One connection may have at
+  most 32 MB of decoded payload in flight. A compressed frame that does not fit is
+  answered at once with error `4012` and can be retried when earlier requests have been
+  answered. The other refusals are error `5005` with a message beginning
+  "decompression failed". No request the server accepts is near these limits (an engram's
+  content is at most 16 KB), but a client that concatenated several zstd frames into one
+  payload, compressed with a window over 16 MB (`--ultra` or `--long` modes), or sent more
+  than 16 MB decoded will now get an error (SEC-21).
 
 - A client that disconnects in the middle of an MBP request no longer crashes the server.
   When a connection closed, the server closed that connection's outgoing queue without
   waiting for the requests it was still handling. The first of them to finish then tried
   to answer on the closed queue, which is a fatal error nothing caught, and the whole
-  process exited: every vault, and REST, gRPC and MCP with it. No intent was needed — a
-  client that timed out or was killed with a request in flight had the same effect.
+  process exited, taking every vault and REST, gRPC and MCP with it. No intent was
+  needed. A client that timed out or was killed with a request in flight had the same
+  effect.
   **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
   trust, in every release up to v0.11.0. No key is needed when any vault is public, and
-  the `default` vault is public out of the box; with no public vault, any valid key of
+  the `default` vault is public out of the box. With no public vault, any valid key of
   any mode is enough.
   **What a client could do:** stop the server at will, by sending a request and closing
   the connection before the answer.
@@ -245,41 +248,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `panic: send on closed channel` in the server log was this.
   **What changed:** a connection now waits for the requests it is handling before it
   closes its outgoing queue. Requests received before the client left are still carried
-  out; their answers are discarded (SEC-22).
+  out and their answers are discarded (SEC-22).
 
 - Revoking an API key now ends the MBP connections that are open with it. The MBP
   transport looked at a key once, when a connection opened. Revoking the key, or the key
-  passing its expiry, stopped NEW connections; a connection that was already open kept
-  working — reading, writing and deleting, to the limit of the key's mode — for as long
-  as its holder kept it open, which could be indefinitely.
+  passing its expiry, stopped new connections only. A connection that was already open
+  kept working (reading, writing and deleting, to the limit of the key's mode) for as
+  long as its holder kept it open, which could be indefinitely.
   **Who is affected:** anyone who has revoked a key, or issued one with an expiry, whose
   holder could reach the MBP port (8474), in every release up to v0.11.0. Revocation on
   those releases did not cut off a holder who was already connected.
   **What to do:** upgrade. On an affected release, revoke the key and then restart the
-  server, which closes every connection; revoking alone is not enough. If you revoked a
+  server, which closes every connection. Revoking alone is not enough. If you revoked a
   key because it leaked, treat the vault as reachable by whoever held it until the
   restart or upgrade.
   **What changed:** from this release, every MBP request re-checks the key its connection
   was opened with. After a key is revoked or expires, the next request on any connection
   opened with it is refused with error `4010` ("api key is no longer valid") and the
-  server closes the connection; a request that was already being carried out when the
+  server closes the connection. A request that was already being carried out when the
   key was revoked completes. A connection with no key, on a public vault, is ended the
   same way when the vault is made private. The check costs about two microseconds per
-  request. Not covered: the push streams — REST `GET /api/subscribe` and the gRPC
-  `Subscribe` stream — are still checked only when they open, so after revoking a key
+  request. Not covered: the push streams (REST `GET /api/subscribe` and the gRPC
+  `Subscribe` stream) are still checked only when they open, so after revoking a key
   whose holder may have one open, restart the server (SEC-23).
 
-- Which deployments expose the MBP port (for the four MBP entries above). The server binds
+- Limits of the MBP listener that this release does not change. The fixes above do not
+  make it safe to expose the MBP port to clients you do not trust. The listener has no
+  limit on the number of connections. It has no timeout for a connection that never
+  completes its handshake, and none for a connection that goes idle. Every request that
+  is being read or handled holds its raw payload in memory, up to 16 MB each and up to 64
+  at a time on one connection. A client that can reach the port can therefore still hold
+  connections and memory for as long as it likes. Keep port 8474 on loopback or behind a
+  firewall. The next paragraph says which deployments expose it.
+
+- Which deployments expose the MBP port (for the MBP entries above). The server binds
   every port, MBP's 8474 included, to `127.0.0.1` unless it is told otherwise, so by
   default MBP can be reached only from the machine the server runs on. It can be reached
   from elsewhere when `--listen-host` / `MUNINN_LISTEN_HOST` or `--mbp-addr` is set to a
   routable address.
-  In a container, publishing the port is not enough on its own. The image sets no listen
-  host, so the server binds the container's own loopback, and a published port
-  (`docker run -p 8474:8474 ...`, as in the README and the self-hosting guide) forwards to
-  an address nothing is listening on. The bundled `docker-compose.yml` is different: it
-  sets `MUNINN_LISTEN_HOST=0.0.0.0` and publishes 8474 on every interface of the host, so
-  a deployment made from it exposes MBP to whatever can reach the host. If you run from
+  In a container, publishing the port is not enough on its own. Images built from the
+  project Dockerfile, including the published image, which is built from it, set no
+  listen host. The server in them binds the container's own loopback, and a published
+  port (`docker run -p 8474:8474 ...`, as in the README and the self-hosting guide)
+  forwards to an address nothing is listening on. The bundled `docker-compose.yml` is
+  different. It sets `MUNINN_LISTEN_HOST=0.0.0.0` and publishes 8474 on every interface
+  of the host, so a deployment made from it exposes MBP to whatever can reach the host.
+  If you run from
   that file, or set the listen host yourself, restrict 8474 with a firewall or publish it
   on loopback only (`127.0.0.1:8474:8474`) unless remote MBP clients are intended.
 
