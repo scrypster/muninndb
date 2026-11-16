@@ -349,6 +349,12 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	// Start reader loop. When it returns, no handler is still running.
 	s.readerLoop(connCtx, conn, writeCh, helloResp.Capabilities)
 
+	// The connection is over, and so are the subscriptions it made. No handler
+	// is running, so none can be added after this.
+	for _, id := range scope.subs.drain() {
+		_ = s.engine.Unsubscribe(connCtx, id)
+	}
+
 	close(writeCh)
 
 	// Wait for writer goroutine
@@ -556,11 +562,26 @@ func (s *Server) handleSubscribe(ctx context.Context, corrID uint64, payload []b
 	}
 	req.Vault = resolved
 
+	// The subscription belongs to this connection: it counts against the
+	// connection's limit, only this connection can end it, and it ends when the
+	// connection does (SEC-26).
+	sc, _ := ctx.Value(vaultScopeKey).(*vaultScope)
+	if sc == nil {
+		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, "vault access denied: connection is not authorized")
+		return
+	}
+	if !sc.subs.reserve() {
+		s.queueErrorFrame(writeCh, corrID, ErrRateLimited, "subscription limit reached for this connection")
+		return
+	}
+
 	resp, err := s.engine.Subscribe(ctx, &req)
 	if err != nil {
+		sc.subs.settle("")
 		s.queueErrorFrame(writeCh, corrID, ErrSubscriptionNotFound, err.Error())
 		return
 	}
+	sc.subs.settle(resp.SubID)
 
 	s.queueFrame(writeCh, TypeSubOK, corrID, resp, caps)
 }
@@ -572,10 +593,15 @@ func (s *Server) handleUnsub(ctx context.Context, corrID uint64, payload []byte,
 		return
 	}
 
-	err := s.engine.Unsubscribe(ctx, req.SubID)
-	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrSubscriptionNotFound, err.Error())
-		return
+	// Only a subscription made on this connection. Any other id — another
+	// connection's, another vault's, one that does not exist — is left alone,
+	// and answered exactly as an id nobody holds always has been, so the answer
+	// says nothing about whether it exists (SEC-26).
+	if sc, _ := ctx.Value(vaultScopeKey).(*vaultScope); sc != nil && sc.subs.release(req.SubID) {
+		if err := s.engine.Unsubscribe(ctx, req.SubID); err != nil {
+			s.queueErrorFrame(writeCh, corrID, ErrSubscriptionNotFound, err.Error())
+			return
+		}
 	}
 
 	s.queueFrame(writeCh, TypeUnsubOK, corrID, &UnsubscribeResponse{OK: true}, caps)

@@ -74,9 +74,9 @@ type frameRoute struct {
 // TestCredentialModeMatrix then checks every kind of session against it.
 //
 // Each class is the one the same operation has on REST, gRPC and MCP, so the
-// four transports agree. UNSUB has no counterpart there: it ends a
-// subscription, which only a credential that may read can hold, so it takes
-// the class of SUBSCRIBE.
+// four transports agree. UNSUB has no counterpart there. It takes the class of
+// SUBSCRIBE: it can only end a subscription made on the same connection
+// (SEC-26), and a connection that may not SUBSCRIBE has made none.
 //
 // What an append-mode credential may not do is not decided here. Changing or
 // deleting an existing memory is refused by the engine (SEC-15) on every

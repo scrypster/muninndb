@@ -38,13 +38,22 @@ func (r *SubscriptionRegistry) CountTotal() int {
 	return n
 }
 
-func (r *SubscriptionRegistry) Add(sub *Subscription) {
+// Add registers a subscription, and reports whether it did. A subscription
+// whose id is already registered is NOT added: replacing the entry under an id
+// would leave the earlier subscription listed for its vault with nothing able
+// to remove it, and would hand whoever chose the id the means to have the
+// earlier owner's unsubscribe remove the wrong one (SEC-26).
+func (r *SubscriptionRegistry) Add(sub *Subscription) bool {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, taken := r.byID[sub.ID]; taken {
+		return false
+	}
 	r.byID[sub.ID] = sub
 	r.byVault[sub.VaultID] = append(r.byVault[sub.VaultID], sub)
 	r.vaultCount[sub.VaultID]++
 	r.totalCount++
-	r.mu.Unlock()
+	return true
 }
 
 func (r *SubscriptionRegistry) Remove(id string) {

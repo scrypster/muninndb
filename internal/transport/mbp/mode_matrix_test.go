@@ -10,6 +10,7 @@ package mbp_test
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"net"
 	"sort"
 	"strconv"
@@ -63,8 +64,9 @@ const (
 //	STAT       GET /api/stats (WriteOnlyGuard)            read         muninn_status: read-only
 //	PING       (none; GET /api/health is public)          (keepalive)  (no tool)
 //
-// UNSUB has no counterpart elsewhere. It ends a subscription, which only a
-// credential that may read can hold, so it takes the class of SUBSCRIBE.
+// UNSUB has no counterpart elsewhere. It takes the class of SUBSCRIBE: it can
+// only end a subscription made on the same connection (SEC-26), and a
+// connection that may not SUBSCRIBE has made none.
 var wantFrameClasses = map[uint8]string{
 	mbp.TypeWrite:     classMutate,
 	mbp.TypeRead:      classRead,
@@ -171,6 +173,22 @@ type matrixEnv struct {
 	store *auth.Store
 	srv   *mbp.Server
 	addr  string
+
+	// The engine's own storage and trigger system, for tests that look at
+	// what is registered rather than at what a client was told.
+	pstore   *storage.PebbleStore
+	triggers *trigger.TriggerSystem
+}
+
+// subscriptionIDs returns the ids of the subscriptions registered for a vault.
+func (e *matrixEnv) subscriptionIDs(vault string) []string {
+	ws := e.pstore.ResolveVaultPrefix(vault)
+	var ids []string
+	for _, sub := range e.triggers.ForVault(binary.BigEndian.Uint32(ws[:4])) {
+		ids = append(ids, sub.ID)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // newMatrixEnv starts a real MBP server on an ephemeral loopback port, backed
@@ -202,12 +220,13 @@ func newMatrixEnvTLS(t testing.TB, tlsConfig *tls.Config, configure func(*mbp.Se
 	ftsIdx := fts.New(db)
 	embedder := activation.NewNoopEmbedder()
 	authStore := auth.NewStore(db)
+	triggers := trigger.New(store, trigger.NewFTSAdapter(ftsIdx), nil, embedder)
 	eng := engine.NewEngine(engine.EngineConfig{
 		Store:            store,
 		AuthStore:        authStore,
 		FTSIndex:         ftsIdx,
 		ActivationEngine: activation.New(store, activation.NewFTSAdapter(ftsIdx), nil, embedder),
-		TriggerSystem:    trigger.New(store, trigger.NewFTSAdapter(ftsIdx), nil, embedder),
+		TriggerSystem:    triggers,
 		Embedder:         embedder,
 	})
 	t.Cleanup(func() {
@@ -240,7 +259,7 @@ func newMatrixEnvTLS(t testing.TB, tlsConfig *tls.Config, configure func(*mbp.Se
 		case <-ctx.Done():
 		}
 	})
-	return &matrixEnv{eng: eng, rec: rec, store: authStore, srv: srv, addr: addr}
+	return &matrixEnv{eng: eng, rec: rec, store: authStore, srv: srv, addr: addr, pstore: store, triggers: triggers}
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +378,11 @@ type cell struct {
 	memory, other string // ids of memories seeded for this cell
 	content       string // what `memory` holds
 	subID         string
+
+	// client, when set, is the connection the cell's frame will be sent on. An
+	// operation that needs something only that connection can own — a
+	// subscription — makes it there.
+	client *mbpClient
 }
 
 var cellSeq struct {
@@ -550,6 +574,18 @@ var matrixOps = []matrixOp{
 	{
 		name: "UNSUB", frame: mbp.TypeUnsub, okFrame: mbp.TypeUnsubOK, engineCall: "Unsubscribe",
 		request: func(c *cell) any {
+			// UNSUB reaches only a subscription made on the same connection
+			// (SEC-26), so the one to end is made there when the session may
+			// subscribe at all.
+			if c.client != nil {
+				if id, _ := c.client.subscribe(c.vault, ""); id != "" {
+					c.subID = id
+					return &mbp.UnsubscribeRequest{SubID: c.subID}
+				}
+			}
+			// A session that may not subscribe has none of its own. It is
+			// given the id of one held elsewhere, which it must not be able
+			// to end either.
 			sub, err := c.env.eng.Subscribe(fullCtx(), &mbp.SubscribeRequest{Vault: c.vault, Context: []string{"tug roster"}, TTL: 60})
 			if err != nil {
 				c.t.Fatalf("seed a subscription: %v", err)
@@ -558,7 +594,15 @@ var matrixOps = []matrixOp{
 			c.t.Cleanup(func() { _ = c.env.eng.Unsubscribe(fullCtx(), sub.SubID) })
 			return &mbp.UnsubscribeRequest{SubID: c.subID}
 		},
-		check: func(*cell, reply, bool) {},
+		check: func(c *cell, _ reply, went bool) {
+			still := false
+			for _, id := range c.env.subscriptionIDs(c.vault) {
+				still = still || id == c.subID
+			}
+			if still == went {
+				c.t.Errorf("subscription still registered = %v; want %v", still, !went)
+			}
+		},
 	},
 	{
 		name: "LINK", frame: mbp.TypeLink, okFrame: mbp.TypeLinkOK, engineCall: "Link", modifiesExisting: true,
@@ -700,6 +744,7 @@ func TestCredentialModeMatrix(t *testing.T) {
 						t.Fatalf("frame 0x%02x has a row but no class in wantFrameClasses", op.frame)
 					}
 					c := newCell(t, env, p.vault)
+					c.client = client
 					req := op.request(c)
 
 					// What should happen.

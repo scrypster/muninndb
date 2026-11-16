@@ -3812,11 +3812,12 @@ func (e *Engine) Subscribe(ctx context.Context, req *mbp.SubscribeRequest) (*mbp
 // function that is called (in a goroutine by DeliveryRouter) on every push.
 // Returns the subscription ID. Pass deliver=nil to register without a delivery
 // function (useful for MBP clients that pull via the stream).
+//
+// The id is always chosen here, a fresh random one. req.SubscriptionID is
+// ignored: ids are one namespace across every vault, so an id a client could
+// choose is an id it could choose to be somebody else's (SEC-26).
 func (e *Engine) SubscribeWithDeliver(ctx context.Context, req *mbp.SubscribeRequest, deliver trigger.DeliverFunc) (string, error) {
-	subID := req.SubscriptionID
-	if subID == "" {
-		subID = uuid.New().String()
-	}
+	subID := uuid.New().String()
 
 	// Resolve vault to a routing uint32 using the same BigEndian convention
 	// already used in storage/impl.go (binary.BigEndian.Uint32(wsPrefix[:4])).

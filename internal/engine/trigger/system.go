@@ -22,6 +22,10 @@ type TriggerConfig struct {
 var (
 	ErrVaultSubscriptionLimitReached  = errors.New("trigger: per-vault subscription limit reached")
 	ErrGlobalSubscriptionLimitReached = errors.New("trigger: global subscription limit reached")
+	// ErrSubscriptionIDTaken is returned when a subscription is offered under an
+	// id that is already registered. The engine assigns ids itself, so this is
+	// a bug in a caller, never something a client can cause.
+	ErrSubscriptionIDTaken = errors.New("trigger: subscription id already registered")
 )
 
 const (
@@ -498,7 +502,9 @@ func (ts *TriggerSystem) Subscribe(sub *Subscription) error {
 		}
 	}
 
-	ts.registry.Add(sub)
+	if !ts.registry.Add(sub) {
+		return ErrSubscriptionIDTaken
+	}
 	return nil
 }
 
