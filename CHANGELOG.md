@@ -444,12 +444,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be open (`PUT /api/admin/vaults/config`).
   **What changed:** with a key, or with no credential on a public vault, the list is now
   the caller's own vault only. The admin session still gets every vault, so the web
-  console is unchanged. `muninn vault list` used the unauthenticated list. It now signs
-  in as admin first, with `-u`/`-p` if given and otherwise with the default credentials.
-  If it cannot sign in, it lists what the server will tell it and says that this is not
-  every vault. It does not prompt unless you pass `-p`. Scripts that ran
-  `muninn vault list` against a server whose admin password has been changed need
-  `-u <user> --password=<pw>` to get the full list. SDK `list vaults` calls made with a
+  console is unchanged. `muninn vault list` and `muninn show vaults` used the
+  unauthenticated list. They now sign in as admin first, `muninn vault list` with
+  `-u`/`-p` if given, and otherwise both with the default credentials. If the sign-in
+  fails, the command lists what the server will tell it, which is the `default` vault
+  and only when that vault is public, and says that this is not every vault. Other
+  public vaults are not listed without a sign-in. Neither command prompts unless you
+  pass `-p`. Scripts that ran `muninn vault list` against a server whose admin password
+  has been changed need `-u <user> --password=<pw>` to get the full list. The
+  interactive shell signs in when it starts and lists every vault, as before. SDK
+  `list vaults` calls made with a
   key now return one name. `openapi.yaml` describes the scoping, and documents the
   response as the JSON array the server has always sent (SEC-25).
 

@@ -55,7 +55,7 @@ func TestVaultList_ListsEveryVaultWithTheAdminSession(t *testing.T) {
 			t.Errorf("vault %q is missing from the list:\n%s", vault, out)
 		}
 	}
-	if strings.Contains(out, "without an admin session") {
+	if strings.Contains(out, "Not signed in") {
 		t.Errorf("signed in, yet the output says the list is the short one:\n%s", out)
 	}
 }
@@ -73,7 +73,7 @@ func TestVaultList_SaysSoWhenTheListIsTheShortOne(t *testing.T) {
 	if strings.Contains(out, "pilot-station") {
 		t.Errorf("a vault the server did not list appeared:\n%s", out)
 	}
-	if !strings.Contains(out, "without an admin session") || !strings.Contains(out, "muninn vault list -u") {
+	if !strings.Contains(out, "Not signed in as admin") || !strings.Contains(out, "muninn vault list -u") {
 		t.Errorf("the output does not say the list is short, or how to get the full one:\n%s", out)
 	}
 }

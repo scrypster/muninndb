@@ -62,7 +62,10 @@ func isTLSCertError(err error) bool {
 	return errors.As(err, &certErr)
 }
 
-func (r *replState) cmdShowVaults() {
+// cmdShowVaults prints the vaults the server lists to this caller. It reports
+// whether the server answered at all, so a caller can tell a short list from
+// no list.
+func (r *replState) cmdShowVaults() (answered bool) {
 	addrs, _ := readAddrsFile(defaultDataDir())
 	restPort := "8475"
 	if addrs.RestAddr != "" {
@@ -79,7 +82,7 @@ func (r *replState) cmdShowVaults() {
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return
+		return false
 	}
 	if r.sessionCookie != "" {
 		// The server reads the admin session from "muninn_session". Under any
@@ -93,11 +96,11 @@ func (r *replState) cmdShowVaults() {
 			fmt.Fprintf(os.Stderr, "Error: TLS certificate verification failed for %s: %v\n", apiURL, err)
 			fmt.Println("The server's certificate is not trusted. Install its CA into the system")
 			fmt.Println("trust store, or point MUNINNDB_ADMIN_URL at a loopback address.")
-			return
+			return false
 		}
 		fmt.Fprintf(os.Stderr, "Error connecting to server: %v\n", err)
 		fmt.Println("Is muninn running? Try: muninn start")
-		return
+		return false
 	}
 	defer resp.Body.Close()
 
@@ -106,13 +109,13 @@ func (r *replState) cmdShowVaults() {
 		fmt.Println("  default   (built-in)")
 		fmt.Println()
 		fmt.Printf("  For full vault list, open: %s\n", webUIDisplay(addrs)[0])
-		return
+		return true
 	}
 
 	var result any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
-		return
+		return true
 	}
 
 	// The API may return []string, []vault, or {vaults: []} — handle all forms.
@@ -144,12 +147,12 @@ func (r *replState) cmdShowVaults() {
 	if len(vaults) == 0 && len(vaultNames) == 0 {
 		fmt.Println("  No vaults found.")
 		fmt.Println("  Vaults are created automatically when your AI tools store their first memory.")
-		return
+		return true
 	}
 
 	if len(vaults) > 0 {
 		formatVaultTable(vaults)
-		return
+		return true
 	}
 
 	// String-only vault list — filter out test vaults and display cleanly.
@@ -168,6 +171,7 @@ func (r *replState) cmdShowVaults() {
 	if userVaults == 0 && testVaults > 0 {
 		fmt.Println("  No user vaults found (only test vaults).")
 	}
+	return true
 }
 
 func (r *replState) cmdShowMemories() {
@@ -416,9 +420,19 @@ func isEmptyMCPResult(result map[string]any) bool {
 	return trimmed == "" || trimmed == "[]" || trimmed == "{}" || trimmed == "null"
 }
 
+// runShowVaults is `muninn show vaults` outside the shell. Every vault is an
+// admin's answer (SEC-25), so it signs in the way `muninn vault list` does when
+// that needs no prompt, with the default credentials, and says so when the
+// list it printed is not every vault.
 func runShowVaults() {
 	r := &replState{mcpURL: "http://127.0.0.1:8750"}
-	r.cmdShowVaults()
+	signedIn := signInForVaultList("root", "", false)
+	r.sessionCookie = vaultCookie
+	if answered := r.cmdShowVaults(); answered && !signedIn {
+		fmt.Println()
+		fmt.Println("  Not signed in as admin, so this is not every vault.")
+		fmt.Println("  To list every vault: muninn vault list -u <admin user> -p")
+	}
 }
 
 // prettyPrint extracts text content from an MCP result and prints it.

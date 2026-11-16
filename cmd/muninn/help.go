@@ -242,7 +242,7 @@ var subcommandHelp = map[string]func(){
 		printSubcommandUsage("vault", "vault management", "muninn vault <command> [flags]",
 			[][2]string{
 				{"create <name> [--public]", "Create and register a new vault"},
-				{"list [--pattern <glob>]", "List all vaults (with optional glob filter)"},
+				{"list [--pattern <glob>]", "List vaults, every vault when signed in as admin (optional glob filter)"},
 				{"delete <name> [--yes] [--force]", "Delete a vault and all its memories"},
 				{"clear <name> [--yes] [--force]", "Remove all memories from a vault"},
 				{"clone <source> <new-name>", "Clone a vault into a new vault"},
@@ -384,7 +384,7 @@ func printHelp() {
 	fmt.Printf("  %-32s %s\n", cyan("muninn logs"), "Show last 25 lines + tail")
 	fmt.Printf("  %-32s %s\n", cyan("muninn logs 50"), "Show last 50 lines + tail")
 	fmt.Printf("  %-32s %s\n", cyan("muninn logs --no-follow"), "Print recent lines and exit")
-	fmt.Printf("  %-32s %s\n", cyan("muninn show vaults"), "List all vaults (requires server running)")
+	fmt.Printf("  %-32s %s\n", cyan("muninn show vaults"), "List vaults, every vault when signed in as admin (requires server running)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn vault <command>"), "Vault management (create, list, delete, clear, clone, merge, export, import)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn api-key <command>"), "API key management (create, list, revoke)")
 	fmt.Printf("  %-32s %s\n", cyan("muninn admin change-password"), "Change the admin password")

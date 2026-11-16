@@ -24,7 +24,7 @@ func printVaultUsage() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  create      <name> [--public]                    Create and register a new vault")
-	fmt.Println("  list        [--pattern <glob>]                   List all vaults")
+	fmt.Println("  list        [--pattern <glob>]                   List vaults (every vault when signed in as admin)")
 	fmt.Println("  delete      <name> [--yes] [--force]             Delete a vault and all its memories")
 	fmt.Println("  clear       <name> [--yes] [--force]             Remove all memories from a vault")
 	fmt.Println("  clone       <source> <new-name>                  Clone a vault into a new vault")
@@ -71,12 +71,7 @@ func runVault(args []string) {
 	// one. It never prompts unless -p asked it to.
 	if sub == "list" {
 		signedIn := signInForVaultList(username, password, prompted)
-		runVaultList(subArgs)
-		if !signedIn {
-			fmt.Println()
-			fmt.Println("Listed without an admin session: only vaults open to anyone are shown.")
-			fmt.Println("To list every vault: muninn vault list -u <admin user> -p")
-		}
+		printVaultListNotice(signedIn, runVaultList(subArgs))
 		return
 	}
 
@@ -230,7 +225,47 @@ func runVaultClear(args []string) {
 // vault list
 // ---------------------------------------------------------------------------
 
-func runVaultList(args []string) {
+// vaultListOutcome is what happened when `vault list` asked the server.
+type vaultListOutcome int
+
+const (
+	vaultsListed         vaultListOutcome = iota // the server answered with a list, which was printed
+	vaultListRefused                             // 401: the server lists nothing to this caller
+	vaultListUnreachable                         // the server could not be reached
+	vaultListFailed                              // any other failure, already reported
+)
+
+// printVaultListNotice says what the list just printed is, when it is not
+// every vault. Each line is true of the case it is printed in:
+//
+//   - Signed in as admin, the list is complete and there is nothing to add.
+//   - Not signed in, the server answers a caller with no credential with the
+//     ONE vault that request is on, the default vault, and only when that vault
+//     is public (SEC-25). It is not "the public vaults": another public vault
+//     is not listed either.
+//   - Not signed in with the default vault locked, the server lists nothing.
+//   - When the server was not reached, or failed some other way, nothing was
+//     listed and the error already printed is the whole story.
+func printVaultListNotice(signedIn bool, outcome vaultListOutcome) {
+	if signedIn {
+		return
+	}
+	const howTo = "To list every vault: muninn vault list -u <admin user> -p"
+	switch outcome {
+	case vaultsListed:
+		fmt.Println()
+		fmt.Println("Not signed in as admin, so this is not every vault. Without a sign-in the")
+		fmt.Println("server lists only the default vault, and only because it is public. No")
+		fmt.Println("other vault is listed, public ones included.")
+		fmt.Println(howTo)
+	case vaultListRefused:
+		fmt.Println("Not signed in as admin, and the default vault is not public, so the server")
+		fmt.Println("lists no vaults to this command.")
+		fmt.Println(howTo)
+	}
+}
+
+func runVaultList(args []string) vaultListOutcome {
 	var pattern string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -252,19 +287,25 @@ func runVaultList(args []string) {
 	if err != nil {
 		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
 		fmt.Println("Is muninn running? Try: muninn status")
-		return
+		return vaultListUnreachable
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		// Not an error to report by number: the server lists nothing to a caller
+		// it has no session for when the default vault is locked. The caller
+		// says so (printVaultListNotice).
+		return vaultListRefused
+	}
 	if resp.StatusCode != http.StatusOK {
 		fmt.Printf("Error: HTTP %d\n", resp.StatusCode)
-		return
+		return vaultListFailed
 	}
 
 	var raw json.RawMessage
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		fmt.Printf("Error parsing response: %v\n", err)
-		return
+		return vaultListFailed
 	}
 
 	var names []string
@@ -277,7 +318,7 @@ func runVaultList(args []string) {
 
 	if len(names) == 0 {
 		fmt.Println("No vaults found.")
-		return
+		return vaultsListed
 	}
 
 	var matched int
@@ -297,6 +338,7 @@ func runVaultList(args []string) {
 	} else {
 		fmt.Printf("\n  %d vault(s)\n", matched)
 	}
+	return vaultsListed
 }
 
 // parseVaultArgs parses: <name> [--yes|-y] [--force|-f]

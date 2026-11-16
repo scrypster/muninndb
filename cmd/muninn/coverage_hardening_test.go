@@ -860,10 +860,21 @@ func TestPrintHTTPError_NoMessage(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRunShowVaults_NoServer(t *testing.T) {
+	// Nothing may answer. Left at its defaults the command asks whatever is on
+	// ports 8475 and 8476, which on a developer's machine is their own daemon:
+	// a vault-list request and, now that the command signs in, a login with the
+	// default credentials. Port 0 is never a listener.
+	t.Setenv("MUNINNDB_ADMIN_URL", "http://127.0.0.1:0")
+	oldUI, oldCookie := vaultUIBase, vaultCookie
+	vaultUIBase, vaultCookie = "http://127.0.0.1:0", ""
+	defer func() { vaultUIBase, vaultCookie = oldUI, oldCookie }()
+
 	out := captureStdout(func() {
 		runShowVaults()
 	})
-	_ = out
+	if strings.Contains(out, "Not signed in") || strings.Contains(out, "muninn vault list -u") {
+		t.Errorf("the server was never reached and nothing was listed, yet the output talks about the list:\n%s", out)
+	}
 }
 
 // ---------------------------------------------------------------------------
