@@ -2,8 +2,6 @@ package provenance
 
 import (
 	"context"
-	"os"
-	"regexp"
 	"testing"
 	"time"
 )
@@ -86,27 +84,75 @@ func TestOrigin_UnknownWhenOnlyUpdatesOrNothing(t *testing.T) {
 	}
 }
 
-// Census: every operation the storage layer writes when it CHANGES an existing
-// engram must be classified as an update here, or Origin would mistake a later
-// touch for the engram's source. internal/storage/engram.go holds the update
-// writers; a new one added there with an unclassified operation fails this.
-func TestIsUpdateOperation_CoversEveryUpdateTheStorageLayerWrites(t *testing.T) {
-	src, err := os.ReadFile("../storage/engram.go")
-	if err != nil {
-		t.Fatalf("read storage/engram.go: %v", err)
+// The list of creating operations is closed. An operation Origin has never
+// heard of must not be taken for an engram's source: before this, any operation
+// that was not a known update counted as an origin, so a new kind of update
+// would have been reported as where the memory came from.
+func TestOrigin_AnUnknownOperationIsNeverTheOrigin(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx := context.Background()
+	ws := [8]byte{1}
+	t0 := time.Unix(1_700_000_000, 0)
+
+	// Only an operation nobody has classified: the origin is unknown.
+	alone := [16]byte{12}
+	if err := s.Append(ctx, ws, alone, ProvenanceEntry{Timestamp: t0, Source: SourceInferred, Operation: "update-tags"}); err != nil {
+		t.Fatal(err)
 	}
-	found := regexp.MustCompile(`Operation:\s+"([a-z-]+)"`).FindAllStringSubmatch(string(src), -1)
-	if len(found) < 4 {
-		t.Fatalf("found %d operation literals in storage/engram.go, expected at least 4: the census lost its input", len(found))
+	if got, ok, err := s.Origin(ctx, ws, alone); err != nil || ok {
+		t.Errorf("unclassified operation alone: got %+v ok=%v err=%v, want ok=false", got, ok, err)
 	}
-	for _, m := range found {
-		if !IsUpdateOperation(m[1]) {
-			t.Errorf("storage/engram.go writes operation %q, which is not classified as an update: Origin would treat it as an engram's source", m[1])
+
+	// The same operation sorting before the creating entry: the creating entry
+	// is still the origin.
+	both := [16]byte{13}
+	if err := s.Append(ctx, ws, both, ProvenanceEntry{Timestamp: t0, Source: SourceInferred, Operation: "update-tags"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(ctx, ws, both, ProvenanceEntry{Timestamp: t0.Add(time.Minute), Source: SourceDocument, Operation: "create"}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.Origin(ctx, ws, both)
+	if err != nil || !ok {
+		t.Fatalf("Origin: ok=%v err=%v", ok, err)
+	}
+	if got.Operation != "create" || got.Source != SourceDocument {
+		t.Errorf("Origin = %+v, want the create entry (document)", got)
+	}
+}
+
+// If a log ever holds two creating entries, the earliest is the origin.
+func TestOrigin_TheEarliestCreatingEntryWins(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx := context.Background()
+	ws := [8]byte{1}
+	id := [16]byte{14}
+	t0 := time.Unix(1_700_000_000, 0)
+
+	if err := s.Append(ctx, ws, id, ProvenanceEntry{Timestamp: t0, Source: SourceDocument, Operation: "create"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(ctx, ws, id, ProvenanceEntry{Timestamp: t0.Add(time.Hour), Source: SourceExternal, Operation: "evolve"}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.Origin(ctx, ws, id)
+	if err != nil || !ok {
+		t.Fatalf("Origin: ok=%v err=%v", ok, err)
+	}
+	if got.Operation != "create" || got.Source != SourceDocument {
+		t.Errorf("Origin = %+v, want the earlier create entry", got)
+	}
+}
+
+func TestIsOriginOperation_IsAClosedList(t *testing.T) {
+	for _, op := range []string{"create", "evolve"} {
+		if !IsOriginOperation(op) {
+			t.Errorf("%q must be a creating operation", op)
 		}
 	}
-	for _, op := range []string{"create", "evolve", "merge", "promote", ""} {
-		if IsUpdateOperation(op) {
-			t.Errorf("%q must not be classified as an update", op)
+	for _, op := range []string{"update-meta", "update-relevance", "update-trust", "stamp-valid-until", "update-tags", "merge", "promote", ""} {
+		if IsOriginOperation(op) {
+			t.Errorf("%q must not be a creating operation", op)
 		}
 	}
 }

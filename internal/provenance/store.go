@@ -44,27 +44,30 @@ func (s *Store) Append(ctx context.Context, ws [8]byte, id [16]byte, entry Prove
 	return s.db.Set(key, data, pebble.Sync)
 }
 
-// updateOperations are the operations that change an engram that already
-// exists. Every other operation is one that brought an engram into being
-// (create, evolve, and whatever is added later).
-var updateOperations = map[string]struct{}{
-	"update-meta":       {},
-	"update-relevance":  {},
-	"update-trust":      {},
-	"stamp-valid-until": {},
+// originOperations are the operations that bring an engram into being: a
+// first write, and the new version an evolve writes under a new id. The list is
+// closed on purpose. An operation it does not name is never taken for an
+// engram's origin, so a kind of update added later cannot be mistaken for one;
+// the cost of forgetting to add a new creating operation here is an origin
+// reported as unknown, not a wrong one. (The feedback label reader in the
+// engine keeps the same two names.)
+var originOperations = map[string]struct{}{
+	"create": {},
+	"evolve": {},
 }
 
-// IsUpdateOperation reports whether op records a change to an engram that
-// already existed, as opposed to the write that created it.
-func IsUpdateOperation(op string) bool {
-	_, ok := updateOperations[op]
+// IsOriginOperation reports whether op records the write that brought an
+// engram into being, as opposed to anything done to it afterwards.
+func IsOriginOperation(op string) bool {
+	_, ok := originOperations[op]
 	return ok
 }
 
 // Origin returns the entry that brought the engram into being: the earliest
-// entry whose operation is not an update. ok is false when there is no such
-// entry (no provenance at all, or only updates, as for a record older than its
-// audit trail); nothing is then known about where the engram came from.
+// entry whose operation is a creating one (IsOriginOperation). ok is false when
+// there is no such entry (no provenance at all, or only later changes, as for a
+// record older than its audit trail); nothing is then known about where the
+// engram came from.
 //
 // Entries are keyed by timestamp and the creating entry is stamped with the
 // engram's CreatedAt, so it is normally the first key and the scan stops
@@ -89,7 +92,7 @@ func (s *Store) Origin(ctx context.Context, ws [8]byte, id [16]byte) (Provenance
 			slog.Warn("provenance: skipping corrupt entry", "err", err)
 			continue
 		}
-		if !IsUpdateOperation(e.Operation) {
+		if IsOriginOperation(e.Operation) {
 			return e, true, nil
 		}
 	}
