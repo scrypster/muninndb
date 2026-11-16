@@ -80,6 +80,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. A pre-upgrade binary also refuses to open a migrated data directory
   outright.
 
+- Swift SDK: `writeBatch` no longer fails on every successful batch. The SDK expected each
+  item of the response to carry `created_at`, which the server has never sent, so decoding
+  threw `keyNotFound` after the memories had already been stored. `BatchWriteResult` now has
+  the fields the server sends and the other SDKs already read: `index`, `id` (absent for a
+  refused item), `status` (`ok` or `error`) and `error`. Code that read `createdAt` from a
+  batch result must drop it, and `id` is now optional. `openapi.yaml` described the batch
+  response the same wrong way (a list of single-write responses plus an `errors` array) and
+  now describes what the server sends.
+
 - Cluster: stopping the coordinator now ends and waits for the periodic replication-log prune.
   It used to end only when the process's run context was cancelled, so a prune still running
   when the store was closed next panicked with "pebble: closed". Seen killing a test run under
