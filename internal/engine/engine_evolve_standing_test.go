@@ -298,7 +298,10 @@ func TestEvolve_TrustUnsetNormalizesToInferred(t *testing.T) {
 		t.Fatalf("Evolve: %v", err)
 	}
 	if got := readEngram(t, eng, "trailwork", newID.String()).Trust; got != storage.TrustInferred {
-		t.Errorf("successor trust = %v, want inferred (TrustUnset normalizes on carry)", got)
+		// %d, not %v: TrustUnset also DISPLAYS as "inferred", so the label alone
+		// reads "inferred, want inferred" when the normalization is missing.
+		t.Errorf("successor trust byte = %d, want %d (TrustInferred; TrustUnset normalizes on carry)",
+			got, storage.TrustInferred)
 	}
 }
 
@@ -425,6 +428,61 @@ func TestUpsertEvolve_VerifiedStillGated(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("upsert-evolve accepted trust=verified under an observe credential (id %s)", first.ID)
+	}
+}
+
+// TestUpsertEvolve_ExplicitStandingOverridesInherited is the discriminating
+// half of TestUpsertEvolve_HonorsExplicitTrust. That test re-syncs with the
+// SAME trust and confidence the predecessor already holds, so once inheritance
+// exists it passes whether or not writeUpsert forwards the caller's values —
+// carried and honored are indistinguishable there (shown by deleting the
+// pass-through: it stays green). Here the re-sync asserts values that DIFFER
+// from the predecessor's, so only the forwarded request can produce them.
+func TestUpsertEvolve_ExplicitStandingOverridesInherited(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := withMode(auth.ModeWrite)
+
+	first, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:        "trailwork",
+		Concept:      "Gate latch condition",
+		Content:      "The Fernbrook stock gate latch was replaced in spring.",
+		IdempotentID: "gate-latch",
+		UpsertMode:   true,
+		Trust:        "verified",
+		Confidence:   0.8,
+	})
+	if err != nil {
+		t.Fatalf("upsert create: %v", err)
+	}
+	pre := readEngram(t, eng, "trailwork", first.ID)
+	if pre.Trust != storage.TrustVerified || pre.Confidence < 0.799 || pre.Confidence > 0.801 {
+		t.Fatalf("premise not reproduced: predecessor trust=%v confidence=%v, want verified/0.8",
+			pre.Trust, pre.Confidence)
+	}
+
+	second, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:        "trailwork",
+		Content:      "A hiker reports the Fernbrook stock gate latch is sticking again.",
+		IdempotentID: "gate-latch",
+		UpsertMode:   true,
+		Trust:        "external",
+		Confidence:   0.6,
+	})
+	if err != nil {
+		t.Fatalf("upsert evolve: %v", err)
+	}
+	if second.Hint != "upsert-evolved" {
+		t.Fatalf("premise not reproduced: hint = %q, want upsert-evolved", second.Hint)
+	}
+	got := readEngram(t, eng, "trailwork", second.ID)
+	if got.Trust != storage.TrustExternal {
+		t.Errorf("upsert-evolve trust = %d (%s), want external: the request's explicit trust lost "+
+			"to the predecessor's inherited level", got.Trust, got.Trust.String())
+	}
+	if got.Confidence < 0.599 || got.Confidence > 0.601 {
+		t.Errorf("upsert-evolve confidence = %v, want 0.6: the request's explicit confidence lost "+
+			"to the predecessor's inherited value", got.Confidence)
 	}
 }
 
@@ -574,6 +632,62 @@ func TestEvolve_FieldCensus(t *testing.T) {
 		t.Fatalf("fixture is not discriminating: predecessor trust=%v confidence=%v are the "+
 			"values the old hardcodes produced, so this test would pass either way",
 			pre.Trust, pre.Confidence)
+	}
+}
+
+// TestConsolidate_KnownResidual_DoesNotCarryStanding is a PINNED KNOWN RESIDUAL:
+// it passes while the gap exists and FAILS WHEN IT IS FIXED, so the fix has to
+// amend COG-37 with it.
+//
+// COG-37's rule is written for every content-replacing verb. Engine.Consolidate
+// is one (#779), and it does not obey the rule yet: it builds the merged memory
+// through Engine.Write with no trust and no confidence, so the result is
+// inferred/1.0 whatever its sources held. Merging a memory flagged untrusted
+// therefore still clears the flag — the laundering #872 closed on evolve, by the
+// neighbouring verb. Deliberately not fixed with evolve: a many-to-one join
+// needs its own rule (which source's standing wins?) and that is a design
+// decision, not a carry.
+func TestConsolidate_KnownResidual_DoesNotCarryStanding(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := withMode(auth.ModeWrite)
+
+	flagged, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:      "trailwork",
+		Concept:    "Footbridge load rating",
+		Content:    "Someone said the Larkspur footbridge is rated for pack animals.",
+		Trust:      "untrusted",
+		Confidence: 0.4,
+	})
+	if err != nil {
+		t.Fatalf("Write flagged: %v", err)
+	}
+	other, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault:   "trailwork",
+		Concept: "Footbridge span",
+		Content: "The Larkspur footbridge spans eleven metres.",
+	})
+	if err != nil {
+		t.Fatalf("Write other: %v", err)
+	}
+	if pre := readEngram(t, eng, "trailwork", flagged.ID); pre.Trust != storage.TrustUntrusted ||
+		pre.Confidence < 0.399 || pre.Confidence > 0.401 {
+		t.Fatalf("premise not reproduced: source trust=%v confidence=%v, want untrusted/0.4",
+			pre.Trust, pre.Confidence)
+	}
+
+	res, err := eng.Consolidate(ctx, "trailwork", []string{flagged.ID, other.ID},
+		"The Larkspur footbridge spans eleven metres and is said to be rated for pack animals.")
+	if err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	merged := readEngram(t, eng, "trailwork", res.MergedID.String())
+
+	if merged.Trust != storage.TrustInferred || merged.Confidence < 0.999 {
+		t.Fatalf("KNOWN RESIDUAL APPEARS FIXED: the merged memory has trust=%d (%s) confidence=%v, "+
+			"no longer the inferred/1.0 Consolidate used to mint. Replace this test with one that "+
+			"pins the new join rule and remove the Consolidate residual from COG-37.",
+			merged.Trust, merged.Trust.String(), merged.Confidence)
 	}
 }
 
