@@ -633,6 +633,41 @@ type enrichInitFailure struct {
 	err  error  // the init/parse error
 }
 
+// maxUnconfiguredVaultsShown bounds the names in the startup notice so one
+// line stays one line on a server with hundreds of vaults.
+const maxUnconfiguredVaultsShown = 20
+
+// logUnconfiguredVaults reports, in ONE line at INFO, which vaults have no
+// explicit access policy. Those vaults take the fail-closed default (an API key
+// is required). That is the secure state and not a fault, so it is stated once
+// with the count and the names instead of one WARN per vault on every start.
+// It is WARN only when the list could not be built, because then the operator
+// has been told nothing.
+func logUnconfiguredVaults(listVaults func() ([]string, error), unconfigured func([]string) ([]string, error)) {
+	const hint = "use muninn api-key create to grant access"
+	names, err := listVaults()
+	if err != nil {
+		slog.Warn("vault fail-closed: could not list vaults to report which have no explicit access policy; unconfigured vaults require an API key", "err", err)
+		return
+	}
+	locked, err := unconfigured(names)
+	if err != nil {
+		slog.Warn("vault fail-closed: could not read vault configs to report which vaults have no explicit access policy; unconfigured vaults require an API key", "err", err)
+		return
+	}
+	if len(locked) == 0 {
+		slog.Info("vault fail-closed: unconfigured vaults require an API key; every vault on this server has an explicit access policy", "vaults", len(names))
+		return
+	}
+	shown := locked
+	if len(shown) > maxUnconfiguredVaultsShown {
+		shown = shown[:maxUnconfiguredVaultsShown]
+	}
+	slog.Info("vault fail-closed: unconfigured vaults require an API key; "+hint,
+		"unconfigured", len(locked), "of", len(names),
+		"names", strings.Join(shown, ", "), "names_not_shown", len(locked)-len(shown))
+}
+
 // buildEnricher constructs an EnrichService. Priority:
 //  1. MUNINN_ENRICH_URL env var
 //  2. Saved plugin_config.json (cfg parameter)
@@ -1891,7 +1926,7 @@ func runServer() {
 	}
 	slog.Info("UI server listening", "addr", *uiAddr)
 
-	slog.Info("vault fail-closed: unconfigured vaults require an API key; use muninn api-key create to grant access")
+	logUnconfiguredVaults(store.ListVaultNames, authStore.UnconfiguredVaults)
 
 	// Upgrade notice: warn operators if data exists but no vault configs are set.
 	// This detects the scenario where an operator upgraded from a version that
