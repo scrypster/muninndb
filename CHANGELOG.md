@@ -25,10 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   afterwards. Per-vault `write_twin_threshold` overrides the model hint (bge-small: 0.93).
 - A metric for memories stored without a summary:
   `muninndb_engine_writes_missing_field_total{vault,field}` counts writes that stored with an
-  empty `summary` at write time. Divided by `muninndb_engine_writes_total` it shows how fast a
-  vault accumulates them, which is otherwise silent on a deployment with no summarize stage.
-  Vaults with `inline_enrichment: background_only` are not counted, since a background stage
-  owns the summary there. Tree writes and the upsert-evolve path are not covered.
+  empty `summary` at write time, which is otherwise silent on a deployment with no summarize
+  stage. The per-vault series show which vault such writes come from.
+  `muninndb_engine_writes_total` has no vault label, so a ratio is server-wide only: sum the
+  new metric across vaults before dividing. Vaults with `inline_enrichment: background_only`
+  are not counted, since a background stage owns the summary there, but their writes are in
+  that total, so the ratio reads low on a server that has such vaults. Tree writes and the
+  upsert-evolve path are not covered.
 
 ### Fixed
 
