@@ -130,6 +130,18 @@ type ClusterCoordinator struct {
 	// startStreamerForLobe starts nothing: a streamer started after Stop has
 	// begun its join would be neither cancelled nor waited for.
 	streamersStopped bool
+
+	// pruneStop and pruneWG let Stop end and join the periodic prune loop
+	// (startPeriodicPrune). The loop is otherwise ended only by Run's context,
+	// which Stop does not own, and a tick still running when the caller closes
+	// the store panics with "pebble: closed" inside the prune's compaction.
+	// pruneStopped latches in Stop under pruneMu, the same way
+	// streamersStopped does: a loop started after Stop has begun its wait
+	// would be neither ended nor waited for.
+	pruneStop    chan struct{}
+	pruneMu      sync.Mutex
+	pruneStopped bool
+	pruneWG      sync.WaitGroup
 	// streamerBeforeRead is handed to every NetworkStreamer this coordinator
 	// starts (NetworkStreamer.beforeRead). Test seam; nil in production.
 	streamerBeforeRead func()
@@ -248,6 +260,7 @@ func NewClusterCoordinator(
 	}
 
 	c := &ClusterCoordinator{
+		pruneStop:     make(chan struct{}),
 		cfg:           cfg,
 		repLog:        repLog,
 		applier:       applier,
@@ -1627,6 +1640,17 @@ func (c *ClusterCoordinator) Stop() error {
 	err := c.mgr.Close()
 
 	c.streamerWG.Wait()
+
+	// End the periodic prune loop and wait for it, including a tick that is
+	// in the middle of a delete and compaction: the caller closes the store
+	// next.
+	c.pruneMu.Lock()
+	if !c.pruneStopped {
+		c.pruneStopped = true
+		close(c.pruneStop)
+	}
+	c.pruneMu.Unlock()
+	c.pruneWG.Wait()
 	return err
 }
 
@@ -2501,7 +2525,15 @@ func (c *ClusterCoordinator) startPeriodicPrune(ctx context.Context) {
 	if c.mol == nil && c.repLog == nil {
 		return
 	}
+	c.pruneMu.Lock()
+	if c.pruneStopped {
+		c.pruneMu.Unlock()
+		return
+	}
+	c.pruneWG.Add(1)
+	c.pruneMu.Unlock()
 	go func() {
+		defer c.pruneWG.Done()
 		pruneInterval := time.Duration(c.cfg.PruneIntervalSec) * time.Second
 		if pruneInterval <= 0 {
 			pruneInterval = 60 * time.Second
@@ -2511,6 +2543,8 @@ func (c *ClusterCoordinator) startPeriodicPrune(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-c.pruneStop:
 				return
 			case <-ticker.C:
 				if !c.IsLeader() {
