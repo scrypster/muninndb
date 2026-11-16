@@ -36,7 +36,14 @@ import (
 // ---------------------------------------------------------------------------
 
 type cfEnv struct {
-	t     *testing.T
+	t *testing.T
+	// now is the one instant this env lives at: fixtures are written relative
+	// to it, the activation log is primed at it, and scoring reads it instead
+	// of the wall clock. weighted_sum scores recency and decay against `now`,
+	// so with the wall clock a slow runner (about 3.5 s more between writing
+	// the fixtures and recalling them, measured) moved a golden score in its
+	// fourth decimal.
+	now   time.Time
 	dir   string
 	store *storage.PebbleStore
 	fts   *fts.Index
@@ -78,7 +85,7 @@ func newCFEnv(t *testing.T) *cfEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &cfEnv{t: t, dir: dir, trans: &cfTransitions{m: map[[16]byte][]storage.TransitionTarget{}}}
+	c := &cfEnv{t: t, now: time.Now(), dir: dir, trans: &cfTransitions{m: map[[16]byte][]storage.TransitionTarget{}}}
 	c.open()
 	t.Cleanup(func() { c.close(); os.RemoveAll(dir) })
 	return c
@@ -96,6 +103,7 @@ func (c *cfEnv) open() {
 	embedder := &noopEmbedder{}
 	act := activation.New(c.store, &ftsAdapter{c.fts}, nil, embedder)
 	act.SetTransitionStore(c.trans)
+	act.SetScoreClockForTesting(func() time.Time { return c.now })
 	trig := trigger.New(c.store, &ftsTrigAdapter{c.fts}, nil, embedder)
 	c.eng = NewEngine(EngineConfig{Store: c.store, AuthStore: c.as, FTSIndex: c.fts, ActivationEngine: act, TriggerSystem: trig, Embedder: embedder})
 }
@@ -135,7 +143,7 @@ func (c *cfEnv) write(vault, concept, content string, age time.Duration, entitie
 	c.t.Helper()
 	ctx := context.Background()
 	ws := c.store.ResolveVaultPrefix(vault)
-	created := time.Now().Add(-age)
+	created := c.now.Add(-age)
 	id, err := c.store.WriteEngram(ctx, ws, &storage.Engram{
 		Concept: concept, Content: content, Confidence: 1,
 		CreatedAt: created, UpdatedAt: created, LastAccess: created,
@@ -173,7 +181,7 @@ func (c *cfEnv) primeLog(vault string, ids ...storage.ULID) {
 	c.t.Helper()
 	c.eng.activation.WaitLogIdle()
 	ws := c.store.ResolveVaultPrefix(vault)
-	c.eng.activation.AssocLog().Record(activation.LogEntry{VaultID: wsVaultID(ws), At: time.Now(), EngramIDs: ids, Scores: make([]float64, len(ids))})
+	c.eng.activation.AssocLog().Record(activation.LogEntry{VaultID: wsVaultID(ws), At: c.now, EngramIDs: ids, Scores: make([]float64, len(ids))})
 }
 
 type cfRow struct {
@@ -682,7 +690,9 @@ func TestContentFirst_DifferentialAgainstTrunk(t *testing.T) {
 		fixes[v.name] = cfBuild(c, v.name)
 	}
 	// A fresh process, then the log prime: weighted_sum reads the cache clock,
-	// so no stamping load may happen between the restart and the recalls.
+	// so no stamping load may happen between the restart and the recalls. The
+	// scoring clock is pinned (cfEnv.now), so time spent here cannot move a
+	// score either.
 	c.restart()
 	for name, f := range fixes {
 		c.primeLog(name, f.partner)
