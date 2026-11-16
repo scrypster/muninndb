@@ -303,7 +303,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MUNINN_MEM_LIMIT_GB=4` and 256 at 16. Set `MUNINN_MBP_MAX_CONNECTIONS` to choose the
   number yourself. **If you run more MBP clients at once than the default allows, set it
   before you upgrade, or the extra clients will be refused.** Refusals are logged at WARN
-  at most once every 10 seconds, with a count (SEC-28).
+  at most once every 10 seconds, with a count. The limit keeps the server and its other
+  transports running when someone floods this port. It does not keep the port usable.
+  One source can occupy every connection slot, and other MBP clients are then refused
+  until it lets go (SEC-28).
 
 - Limits of the MBP listener that this release does not change. The fixes above do not
   make it safe to expose the MBP port to clients you do not trust. A connection that has
@@ -311,9 +314,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handled holds its raw payload in memory, up to 16 MB each and up to 64 at a time on one
   connection, and the memory for a request is set aside as soon as its 16-byte header
   arrives. The connection limit bounds how many connections can do this. It does not
-  bound how much each one holds. A client that can reach the port can therefore still
-  tie up memory. Keep port 8474 on loopback or behind a firewall. The next paragraph says
-  which deployments expose it.
+  bound how much each one holds. One source can occupy every connection slot, with no key
+  if any vault is public, and lock other clients out of this port. The limit is not
+  applied per source address, because clients on the same machine, behind a proxy, or
+  reaching a container through a published port all arrive from one address. A client
+  that can reach the port can therefore still tie up memory and connections. Keep the
+  port off untrusted networks: leave 8474 on loopback or put it behind a firewall. The
+  next paragraph says which deployments expose it.
 
 - Which deployments expose the MBP port (for the MBP entries above). The server binds
   every port, MBP's 8474 included, to `127.0.0.1` unless it is told otherwise, so by

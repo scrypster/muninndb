@@ -9,6 +9,7 @@ package mbp_test
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"sort"
 	"strconv"
@@ -183,6 +184,14 @@ func newMatrixEnv(t testing.TB) *matrixEnv {
 // it serves anything.
 func newMatrixEnvWith(t testing.TB, configure func(*mbp.Server)) *matrixEnv {
 	t.Helper()
+	return newMatrixEnvTLS(t, nil, configure)
+}
+
+// newMatrixEnvTLS is newMatrixEnvWith for a server that wraps its listener in
+// TLS when tlsConfig is not nil, as the daemon does when it is given a
+// certificate.
+func newMatrixEnvTLS(t testing.TB, tlsConfig *tls.Config, configure func(*mbp.Server)) *matrixEnv {
+	t.Helper()
 	opts := storage.DefaultOptions()
 	opts.FS = vfs.NewMem()
 	db, err := storage.OpenPebble("mbp-mode-matrix", opts)
@@ -216,7 +225,7 @@ func newMatrixEnvWith(t testing.TB, configure func(*mbp.Server)) *matrixEnv {
 	addr := ln.Addr().String()
 
 	rec := &recordingEngine{EngineAPI: eng}
-	srv := mbp.NewServer(addr, rec, authStore, nil)
+	srv := mbp.NewServer(addr, rec, authStore, tlsConfig)
 	if configure != nil {
 		configure(srv)
 	}

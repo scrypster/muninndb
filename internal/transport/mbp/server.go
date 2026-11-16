@@ -45,6 +45,7 @@ type Server struct {
 	// (connection_cap.go). Zero until the server serves, when it is resolved
 	// from the memory limit or the override.
 	maxConns    int
+	refusals    chan net.Conn // refused connections waiting for a courtesy answer
 	openConns   atomic.Int64
 	capRefused  atomic.Int64 // refused since the last warning
 	capLastWarn atomic.Int64 // UnixNano of the last warning
@@ -97,6 +98,7 @@ func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
 	}
 	slog.Info("mbp: listening", "addr", ln.Addr().String(), "max_connections", s.maxConns)
 	s.listener = ln
+	s.startRefusers()
 
 	// Accept connections in a goroutine
 	s.wg.Add(1)
