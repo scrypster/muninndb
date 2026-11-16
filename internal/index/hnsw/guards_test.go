@@ -12,13 +12,39 @@ import (
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
+// guardFixture is the old-rule corpus the guard tests repair: the same shape
+// as oldRuleFixture (topic vectors plus an 80-vector near-identical cluster,
+// dim 64) at 250 vectors instead of 400. A guard test is about the commit
+// protocol around a FULL repair — cancel, clear, wipe, replay — not about the
+// repaired graph's quality, which the migration tests measure on the
+// 400-vector fixture. 250 is the smallest size at which every vault name
+// measured still islands under the old rule (40-258 closed nodes), and
+// persistGuardVault fails the test if a vault ever stops needing a full
+// repair, so the smaller fixture cannot quietly change the path under test.
+func guardFixture() *corpus { return makeCorpus("dup80", 64, 250, 7) }
+
+// persistGuardVault persists guardFixture into ws under the old rule and
+// asserts the loaded graph needs a full repair.
+func persistGuardVault(t *testing.T, db *pebble.DB, ws [8]byte) *corpus {
+	t.Helper()
+	c := guardFixture()
+	persistCorpus(t, c, db, ws, true)
+	plan, err := New(db, ws).load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.kind != repairFull {
+		t.Fatalf("fixture precondition: vault %q assessed %s (closed %d), want a full repair", ws[:], plan.kind, plan.closed)
+	}
+	return c
+}
+
 // repairAt starts the repair of an old-rule vault and blocks it at stage.
 func repairAt(t *testing.T, stage string, ws [8]byte) (*Registry, *pebble.DB, *corpus, *stageGate) {
 	t.Helper()
-	c := oldRuleFixture(7)
 	db := memPebble(t)
 	t.Cleanup(func() { db.Close() })
-	persistCorpus(t, c, db, ws, true)
+	c := persistGuardVault(t, db, ws)
 	gate := newStageGate(stage)
 	reg := NewRegistry(db)
 	reg.repairHook = gate.hook
@@ -151,10 +177,9 @@ func TestGuard_CancelledBeforeCommitWritesNothing(t *testing.T) {
 func TestGuard_InFlightListWritesDrainBeforeCommit(t *testing.T) {
 	var ws [8]byte
 	copy(ws[:], "GDRAIN01")
-	c := oldRuleFixture(7)
 	db := memPebble(t)
 	defer db.Close()
-	persistCorpus(t, c, db, ws, true)
+	c := persistGuardVault(t, db, ws)
 	built := newStageGate("built")
 	release := make(chan struct{})
 	released := false
@@ -233,10 +258,9 @@ func TestGuard_ReembedDuringRepairIsReplayed(t *testing.T) {
 func TestGuard_InsertJustBeforeTheLockIsReplayed(t *testing.T) {
 	var ws [8]byte
 	copy(ws[:], "GLATE001")
-	c := oldRuleFixture(7)
 	db := memPebble(t)
 	defer db.Close()
-	persistCorpus(t, c, db, ws, true)
+	c := persistGuardVault(t, db, ws)
 	var lateID [16]byte
 	r := newRand(12)
 	r.Read(lateID[:])

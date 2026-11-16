@@ -19,8 +19,14 @@ import (
 )
 
 // watchdog is a FAILURE DETECTOR, never a timing assertion: it turns a hang
-// (the defect) into a failure instead of a stuck test binary.
-const watchdog = 20 * time.Second
+// (the defect) into a failure instead of a stuck test binary. Every wait it
+// bounds is event-driven (a stage hook closing a channel, a context being
+// cancelled), so it only has to be longer than any real repair. It was 20s,
+// and a full repair of the 400-vector fixture under -race -cover on a 4-vCPU
+// runner took 15-27s: the guard tests failed with "repair never reached stage"
+// while the repair was still making progress. Two minutes still ends a real
+// hang well inside the package's 300s timeout.
+const watchdog = 2 * time.Minute
 
 // oldRuleFixture is a corpus the old (nearest-only) rule islands on every
 // seed and vault measured: 320 topic vectors plus one cluster of 80

@@ -193,13 +193,14 @@ wall-clock. Jobs (from `.github/workflows/ci.yml`, real recent timings):
 
 | Job | ~duration | Notes |
 |---|---|---|
-| `go` (build & test) | ~5 min on develop before the split (expect less after) | gofmt gate, embed-asset cache, web build, `go build -tags localassets`, `go vet`, **`go test -race -tags localassets` on every package except `internal/engine`**, coverage (`coverage` artifact, which no longer includes `internal/engine`) |
-| `go-engine` (shards 0, 1) | not yet measured in CI | parallel to `go`. `internal/engine` under `-race -covermode=atomic -timeout 300s`, split in two by `scripts/go-test-shard.sh` (a test's shard is a hash of its own name, so adding a test never moves another). A `--check` step fails the job unless the shards partition the package's test list exactly. Coverage per shard as `coverage-engine-0`/`-1` |
+| `go` (build & test) | ~5 min on develop before the split (expect less after) | gofmt gate, embed-asset cache, web build, `go build -tags localassets`, `go vet`, **`go test -race -tags localassets` on every package except `internal/engine` and `internal/index/hnsw`**, coverage (`coverage` artifact, which no longer includes those two) |
+| `go-engine` (shards 0, 1) | ~2 and ~3 min (first CI run) | parallel to `go`. `internal/engine` under `-race -covermode=atomic -timeout 300s`, split in two by `scripts/go-test-shard.sh` (a test's shard is a hash of its own name, so adding a test never moves another). A `--check` step fails the job unless the shards partition the package's test list exactly. Coverage per shard as `coverage-engine-0`/`-1` |
+| `go-hnsw` | not yet measured in CI (~2.5 min of tests in a 4-CPU container) | parallel to `go`. `internal/index/hnsw` under `-race -timeout 300s` **without coverage**, then a separate uninstrumented `-covermode=set` run for the `coverage-hnsw` artifact. `-race` forces atomic coverage, and here the atomic counters sit inside the vector loops: one test took 99s with it and 30s without |
 | `windows` (build & smoke) | 2–3 min | parallel to `go`; now fetches the same bge-small-en-v1.5 the release ships |
 | `shellcheck` | 10–45s | lints scripts + runs `check-build-tags.sh` |
 | `api-spec-validation` | 15–20s | Redocly lint + informational route-count diff |
 | `vuln-check` | 15–60s | `govulncheck`, pinned to v1.6.0 |
-| `cli-integration` | 1.5–2 min | **runs after `go` and `go-engine`** (sequential); this is where the MCP registry-parity smoke test runs |
+| `cli-integration` | 1.5–2 min | **runs after `go`, `go-engine` and `go-hnsw`** (sequential); this is where the MCP registry-parity smoke test runs |
 | `playwright-e2e` | 1.5–2 min | management-console E2E (thin: ~5 specs) |
 | `python-sdk` | 1–2 min | **serialized after `cli-integration`** "so integration jobs are sequential" — this coupling is not a real data dependency and costs ~1.5 min of avoidable critical path |
 | `node-sdk` | 15–20s | `npm ci` + `tsc` + vitest for `sdk/node`. Before it existed the SDK was first compiled by `publish-sdk.yml` at tag time |
@@ -271,17 +272,35 @@ first:
    `go test -list` names of the two shards, combined, are identical to the unsharded
    package's 876. No timeout was raised.
 
-Not yet confirmed by CI: the two shard jobs' real duration, and whether `hnsw` (125s here,
-with parallel tests that a 4-vCPU runner overlaps less) and `storage` (184s here, led by
-`TestRetiredSet_DigestRewriteRacingForget` at 46s) are comfortably inside 300s in a `go`
-job that no longer carries the engine. If either comes near the limit, shard it the same
-way. Do not raise the timeout.
+**The first CI run (integration branch) and what it changed.** The engine shards passed
+in ~2 and ~3 minutes. `internal/index/hnsw` timed out at 300s, and two guard tests failed
+first with "repair never reached stage precommit". In a linux container pinned to 4 CPUs,
+running the CI command for that package: the package timed out both with and without
+the commit that added `t.Parallel()`; without it, a third guard test failed the same way.
+The guard tests run in the sequential phase, before any parallel test resumes, so that
+commit was not starving them. Two causes:
 
-Critical path: (`go` ∥ `go-engine`) → (`cli-integration` ∥ `playwright-e2e`) →
+- **The guard watchdog was 20s and a full repair took 15–27s** there under `-race -cover`.
+  The waits were already event-driven (a stage hook closes a channel). The watchdog is now
+  a 2-minute hang detector. The guard tests repair a 250-vector old-rule fixture instead of
+  400. They test the commit protocol, not repair quality, and they now assert the vault
+  still needs a *full* repair. Two bulk-insert tests closed their registries too late, so a
+  background repair kept running into later tests; they now close them before the
+  database. Each guard test: 15–27s → ~4s.
+- **Atomic coverage under `-race` tripled the package's cost.** Container figures for
+  `hnsw`, CI command: 300s+ timeout (two shards of it each timed out too). With `-race`
+  alone: 116s. Uninstrumented `-covermode=set`: 20s, 87.8%. So `go-hnsw` runs those two
+  steps, and every test still runs under `-race`.
+
+Still to confirm in CI: `go-hnsw`'s real duration, and `storage` (184s on a workstation, led
+by `TestRetiredSet_DigestRewriteRacingForget` at 46s), which stays in `go`. If a package
+nears the limit, split it the same way. Do not raise the timeout.
+
+Critical path: (`go` ∥ `go-engine` ∥ `go-hnsw`) → (`cli-integration` ∥ `playwright-e2e`) →
 `python-sdk`. What's cached:
 embed assets (~130MB, keyed by ORT+model+platform), Go module cache, and npm for the two
 lockfile-scoped jobs (`node-sdk`, `web-unit`). npm is **not** cached in the jobs that build
-the web bundle as a side effect. The race detector runs in `go` and `go-engine`.
+the web bundle as a side effect. The race detector runs in `go`, `go-engine` and `go-hnsw`.
 
 **When adding tests:** unit + invariant tests are nearly free — prefer them. Integration,
 Playwright, `-race`, and asset-gated tests cost real minutes. Reach for end-to-end

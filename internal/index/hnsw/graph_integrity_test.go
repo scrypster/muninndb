@@ -21,6 +21,9 @@ func TestBulkInsertSelfQuery(t *testing.T) {
 	defer db.Close()
 
 	reg := NewRegistry(db)
+	// Closed before the database (defers run last-in first-out), so no
+	// background work outlives the test and competes with the next one.
+	defer reg.Close()
 	var ws [8]byte
 	copy(ws[:], []byte("REPROTST"))
 
@@ -113,6 +116,9 @@ func TestBulkInsertReloadSelfQuery(t *testing.T) {
 	reg.mu.RUnlock()
 
 	reg2 := NewRegistry(db)
+	// Closed before the database: loading may start a background repair,
+	// which must not outlive the test.
+	defer reg2.Close()
 	if got := reg2.VaultVectors(ws); got != N {
 		t.Fatalf("reloaded %d vectors, want %d", got, N)
 	}
