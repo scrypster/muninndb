@@ -383,10 +383,12 @@ type ActivationItem struct {
 	Relevance       float32         `msgpack:"relevance,omitempty"         json:"relevance,omitempty"`
 	// RelevanceBand is #773's ABSOLUTE relevance band for this row:
 	// strong | moderate | weak | filter_match | uncalibrated.
+	// Evidence, not answerability: moderate is a candidate to verify, not an
+	// answer (COG-30 (d)). Comment only; the wire value is unchanged.
 	//
-	// Derived from ScoreComponents.AbsoluteScore against THIS VAULT's own
-	// calibration (its resolved default gate and its resolved content-channel
-	// ceiling) — NOT from Score, which is renormalized per query and therefore
+	// Derived from ScoreComponents.AbsoluteScore against fixed band edges (twice
+	// the fusion mode's default gate — a constant, not measured per vault — and
+	// half the vault's resolved content-channel ceiling) — NOT from Score, which is renormalized per query and therefore
 	// pins the best row of ANY query, however weak, to ~1.0. Not from
 	// Confidence either: that is the stored TRUTH-belief (COG-10), not a
 	// retrieval statistic.

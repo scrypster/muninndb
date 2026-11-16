@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Relevance band descriptions corrected. A band reports how much evidence a memory has
+  against your query, measured against the embedding model's noise floor — not whether it answers
+  you. `moderate` is now documented as a candidate to verify, not an established answer, and
+  a recall that is not withheld is no longer described as proof the vault holds an answer: a
+  fluent question about something the vault does not hold often still returns `moderate`
+  rows. Changed in the `muninn_recall` tool description, the guide, the weak-only hint and
+  the REST `relevance_band`/`abstained_reason` descriptions. No wire value, ranking, score or
+  abstention change.
 - A restored memory is findable by keyword again. Forgetting a memory drops
   its keyword-search postings and `muninn_restore` never put them back, so a
   restored memory could only be found by meaning, never by its words. Restore
