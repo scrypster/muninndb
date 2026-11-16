@@ -85,15 +85,17 @@ func activationToMemory(item *mbp.ActivationItem) Memory {
 		}
 	}
 	m := Memory{
-		Annotations:    annotations,
-		ID:             item.ID,
-		Concept:        item.Concept,
-		Content:        previewContent,
-		Summary:        item.Summary,
-		Score:          roundScore(item.Score),
-		VectorScore:    roundScore(item.ScoreComponents.SemanticSimilarity),
-		VectorScoreRaw: roundScore(item.ScoreComponents.SemanticSimilarityRaw),
-		EntityBoost:    roundScore(item.ScoreComponents.EntityBoost),
+		Annotations:     annotations,
+		ID:              item.ID,
+		Concept:         item.Concept,
+		Content:         previewContent,
+		Summary:         item.Summary,
+		Score:           roundScore(item.Score),
+		VectorScore:     roundScore(item.ScoreComponents.SemanticSimilarity),
+		VectorScoreRaw:  roundScore(item.ScoreComponents.SemanticSimilarityRaw),
+		EntityBoost:     roundScore(item.ScoreComponents.EntityBoost),
+		HebbianBoost:    roundScore(item.ScoreComponents.HebbianBoost),
+		TransitionBoost: roundScore(item.ScoreComponents.TransitionBoost),
 		// #773: the honest, cross-query-comparable quantities. They were
 		// computed on every row and mapped onto MBP/REST, and this function —
 		// the ONLY path from an activation row to an MCP agent — dropped both.

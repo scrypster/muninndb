@@ -84,7 +84,10 @@ func TestApplyRecallModePreset_NoCallerWeights_ScalarsDoNotOverlayResolved(t *te
 
 func TestPresetCarriesWeights(t *testing.T) {
 	require.True(t, presetCarriesWeights(presetFor(t, "semantic")))
-	require.True(t, presetCarriesWeights(presetFor(t, "recent")))
+	// recent is an empty alias of balanced (recent-mode orientation design
+	// v2, D1): it no longer carries weights, so it never takes the zero-base
+	// branch that dropped the vault's ACT-R weights and flipped fusion.
+	require.False(t, presetCarriesWeights(presetFor(t, "recent")))
 	require.False(t, presetCarriesWeights(presetFor(t, "deep")))
 	require.False(t, presetCarriesWeights(presetFor(t, "balanced")))
 }

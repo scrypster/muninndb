@@ -18,11 +18,17 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/metrics"
+	"github.com/scrypster/muninndb/internal/storage"
 )
 
 // MCPServer serves the MCP JSON-RPC 2.0 protocol on a single HTTP mux.
 type MCPServer struct {
-	engine           EngineInterface
+	engine EngineInterface
+	// storageWritable reports whether the data directory accepts writes — the
+	// same cached probe REST /api/health reports as db_writable. nil = not
+	// wired (muninn_status then reports storage "unknown").
+	storageWritable  func() bool
 	token            string              // required Bearer token (mdb_ static token); empty = no auth
 	authKeys         apiKeyValidator     // optional: enables mk_ vault API key auth; nil = disabled
 	capKeys          capabilityValidator // optional: enables cap_ capability auth (RFC #597); nil = disabled
@@ -320,8 +326,58 @@ func (s *MCPServer) dispatchToolCall(ctx context.Context, w http.ResponseWriter,
 		mode = auth.ModeFull
 	}
 	ctx = context.WithValue(ctx, auth.ContextMode, mode)
+	// Label pipeline: the engine (the only holder of k_q) hashes the raw
+	// credential and MCP session into the ids a recall event and a label
+	// record. Raw values are never persisted or logged.
+	rawSession, _ := ctx.Value(noticeSessionCtxKey{}).(string)
+	ctx = auth.WithCallerIdentity(ctx, a.Token, rawSession)
+	// Who may see per-id feedback outcomes: a credential that can READ this
+	// vault (it could recall the same facts anyway); a write-mode key gets the
+	// uniform response. An unpinned credential may read every vault, so a
+	// wrong-vault label can name the vault it belongs to.
+	ctx = withFeedbackAccess(ctx, feedbackAccess{canRead: mode != auth.ModeWrite, allVaults: a.Vault == ""})
+	// An observe credential is always effectively read-only, for every tool:
+	// none of its loads may stamp the L1 cache's access time, which later
+	// recalls score as recency (engine.Read and recall already honour this
+	// per call; tools without a read_only flag of their own did not).
+	if mode == auth.ModeObserve {
+		ctx = storage.ContextWithNoAccessCacheStamp(ctx)
+	}
 
-	handler(ctx, w, req.ID, vault, args)
+	tw := &toolCallWriter{ResponseWriter: w}
+	handler(ctx, tw, req.ID, vault, args)
+	if tw.rejectReason != "" {
+		// req.Params.Name is a registered tool here (found above), so the tool
+		// label is bounded by the tool table.
+		metrics.MCPArgRejectionsTotal.WithLabelValues(req.Params.Name, tw.rejectReason).Inc()
+	}
+}
+
+// Argument-shape rejection reasons (the closed label set of
+// muninn_mcp_arg_rejections_total).
+const (
+	argRejectInvalidParams    = "invalid_params"    // generic: any other -32602
+	argRejectMissingField     = "missing_field"     // a required argument is absent or empty
+	argRejectConflictingAlias = "conflicting_alias" // an argument and its accepted alias disagree
+)
+
+// toolCallWriter wraps the response writer for one tool call so a handler's
+// argument rejection can be counted without threading a recorder through
+// every handler signature. Unwrap keeps http.ResponseController working.
+type toolCallWriter struct {
+	http.ResponseWriter
+	rejectReason string
+}
+
+func (w *toolCallWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// sendArgError is sendError(-32602) with a specific rejection reason for the
+// argument-rejection counter.
+func sendArgError(w http.ResponseWriter, id json.RawMessage, reason, message string) {
+	if tw, ok := w.(*toolCallWriter); ok {
+		tw.rejectReason = reason
+	}
+	sendError(w, id, -32602, message)
 }
 
 // toolHandlerFunc is the signature every MCP tool handler shares.
@@ -393,7 +449,7 @@ func (s *MCPServer) toolHandlers() map[string]toolHandlerFunc {
 		// Provenance audit trail
 		"muninn_provenance": s.handleProvenance,
 
-		// SGD learning loop feedback
+		// Explicit feedback (useful=true reinforces access; see the tool description)
 		"muninn_feedback": s.handleFeedback,
 
 		// Entity aggregate view
@@ -777,8 +833,21 @@ func sendResult(w http.ResponseWriter, id json.RawMessage, result any) {
 	})
 }
 
+// SetStorageWritableProbe wires the storage-writability signal muninn_status
+// folds into health. The probe must be cheap (REST's is a cached atomic,
+// refreshed every 30s by a background sentinel-file write).
+func (s *MCPServer) SetStorageWritableProbe(probe func() bool) { s.storageWritable = probe }
+
 // sendError writes a JSON-RPC error response.
 func sendError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
+	// Every -32602 from a tool handler is an argument-shape rejection; record
+	// it on the dispatch writer (generic reason unless the handler named one
+	// via sendArgError) so dispatchToolCall can count it per tool.
+	if code == -32602 {
+		if tw, ok := w.(*toolCallWriter); ok && tw.rejectReason == "" {
+			tw.rejectReason = argRejectInvalidParams
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(JSONRPCResponse{
 		JSONRPC: "2.0",

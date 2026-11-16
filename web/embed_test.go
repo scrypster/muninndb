@@ -15,8 +15,10 @@ func TestAdminWorkerHelpMatchesRuntimeArchitecture(t *testing.T) {
 	if strings.Contains(body, "Configured via server startup flags") {
 		t.Fatal("admin help still claims workers are configured by startup flags")
 	}
-	if !strings.Contains(body, "Temporal scoring runs at query time") {
-		t.Fatal("admin help does not explain query-time temporal scoring")
+	// Honest clock: under ACT-R recall scoring has no age term, so the help
+	// says "recall scoring", not "temporal scoring".
+	if !strings.Contains(body, "Recall scoring runs at query time") {
+		t.Fatal("admin help does not explain query-time recall scoring")
 	}
 	if !strings.Contains(body, "Dormant workers are enabled") {
 		t.Fatal("admin help does not explain dormant worker wake-up behavior")

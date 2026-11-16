@@ -226,6 +226,10 @@ func (m *MockEngine) ReindexFTSVault(ctx context.Context, vaultName string) (int
 	return 0, nil
 }
 
+func (m *MockEngine) RebuildVectorIndex(ctx context.Context, vaultName string) error {
+	return nil
+}
+
 func (m *MockEngine) ResetRepairWatermark(ctx context.Context, vaultName string, which engine.RepairWatermarkKind) error {
 	return nil
 }

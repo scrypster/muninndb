@@ -505,3 +505,58 @@ func TestIDFCacheVaultIsolation(t *testing.T) {
 		t.Errorf("idfA (%v) should be > idfB (%v): robot is rare in vault-a but common in vault-b", idfA, idfB)
 	}
 }
+
+// TestSearch_TiedScoresAtTopKAreDeterministic pins which tied documents
+// survive the topK cut. Search accumulates scores in a Go map and used to sort
+// on score alone, so when more than topK documents tie (common: coverage is
+// capped at 1.0 per term, so every document containing all query terms in the
+// same fields scores identically) the survivors were whatever map iteration
+// order produced — a different candidate SET on every identical call. Ties now
+// break on DESCENDING ID (newest ULID first — the one tie rule recall uses at
+// every cut and at the final sort, honest clock increment 1), so the result is
+// a pure function of index + query and the cut keeps the newest of a set of
+// equals.
+func TestSearch_TiedScoresAtTopKAreDeterministic(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	idx := New(db)
+	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 100})
+	ws := store.VaultPrefix("tie-test")
+	ctx := context.Background()
+
+	const n, topK = 40, 10
+	for i := 0; i < n; i++ {
+		// Identical text: every document scores exactly the same.
+		id := [16]byte{0x01, byte(i)}
+		if err := idx.IndexEngram(ws, id, "waterbar cleared", "", "the crew cleared the waterbar", nil); err != nil {
+			t.Fatalf("IndexEngram: %v", err)
+		}
+	}
+
+	var want []ScoredID
+	for call := 0; call < 20; call++ {
+		got, err := idx.Search(ctx, ws, "waterbar cleared", topK)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(got) != topK {
+			t.Fatalf("Search returned %d results, want %d", len(got), topK)
+		}
+		if call == 0 {
+			want = got
+			for i, r := range got {
+				if r.ID != ([16]byte{0x01, byte(n - 1 - i)}) {
+					t.Fatalf("tied result %d = %x, want the %d-th highest ID (ties break newest-first, on descending ID)", i, r.ID, i)
+				}
+			}
+			continue
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("call %d: result %d = %x (%.6f), call 0 had %x (%.6f) — tied candidates selected nondeterministically",
+					call, i, got[i].ID, got[i].Score, want[i].ID, want[i].Score)
+			}
+		}
+	}
+}

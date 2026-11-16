@@ -120,8 +120,14 @@ type abmGate struct {
 
 var (
 	// abmGateCurrent is the pre-change behaviour: the per-query max-normalised
-	// score. Reconstructed from the reported Score, which IS that value.
-	abmGateCurrent = abmGate{"CURRENT (max-normalised final)", func(s activation.ScoredEngram) float64 { return s.Score }}
+	// score.
+	// The max-normalised final is Raw (rescaled, clamped) x Confidence. It was
+	// also the row's Score until COG-35 made Score the absolute content score
+	// on the ACT-R path; reading the composition keeps this arm the quantity
+	// the old gate compared, whichever order the build ships.
+	abmGateCurrent = abmGate{"CURRENT (max-normalised final)", func(s activation.ScoredEngram) float64 {
+		return s.Components.Raw * s.Components.Confidence
+	}}
 	// abmGateAbsolute is the candidate: ContentMatch attenuated (never
 	// amplified) by the prior, times Confidence, independent of the pool.
 	abmGateAbsolute = abmGate{"CANDIDATE (absolute)", func(s activation.ScoredEngram) float64 { return s.Components.AbsoluteScore }}

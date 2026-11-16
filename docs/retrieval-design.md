@@ -48,13 +48,13 @@ The `Weights` field on `ActivateRequest` controls the scoring mix. Pre-built mod
 |------|----------|----------|---------|-------------|
 | `balanced` (default) | ACT-R | HNSW + FTS | yes | General memory retrieval |
 | `semantic` | off | HNSW + FTS | off | "What do I know about X?" regardless of age |
-| `recent` | temporal-dominant | reduced | off | "What am I actively working on?" |
+| `recent` | ACT-R | HNSW + FTS | yes | Alias of `balanced` (engine defaults; replaces the vault's default mode). Marks a session-orientation call — not a recency filter |
 
 The AI consumer (an LLM calling the activation API) can specify mode directly. This means the model can adapt retrieval strategy to the question being asked:
 
 - User asks "what was my decision about the auth system?" → `balanced`, k=3 (surface recent decision)
 - User asks "summarize everything you know about distributed systems" → `semantic`, k=10
-- User asks "what have I been thinking about lately?" → `recent`, k=5
+- User asks "what have I been thinking about lately?" → `muninn_where_left_off` (single-user) or a recall filtered by the user's own tag (`recent` does not rank by recency)
 
 ---
 
@@ -127,7 +127,7 @@ Planned addition — let AI consumers specify intent directly without constructi
 
 ```go
 // Shorthand modes the AI can specify in plain language
-Mode: "recent"    // temporal-dominant, k=3 default
+Mode: "recent"    // shipped as an alias of "balanced" (orientation intent only; not recency-weighted)
 Mode: "semantic"  // embedding-only, k=5 default
 Mode: "balanced"  // current ACT-R default
 Mode: "deep"      // semantic + all tiers, k=10 default

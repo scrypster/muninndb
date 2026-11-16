@@ -519,8 +519,9 @@ func TestCurrencyAnnotation_TieBreak_NewestFirstWithinCluster(t *testing.T) {
 
 // TestCurrencyAnnotation_TieBreak_UnrelatedTiesUnaffected proves the ordering
 // change is scoped to detected clusters only: an exact tie between two
-// results NOT in the same cluster still uses the plain ULID-ascending
-// tiebreak (the #699 pin, unweakened).
+// results NOT in the same cluster still uses the plain base tiebreak (the #699
+// pin, unweakened) — newest ULID first since the honest clock (increment 1;
+// one tie rule at every recall cut and sort, internal/rankorder).
 func TestCurrencyAnnotation_TieBreak_UnrelatedTiesUnaffected(t *testing.T) {
 	h, cleanup := newCurrencyHarness(t)
 	defer cleanup()
@@ -536,8 +537,8 @@ func TestCurrencyAnnotation_TieBreak_UnrelatedTiesUnaffected(t *testing.T) {
 	}
 	sort.Strings(idsAsc)
 
-	if out[0].Engram.ID.String() != idsAsc[0] {
-		t.Fatalf("expected plain ULID-ascending tiebreak for an untied-cluster pair; got order %s, %s",
+	if out[0].Engram.ID.String() != idsAsc[len(idsAsc)-1] {
+		t.Fatalf("expected the plain newest-first (ULID-descending) tiebreak for an untied-cluster pair; got order %s, %s",
 			out[0].Engram.ID.String(), out[1].Engram.ID.String())
 	}
 }

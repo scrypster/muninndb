@@ -87,3 +87,34 @@ func Rescale(cos, b float64) float64 {
 	}
 	return v
 }
+
+// writeTwinHintRegistry is the per-embedder "very close" hint for the
+// write-time twin check (COG-36): the cosine at or above which a new write and
+// a write made in the same vault within the last hour are treated as a likely
+// duplicate or undeclared update.
+//
+// It is a HINT about a model's similarity scale, never a per-vault answer.
+// The single entry came from an offline, blind-judged replay over two
+// production vaults: at cosine >= 0.93 the candidates were judged correct 29
+// of 35 times (0.83, Wilson 95% [0.67, 0.92]); at >= 0.90 the lower bound fell
+// under the 0.70 bar. Two vaults are not a canonical corpus. The value is
+// defended only because (1) it describes how close bge-small places
+// restatements and updates, which is why it is keyed by MODEL, not vault;
+// (2) every vault can override it (plasticity write_twin_threshold); (3) the
+// homogeneity guard reports a vault where it does not discriminate; and (4)
+// the inline block is enabled on a vault only after that vault's own replay
+// check passes. Re-derive, don't hand-edit, if the bundled model changes.
+//
+// A model with no entry gets NO hint: the check runs shadow-only and reports
+// no_model_hint — a value is never guessed for a model nobody measured
+// (the COG-26 rule, applied again).
+var writeTwinHintRegistry = map[string]float64{
+	"bge-small-en-v1.5": 0.93,
+}
+
+// WriteTwinHint looks up the write-time twin threshold hint for an embed
+// model. ok=false means "no hint on record".
+func WriteTwinHint(model string) (t float64, ok bool) {
+	t, ok = writeTwinHintRegistry[model]
+	return t, ok
+}
