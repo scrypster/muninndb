@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `source_type` on a recall row is the memory's origin again. It was read from the newest
+  provenance entry, and the first read or feedback appends an update entry recorded as
+  `inferred`, so the field flipped from the writer's source to `inferred` after one access: it
+  reported who touched the memory last. It is now read from the entry that created the memory
+  and does not change afterwards. Recall also stops loading a memory's whole provenance log to
+  answer it. Known limit, unchanged here: every ordinary write is recorded as `human` whoever
+  made it, so the field does not yet tell a person from an agent.
 - A connected follower no longer serves a memory that was soft-deleted on the leader.
   A follower applies replicated writes straight to storage, and nothing told its read caches,
   so a Lobe that stayed connected kept returning a deleted memory as active until it rejoined.
