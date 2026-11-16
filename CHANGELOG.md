@@ -42,17 +42,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned it again. Correcting a `verified` memory demoted it, and for a decision, goal,
   constraint or identity memory with no explicit importance that also removed its protection
   from `max_engrams` pruning. The new version now carries the trust level of the one it
-  replaces. `muninn_evolve` adds a warning to its response when the level it carried is
-  `verified` or `untrusted`, because the text that level described has just changed; set the
-  level with `muninn_trust`. An `upsert_mode` write that supplies `trust` or `confidence` now
-  has them applied on the content-change step as well: they were applied when the memory was
-  created and dropped on every later change. Confidence is still not carried: an evolved
-  memory is stored at confidence 1.0 unless an `upsert_mode` write supplies one, as before.
-  The `upsert_mode` descriptions (MCP and OpenAPI) said confidence was inherited; they now
-  say what happens. Nothing is migrated: versions written by an earlier release keep the
+  replaces. Carrying `verified` needs a credential that may assert `verified`: one that may
+  not is refused rather than given a demoted copy. `muninn_evolve` adds a warning to its
+  response when the level it carried is `verified` or `untrusted`, because the text that
+  level described has just changed; set the level with `muninn_trust`. An `upsert_mode` write
+  that supplies `trust` or `confidence` now has them applied when the content changes: they
+  were applied when the memory was created and dropped on every later change. An
+  identical-content call is still a no-op, but an invalid or unauthorised `trust` on it is
+  now rejected instead of ignored. Confidence is still not carried: an evolved memory is
+  stored at confidence 1.0 unless an `upsert_mode` write supplies one, as before. The
+  `upsert_mode` descriptions (MCP and OpenAPI) said confidence was inherited; they now say
+  what happens. Nothing is migrated: versions written by an earlier release keep the
   `inferred` they were given. The version each one replaced still holds its original level,
   and `muninn_trust` on the current version restores it. `muninn_consolidate` is not changed
-  by this: a merged memory is still written at `inferred` whatever its sources held (#872).
+  by this: a newly written merged memory is still `inferred` whatever its sources held (#872).
+
+- `muninn_trust` refuses a superseded memory and names its current version. A trust level
+  set on a version that has since been evolved used to succeed and change nothing recall
+  returns, so a revocation aimed at an old id was silently lost. Set the level on the id the
+  error names. A level set while the same memory is being evolved is now either carried onto
+  the new version or refused the same way. Setting `verified` with it goes through the same
+  check as asserting `verified` on a write (#872).
+
+- A confidence outside (0,1] is no longer stored. Confidence multiplies into the recall
+  score, and a write could ask for 5 and get it. A value above 1 is now stored as 1, and 0, a
+  negative value or NaN means not supplied, so the memory is stored at 1.0. This applies to
+  single and batch writes and to the content-change step of an `upsert_mode` write; MCP
+  already limited the value. A write cannot store 0 (#872).
 
 - A connected follower no longer serves a memory that was soft-deleted on the leader.
   A follower applies replicated writes straight to storage, and nothing told its read caches,

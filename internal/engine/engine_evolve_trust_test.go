@@ -2,9 +2,15 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
+	"math"
 	"reflect"
+	"runtime"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/scrypster/muninndb/internal/auth"
@@ -18,7 +24,7 @@ import (
 // Confidence is deliberately NOT carried: the successor is written at 1.0 unless
 // the caller supplies a value. Carrying it was built and measured for #872 and
 // held back; TestEvolve_PinnedDecision_DoesNotCarryConfidence pins that decision
-// and COG-37 records why. (The file keeps its original name.)
+// and COG-37 records why.
 //
 // Fixture domain throughout this file: a fictional alpine trail-maintenance
 // cooperative. Nothing here is derived from any real vault.
@@ -39,6 +45,36 @@ func readEngram(t *testing.T, eng *Engine, vault, id string) *storage.Engram {
 		t.Fatalf("engram %s not found", id)
 	}
 	return e
+}
+
+// assertHeadUntouched fails unless id is still the live, unsuperseded record it
+// was before a refused write: active, validity window open, same content, same
+// trust. A refusal that left a successor, a stamp or a demotion behind is not a
+// refusal. When key is non-empty the upsert pointer must still name id too.
+func assertHeadUntouched(t *testing.T, eng *Engine, vault, key, id, content string, trust storage.TrustLevel) {
+	t.Helper()
+	head := readEngram(t, eng, vault, id)
+	if head.State != storage.StateActive || !head.ValidUntil.IsZero() {
+		t.Errorf("refused write still superseded the head: state=%v valid_until=%v", head.State, head.ValidUntil)
+	}
+	if head.Content != content {
+		t.Errorf("refused write changed the head's content: %q", head.Content)
+	}
+	if head.Trust != trust {
+		t.Errorf("refused write changed the head's trust: %d (%s), want %d (%s)",
+			head.Trust, head.Trust.String(), trust, trust.String())
+	}
+	if key == "" {
+		return
+	}
+	ws := eng.store.ResolveVaultPrefix(vault)
+	ptr, err := eng.store.GetUpsertKey(context.Background(), ws, sha256.Sum256([]byte(key)))
+	if err != nil {
+		t.Fatalf("GetUpsertKey(%q): %v", key, err)
+	}
+	if ptr.String() != id {
+		t.Errorf("refused write moved the upsert pointer for %q: %s, want %s", key, ptr.String(), id)
+	}
 }
 
 // TestEvolve_UntrustedSticks: the unreliable flag is a property of the RECORD,
@@ -399,8 +435,8 @@ func TestUpsertEvolve_NoExplicitTrustInherits(t *testing.T) {
 }
 
 // TestUpsertEvolve_VerifiedStillGated: SEC-14 must survive the new pass-through.
-// An observe credential asking for verified on the content-change branch is
-// REJECTED, never silently downgraded.
+// A context whose mode may not assert verified, asking for verified on the
+// content-change branch, is REJECTED, never silently downgraded.
 func TestUpsertEvolve_VerifiedStillGated(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
@@ -423,8 +459,14 @@ func TestUpsertEvolve_VerifiedStillGated(t *testing.T) {
 		Trust:        "verified",
 	})
 	if err == nil {
-		t.Fatalf("upsert-evolve accepted trust=verified under an observe credential (id %s)", first.ID)
+		t.Fatalf("upsert-evolve accepted trust=verified from a context whose mode may not assert it (id %s)", first.ID)
 	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("refusal is not an ErrInvalidRequest (transports map that one to an invalid-request "+
+			"status, anything else to a server error): %v", err)
+	}
+	assertHeadUntouched(t, eng, "trailwork", "rope-tension", first.ID,
+		"The rope bridge was re-tensioned in May.", storage.TrustInferred)
 }
 
 // TestUpsertEvolve_ExplicitTrustAndConfidenceAreApplied is the discriminating
@@ -640,9 +682,15 @@ func TestEvolve_FieldCensus(t *testing.T) {
 //
 // COG-37's rule is written for every content-replacing verb. Engine.Consolidate
 // is one (#779), and it does not obey the rule yet: it builds the merged memory
-// through Engine.Write with no trust, so the result is inferred whatever its
-// sources held. Merging a memory flagged untrusted therefore still clears the
-// flag — the laundering #872 closed on evolve, by the neighbouring verb.
+// through Engine.Write with no trust. Exactly what that yields:
+//
+//   - merged text that is NEW (the usual case) creates a memory at inferred,
+//     whatever its sources held. Merging a memory flagged untrusted therefore
+//     still clears the flag — the laundering #872 closed on evolve, by the
+//     neighbouring verb;
+//   - merged text byte-identical to one of the inputs creates nothing: Write's
+//     content dedup returns THAT input, which survives with its own trust.
+//
 // Deliberately not fixed with evolve: a many-to-one join needs its own rule
 // (which source's trust wins?) and that is a design decision, not a carry.
 func TestConsolidate_KnownResidual_DoesNotCarryTrust(t *testing.T) {
@@ -679,9 +727,601 @@ func TestConsolidate_KnownResidual_DoesNotCarryTrust(t *testing.T) {
 	merged := readEngram(t, eng, "trailwork", res.MergedID.String())
 
 	if merged.Trust != storage.TrustInferred {
-		t.Fatalf("KNOWN RESIDUAL APPEARS FIXED: the merged memory has trust=%d (%s), no longer the "+
-			"inferred Consolidate used to mint whatever its sources held. Replace this test with "+
-			"one that pins the new join rule and remove the Consolidate residual from COG-37.",
+		t.Fatalf("KNOWN RESIDUAL APPEARS FIXED: a newly created merged memory has trust=%d (%s), no "+
+			"longer the inferred Consolidate used to mint whatever its sources held. Replace this "+
+			"test with one that pins the new join rule and remove the Consolidate residual from COG-37.",
 			merged.Trust, merged.Trust.String())
+	}
+
+	// The other half of "exactly what that yields": merged text identical to an
+	// input is a dedup hit, so that input IS the result and keeps its trust.
+	const keptText = "A walker claims the Fernbrook stile is loose on the north side."
+	kept, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "trailwork", Concept: "Stile condition", Content: keptText, Trust: "untrusted",
+	})
+	if err != nil {
+		t.Fatalf("Write kept: %v", err)
+	}
+	dup, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "trailwork", Concept: "Stile note", Content: "The Fernbrook stile is on the north boundary.",
+	})
+	if err != nil {
+		t.Fatalf("Write dup: %v", err)
+	}
+	res2, err := eng.Consolidate(ctx, "trailwork", []string{kept.ID, dup.ID}, keptText)
+	if err != nil {
+		t.Fatalf("Consolidate (identical text): %v", err)
+	}
+	if res2.MergedID.String() != kept.ID {
+		t.Fatalf("premise not reproduced: merged text identical to an input returned %s, not that "+
+			"input %s — the dedup-hit case this half describes did not occur", res2.MergedID.String(), kept.ID)
+	}
+	if got := readEngram(t, eng, "trailwork", kept.ID).Trust; got != storage.TrustUntrusted {
+		t.Errorf("the surviving input's trust = %d (%s), want untrusted: a dedup hit returns the "+
+			"input itself and must leave its trust alone", got, got.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SEC-14: one gate for verified, however it would arrive.
+//
+// resolveTrust decides which context modes may assert trust=verified on a
+// write. The same function decides whether an evolve may CARRY verified onto
+// its successor and whether SetTrust may set it. It is checked in the engine,
+// as defence in depth: the rule holds independent of how a call was routed.
+//
+//	A context whose mode may not assert verified may not produce a verified
+//	record by any engine path.
+// ---------------------------------------------------------------------------
+
+// trustModeContext returns a context carrying the given mode; "" yields a
+// context that carries none.
+func trustModeContext(mode string) context.Context {
+	if mode == "" {
+		return context.Background()
+	}
+	return withMode(mode)
+}
+
+// TestUpsertEvolve_VerifiedCarryNeedsTheStampGate: a content-change re-sync that
+// supplies NO trust would carry the head's verified. Under a mode that may not
+// assert verified it is refused as an invalid request — not downgraded to
+// inferred, which would be the silent demotion — and nothing is written.
+func TestUpsertEvolve_VerifiedCarryNeedsTheStampGate(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	const headText = "The Fernbrook crossing passed its load test."
+	first, err := eng.Write(withMode(auth.ModeWrite), &mbp.WriteRequest{
+		Vault:        "trailwork",
+		Concept:      "Crossing load test",
+		Content:      headText,
+		IdempotentID: "crossing-load-test",
+		UpsertMode:   true,
+		Trust:        "verified",
+	})
+	if err != nil {
+		t.Fatalf("upsert create: %v", err)
+	}
+	if got := readEngram(t, eng, "trailwork", first.ID).Trust; got != storage.TrustVerified {
+		t.Fatalf("premise not reproduced: head trust = %d (%s), want verified", got, got.String())
+	}
+
+	resp, err := eng.Write(withMode(auth.ModeObserve), &mbp.WriteRequest{
+		Vault:        "trailwork",
+		Content:      "The Fernbrook crossing failed its load test.",
+		IdempotentID: "crossing-load-test",
+		UpsertMode:   true,
+		// no trust: the successor would inherit verified
+	})
+	if err == nil {
+		got := readEngram(t, eng, "trailwork", resp.ID)
+		t.Fatalf("a context whose mode may not assert verified got a successor (%s, hint %q) with "+
+			"trust=%d (%s)", resp.ID, resp.Hint, got.Trust, got.Trust.String())
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("refusal is not an ErrInvalidRequest: %v", err)
+	}
+	assertHeadUntouched(t, eng, "trailwork", "crossing-load-test", first.ID, headText, storage.TrustVerified)
+}
+
+// TestEvolve_VerifiedCarryNeedsTheStampGate is the same rule on the plain evolve
+// path.
+func TestEvolve_VerifiedCarryNeedsTheStampGate(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+
+	const headText = "The cooperative signed off the Larkspur handrail."
+	first, err := eng.Write(withMode(auth.ModeWrite), &mbp.WriteRequest{
+		Vault:   "trailwork",
+		Concept: "Handrail sign-off",
+		Content: headText,
+		Trust:   "verified",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	newID, err := eng.Evolve(withMode(auth.ModeObserve), "trailwork", first.ID,
+		"The cooperative rejected the Larkspur handrail.", "reworded", nil, "")
+	if err == nil {
+		got := readEngram(t, eng, "trailwork", newID.String())
+		t.Fatalf("a context whose mode may not assert verified got a successor (%s) with trust=%d (%s)",
+			newID.String(), got.Trust, got.Trust.String())
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("refusal is not an ErrInvalidRequest: %v", err)
+	}
+	assertHeadUntouched(t, eng, "trailwork", "", first.ID, headText, storage.TrustVerified)
+}
+
+// TestEvolve_VerifiedCarry_ClearsTheStampGate is the per-mode table that pins
+// the single gate. For each mode — the four the system defines, one it does
+// not, and a context carrying none — it measures against the real engine:
+//
+//	stamp             a plain write asserting trust=verified is accepted
+//	evolve            Evolve of a verified head yields a verified successor
+//	upsertEvolve      an upsert content change with no trust yields a verified successor
+//	setTrustVerified  SetTrust(id, "verified") is accepted
+//
+// and asserts the invariant: a mode that may not assert verified on a write
+// gets a verified record by none of the other three. The modes that may assert
+// it (full, write) are pinned to succeed in every column, so the table cannot
+// pass by refusing everything. There is no canonical list of modes to derive
+// the rows from, so a mode added later must be added here by hand; the
+// "unrecognised" row stands in for any mode nobody has listed.
+func TestEvolve_VerifiedCarry_ClearsTheStampGate(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	const vault = "trailwork"
+	setup := withMode(auth.ModeWrite)
+
+	modes := []string{auth.ModeFull, auth.ModeWrite, auth.ModeAppend, auth.ModeObserve, "unrecognised", ""}
+	for i, mode := range modes {
+		ctx := trustModeContext(mode)
+		label := mode
+		if label == "" {
+			label = "(none)"
+		}
+
+		// stamp
+		_, stampErr := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:   vault,
+			Concept: fmt.Sprintf("Waymark audit %d", i),
+			Content: fmt.Sprintf("Waymark audit %d was signed by the trail warden.", i),
+			Trust:   "verified",
+		})
+		stamp := stampErr == nil
+
+		// evolve
+		head, err := eng.Write(setup, &mbp.WriteRequest{
+			Vault:   vault,
+			Concept: fmt.Sprintf("Ford depth gauge %d", i),
+			Content: fmt.Sprintf("Ford depth gauge %d reads true.", i),
+			Trust:   "verified",
+		})
+		if err != nil {
+			t.Fatalf("[%s] seed verified head: %v", label, err)
+		}
+		evolve := false
+		if newID, evErr := eng.Evolve(ctx, vault, head.ID,
+			fmt.Sprintf("Ford depth gauge %d reads two centimetres high.", i), "recalibrated", nil, ""); evErr == nil {
+			got := readEngram(t, eng, vault, newID.String()).Trust
+			if got != storage.TrustVerified {
+				t.Errorf("[%s] evolve of a verified head succeeded with trust=%d (%s): accepted and "+
+					"silently downgraded, which SEC-14 forbids", label, got, got.String())
+			}
+			evolve = got == storage.TrustVerified
+		}
+
+		// upsertEvolve
+		key := fmt.Sprintf("cairn-count-%d", i)
+		if _, err := eng.Write(setup, &mbp.WriteRequest{
+			Vault:        vault,
+			Concept:      fmt.Sprintf("Cairn count %d", i),
+			Content:      fmt.Sprintf("Survey %d counted nine cairns on the ridge.", i),
+			IdempotentID: key,
+			UpsertMode:   true,
+			Trust:        "verified",
+		}); err != nil {
+			t.Fatalf("[%s] seed verified upsert head: %v", label, err)
+		}
+		upsertEvolve := false
+		if resp, upErr := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:        vault,
+			Content:      fmt.Sprintf("Survey %d counted eleven cairns on the ridge.", i),
+			IdempotentID: key,
+			UpsertMode:   true,
+		}); upErr == nil {
+			if resp.Hint != "upsert-evolved" {
+				t.Fatalf("[%s] premise not reproduced: hint = %q, want upsert-evolved", label, resp.Hint)
+			}
+			got := readEngram(t, eng, vault, resp.ID).Trust
+			if got != storage.TrustVerified {
+				t.Errorf("[%s] upsert content change on a verified head succeeded with trust=%d (%s): "+
+					"accepted and silently downgraded, which SEC-14 forbids", label, got, got.String())
+			}
+			upsertEvolve = got == storage.TrustVerified
+		}
+
+		// setTrustVerified
+		plain, err := eng.Write(setup, &mbp.WriteRequest{
+			Vault:   vault,
+			Concept: fmt.Sprintf("Signpost check %d", i),
+			Content: fmt.Sprintf("Signpost check %d found every post upright.", i),
+		})
+		if err != nil {
+			t.Fatalf("[%s] seed inferred memory: %v", label, err)
+		}
+		setTrust := false
+		if stErr := eng.SetTrust(ctx, vault, plain.ID, "verified"); stErr == nil {
+			got := readEngram(t, eng, vault, plain.ID).Trust
+			if got != storage.TrustVerified {
+				t.Errorf("[%s] SetTrust(verified) returned nil but the stored trust is %d (%s)", label, got, got.String())
+			}
+			setTrust = got == storage.TrustVerified
+		}
+
+		t.Logf("mode=%-12s stampVerifiedOnWrite=%-5v evolve=%-5v upsertEvolve=%-5v setTrustVerified=%v",
+			label, stamp, evolve, upsertEvolve, setTrust)
+
+		if (evolve || upsertEvolve || setTrust) && !stamp {
+			t.Errorf("[%s] GATE MISMATCH: this mode may not assert verified on a write (%v) but got a "+
+				"verified record another way (evolve=%v upsertEvolve=%v setTrustVerified=%v). Every "+
+				"engine path that sets or carries verified must clear resolveTrust (SEC-14).",
+				label, stampErr, evolve, upsertEvolve, setTrust)
+		}
+		if mode == auth.ModeFull || mode == auth.ModeWrite {
+			if !stamp || !evolve || !upsertEvolve || !setTrust {
+				t.Errorf("[%s] a mode that may assert verified was refused somewhere (stamp=%v evolve=%v "+
+					"upsertEvolve=%v setTrustVerified=%v): the gate is over-blocking",
+					label, stamp, evolve, upsertEvolve, setTrust)
+			}
+		}
+	}
+}
+
+// TestSetTrust_VerifiedNeedsTheStampGate: setting verified on an existing
+// memory goes through the same resolveTrust as asserting it on a write. A
+// context whose mode may not assert verified is refused as an invalid request
+// and the stored level does not move.
+func TestSetTrust_VerifiedNeedsTheStampGate(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	const vault = "trailwork"
+
+	w, err := eng.Write(withMode(auth.ModeWrite), &mbp.WriteRequest{
+		Vault: vault, Concept: "Ridge cairn height", Content: "The ridge cairn stands waist high.",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	for _, mode := range []string{auth.ModeObserve, "unrecognised", ""} {
+		label := mode
+		if label == "" {
+			label = "(none)"
+		}
+		err := eng.SetTrust(trustModeContext(mode), vault, w.ID, "verified")
+		if err == nil {
+			t.Errorf("[%s] SetTrust(verified) was accepted from a context whose mode may not assert verified", label)
+		} else if !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("[%s] refusal is not an ErrInvalidRequest: %v", label, err)
+		}
+		if got := readEngram(t, eng, vault, w.ID).Trust; got != storage.TrustInferred {
+			t.Fatalf("[%s] stored trust is now %d (%s); a SetTrust from this mode must not move it", label, got, got.String())
+		}
+	}
+	// A mode that may assert verified still can.
+	if err := eng.SetTrust(withMode(auth.ModeWrite), vault, w.ID, "verified"); err != nil {
+		t.Fatalf("SetTrust(verified) under a mode that may assert it: %v", err)
+	}
+	if got := readEngram(t, eng, vault, w.ID).Trust; got != storage.TrustVerified {
+		t.Errorf("stored trust = %d (%s), want verified", got, got.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SetTrust reaches the version recall serves, or says where that version is.
+// ---------------------------------------------------------------------------
+
+// TestSetTrust_SupersededTargetIsRefusedAndNamesTheHead: a trust level set on a
+// retired version changes nothing a reader sees. The write used to succeed
+// against the dead version while the live head kept its level, so a revocation
+// aimed at a stale id was silently lost. It is now refused the way an evolve of
+// a superseded target is, naming the current version — across a chain longer
+// than the 8-hop slack other walks keep.
+func TestSetTrust_SupersededTargetIsRefusedAndNamesTheHead(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := withMode(auth.ModeWrite)
+	const vault = "trailwork"
+
+	first, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: vault, Concept: "Rope bridge capacity",
+		Content: "The rope bridge carries two walkers at a time.", Trust: "verified",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	const hops = 10
+	ids := []string{first.ID}
+	for hop := 1; hop <= hops; hop++ {
+		newID, err := eng.Evolve(ctx, vault, ids[len(ids)-1],
+			fmt.Sprintf("The rope bridge carries two walkers at a time (survey %d).", hop), "resurveyed", nil, "")
+		if err != nil {
+			t.Fatalf("Evolve hop %d: %v", hop, err)
+		}
+		ids = append(ids, newID.String())
+	}
+	head := ids[len(ids)-1]
+
+	for _, stale := range []string{ids[0], ids[hops/2]} {
+		err := eng.SetTrust(ctx, vault, stale, "untrusted")
+		if err == nil {
+			t.Fatalf("SetTrust(untrusted) on the retired version %s reported success: the revocation "+
+				"went to a dead version (now trust=%s) while the live head %s is still trust=%s",
+				stale, readEngram(t, eng, vault, stale).Trust.String(), head, readEngram(t, eng, vault, head).Trust.String())
+		}
+		if !errors.Is(err, ErrTrustTargetSuperseded) {
+			t.Errorf("refusal is not ErrTrustTargetSuperseded: %v", err)
+		}
+		if !strings.Contains(err.Error(), head) {
+			t.Errorf("refusal does not name the current version %s, so the caller cannot retry on it: %v", head, err)
+		}
+		if got := readEngram(t, eng, vault, stale).Trust; got != storage.TrustVerified {
+			t.Errorf("a refused SetTrust still changed the retired version: trust=%d (%s)", got, got.String())
+		}
+	}
+
+	// The level the caller wanted, on the id the refusal named.
+	if err := eng.SetTrust(ctx, vault, head, "untrusted"); err != nil {
+		t.Fatalf("SetTrust on the current version: %v", err)
+	}
+	if got := readEngram(t, eng, vault, head).Trust; got != storage.TrustUntrusted {
+		t.Errorf("current version trust = %d (%s), want untrusted", got, got.String())
+	}
+}
+
+// TestSetTrust_RacingAnEvolve_NeverLandsOnARetiredVersion: SetTrust and an
+// evolve of the same memory, started together. Whatever the interleaving, a
+// SetTrust that reports success must be visible on the live version — it ran
+// first and the evolve carried it — and one that lost the race must be refused
+// naming the successor. The outcome it must never have: success reported, level
+// written to the version the evolve just retired.
+func TestSetTrust_RacingAnEvolve_NeverLandsOnARetiredVersion(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := withMode(auth.ModeWrite)
+	const vault = "trailwork"
+	const rounds = 200
+
+	landed, refused := 0, 0
+	for i := 0; i < rounds; i++ {
+		w, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault: vault, Concept: fmt.Sprintf("Marker post %d", i),
+			Content: fmt.Sprintf("Marker post %d stands at the ridge junction.", i),
+		})
+		if err != nil {
+			t.Fatalf("round %d: Write: %v", i, err)
+		}
+
+		var (
+			wg           sync.WaitGroup
+			start        = make(chan struct{})
+			newID        storage.ULID
+			evErr, trErr error
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			newID, evErr = eng.Evolve(ctx, vault, w.ID,
+				fmt.Sprintf("Marker post %d stands at the ridge junction, repainted.", i), "repainted", nil, "")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			// Vary who reaches the memory first without sleeping: yield a
+			// round-dependent number of times, so the rounds cover SetTrust
+			// first, the evolve first, and the overlap between.
+			for k := 0; k < (i%16)*4; k++ {
+				runtime.Gosched()
+			}
+			trErr = eng.SetTrust(ctx, vault, w.ID, "untrusted")
+		}()
+		close(start)
+		wg.Wait()
+
+		if evErr != nil {
+			t.Fatalf("round %d: Evolve: %v", i, evErr)
+		}
+		live := readEngram(t, eng, vault, newID.String())
+		switch {
+		case trErr == nil:
+			landed++
+			if live.Trust != storage.TrustUntrusted {
+				t.Fatalf("round %d: SetTrust(untrusted) reported success, but the live version %s has "+
+					"trust=%d (%s): the level was written to the version the evolve retired and is lost",
+					i, newID.String(), live.Trust, live.Trust.String())
+			}
+		case errors.Is(trErr, ErrTrustTargetSuperseded):
+			refused++
+			if !strings.Contains(trErr.Error(), newID.String()) {
+				t.Fatalf("round %d: refusal does not name the successor %s: %v", i, newID.String(), trErr)
+			}
+			if live.Trust != storage.TrustInferred {
+				t.Fatalf("round %d: SetTrust was refused, yet the live version's trust is %d (%s)",
+					i, live.Trust, live.Trust.String())
+			}
+		default:
+			t.Fatalf("round %d: SetTrust: unexpected error: %v", i, trErr)
+		}
+	}
+	t.Logf("%d rounds: the level landed first and was carried %d times; SetTrust was refused naming the successor %d times",
+		rounds, landed, refused)
+}
+
+// ---------------------------------------------------------------------------
+// The upsert path resolves a caller's trust and confidence before it picks a
+// branch.
+// ---------------------------------------------------------------------------
+
+// TestUpsert_TrustIsResolvedOnEveryBranch: the identical-content branch writes
+// nothing, and it used to skip validation with it — trust="nonsense" was
+// accepted there with no error, as was a verified the caller may not assert.
+// The label is now resolved before the branch is chosen. The VALUES still apply
+// only where something is written: an identical-content re-sync stays a no-op.
+func TestUpsert_TrustIsResolvedOnEveryBranch(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := withMode(auth.ModeWrite)
+
+	const text = "The lower loop footbridge was re-boarded in June."
+	first, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: "trailwork", Concept: "Footbridge boards", Content: text,
+		IdempotentID: "footbridge-boards", UpsertMode: true,
+	})
+	if err != nil {
+		t.Fatalf("upsert create: %v", err)
+	}
+	same := func(c context.Context, trust string, confidence float32) (*mbp.WriteResponse, error) {
+		return eng.Write(c, &mbp.WriteRequest{
+			Vault: "trailwork", Concept: "Footbridge boards", Content: text,
+			IdempotentID: "footbridge-boards", UpsertMode: true,
+			Trust: trust, Confidence: confidence,
+		})
+	}
+
+	if resp, err := same(ctx, "nonsense", 0); err == nil {
+		t.Errorf("identical-content re-sync accepted an invalid trust label (hint %q)", resp.Hint)
+	} else if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("invalid trust label: error is not ErrInvalidRequest: %v", err)
+	}
+	if resp, err := same(withMode(auth.ModeObserve), "verified", 0); err == nil {
+		t.Errorf("identical-content re-sync accepted trust=verified from a mode that may not assert "+
+			"it (hint %q)", resp.Hint)
+	} else if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("unauthorised verified: error is not ErrInvalidRequest: %v", err)
+	}
+
+	// A valid label on identical content: accepted, and still a no-op.
+	resp, err := same(ctx, "external", 0.5)
+	if err != nil {
+		t.Fatalf("identical-content re-sync with a valid trust: %v", err)
+	}
+	if resp.Hint != "upsert-identical" || resp.ID != first.ID {
+		t.Fatalf("premise not reproduced: hint=%q id=%s, want upsert-identical on %s", resp.Hint, resp.ID, first.ID)
+	}
+	got := readEngram(t, eng, "trailwork", first.ID)
+	if got.Trust != storage.TrustInferred || got.Confidence < 0.999 {
+		t.Errorf("an identical-content re-sync changed the record: trust=%d (%s) confidence=%v, want "+
+			"inferred/1.0 — it is documented as a no-op", got.Trust, got.Trust.String(), got.Confidence)
+	}
+	assertHeadUntouched(t, eng, "trailwork", "footbridge-boards", first.ID, text, storage.TrustInferred)
+}
+
+// ---------------------------------------------------------------------------
+// Confidence is range-checked wherever a request's value is stored.
+// ---------------------------------------------------------------------------
+
+// TestConfidenceFromRequest is the table for the helper: (0,1] is kept, above 1
+// clamps to 1, and NaN, zero and negatives mean "not supplied" (0, the unset
+// sentinel that reads back as 1.0).
+func TestConfidenceFromRequest(t *testing.T) {
+	cases := []struct {
+		name string
+		in   float32
+		want float32
+	}{
+		{"zero is not supplied", 0, 0},
+		{"negative is not supplied", -0.5, 0},
+		{"NaN is not supplied", float32(math.NaN()), 0},
+		{"-Inf is not supplied", float32(math.Inf(-1)), 0},
+		{"small positive is kept", 0.01, 0.01},
+		{"mid-range is kept", 0.6, 0.6},
+		{"one is kept", 1, 1},
+		{"above one clamps", 5, 1},
+		{"+Inf clamps", float32(math.Inf(1)), 1},
+	}
+	for _, c := range cases {
+		if got := confidenceFromRequest(c.in); got != c.want {
+			t.Errorf("%s: confidenceFromRequest(%v) = %v, want %v", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+// TestStoredConfidence_IsRangeChecked drives the three places a request's
+// confidence is stored — create, batch create and the upsert content-change
+// step — with out-of-range values. Confidence multiplies straight into the
+// recall score, so a stored 5 outranks every honest memory. The upsert step is
+// the one #872 made live (a re-sync's confidence used to be dropped); the two
+// create paths had the same hole before it.
+func TestStoredConfidence_IsRangeChecked(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := withMode(auth.ModeWrite)
+	const vault = "trailwork"
+
+	cases := []struct {
+		name string
+		in   float32
+		want float32 // as read back
+	}{
+		{"above one clamps to one", 5, 1},
+		{"negative is not supplied", -0.5, 1},
+		{"NaN is not supplied", float32(math.NaN()), 1},
+		{"in range is kept", 0.6, 0.6},
+	}
+	near := func(a, b float32) bool { return a > b-0.001 && a < b+0.001 }
+
+	for i, c := range cases {
+		// create
+		w, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault: vault, Concept: fmt.Sprintf("Gate count %d", i),
+			Content: fmt.Sprintf("Gate count %d on the valley path is fourteen.", i), Confidence: c.in,
+		})
+		if err != nil {
+			t.Fatalf("%s: Write: %v", c.name, err)
+		}
+		if got := readEngram(t, eng, vault, w.ID).Confidence; !near(got, c.want) {
+			t.Errorf("create, %s: requested %v, stored confidence reads %v, want %v", c.name, c.in, got, c.want)
+		}
+
+		// batch create
+		resps, errs := eng.WriteBatch(ctx, []*mbp.WriteRequest{{
+			Vault: vault, Concept: fmt.Sprintf("Stile count %d", i),
+			Content: fmt.Sprintf("Stile count %d on the valley path is six.", i), Confidence: c.in,
+		}})
+		if errs[0] != nil {
+			t.Fatalf("%s: WriteBatch: %v", c.name, errs[0])
+		}
+		if got := readEngram(t, eng, vault, resps[0].ID).Confidence; !near(got, c.want) {
+			t.Errorf("batch create, %s: requested %v, stored confidence reads %v, want %v", c.name, c.in, got, c.want)
+		}
+
+		// upsert content change
+		key := fmt.Sprintf("bench-count-%d", i)
+		if _, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault: vault, Concept: fmt.Sprintf("Bench count %d", i),
+			Content:      fmt.Sprintf("Bench count %d on the valley path is three.", i),
+			IdempotentID: key, UpsertMode: true, Confidence: 0.8,
+		}); err != nil {
+			t.Fatalf("%s: upsert create: %v", c.name, err)
+		}
+		up, err := eng.Write(ctx, &mbp.WriteRequest{
+			Vault:        vault,
+			Content:      fmt.Sprintf("Bench count %d on the valley path is four.", i),
+			IdempotentID: key, UpsertMode: true, Confidence: c.in,
+		})
+		if err != nil {
+			t.Fatalf("%s: upsert evolve: %v", c.name, err)
+		}
+		if up.Hint != "upsert-evolved" {
+			t.Fatalf("%s: premise not reproduced: hint = %q, want upsert-evolved", c.name, up.Hint)
+		}
+		if got := readEngram(t, eng, vault, up.ID).Confidence; !near(got, c.want) {
+			t.Errorf("upsert content change, %s: requested %v, stored confidence reads %v, want %v",
+				c.name, c.in, got, c.want)
+		}
 	}
 }

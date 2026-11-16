@@ -2290,7 +2290,7 @@ func TestActivate_TrustPropagation(t *testing.T) {
 // trust, so the predecessor is already inferred and "stamped" and "inherited"
 // are indistinguishable here. It is kept as the ordinary-case pin, with an
 // explicit premise assertion so a future reader can see what it does and does
-// not prove; the discriminating cases live in engine_evolve_standing_test.go.
+// not prove; the discriminating cases live in engine_evolve_trust_test.go.
 func TestEvolve_InferredPredecessorStaysInferred(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
@@ -2345,7 +2345,8 @@ func TestEngine_SetTrust(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	if err := eng.SetTrust(context.Background(), "default", resp.ID, "verified"); err != nil {
+	// verified is gated (SEC-14): SetTrust needs a context whose mode may assert it.
+	if err := eng.SetTrust(withMode(auth.ModeWrite), "default", resp.ID, "verified"); err != nil {
 		t.Fatalf("SetTrust: %v", err)
 	}
 
@@ -2363,8 +2364,10 @@ func TestEngine_SetTrust(t *testing.T) {
 
 	// SetTrust on a nonexistent engram returns an error
 	fakeID := "01ARZ3NDEKTSV4RRFFQ69G5FAV" // valid ULID format but no such engram
-	if err := eng.SetTrust(context.Background(), "default", fakeID, "verified"); err == nil {
-		t.Error("expected error for nonexistent engram")
+	// Under a mode that clears the verified gate, so the error is the missing
+	// engram and not the gate.
+	if err := eng.SetTrust(withMode(auth.ModeWrite), "default", fakeID, "verified"); !errors.Is(err, ErrEngramNotFound) {
+		t.Errorf("SetTrust on a nonexistent engram: err = %v, want ErrEngramNotFound", err)
 	}
 }
 

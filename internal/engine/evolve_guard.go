@@ -18,6 +18,12 @@ import (
 // 15 such forks.
 var ErrEvolveTargetSuperseded = errors.New("evolve target is already superseded")
 
+// ErrTrustTargetSuperseded is returned (wrapped) when SetTrust targets a memory
+// that already has a successor. A trust level set on a retired version does not
+// reach the version recall returns: the write would succeed and change nothing
+// a reader sees — and a revocation aimed at a stale id would be silently lost.
+var ErrTrustTargetSuperseded = errors.New("trust target is superseded")
+
 // evolveLock returns the stripe mutex for (vault, target id).
 func (e *Engine) evolveLock(ws [8]byte, id storage.ULID) *sync.Mutex {
 	h := fnv.New32a()
@@ -108,4 +114,55 @@ func (e *Engine) refuseSupersededEvolveTarget(ctx context.Context, ws [8]byte, t
 		return refuse(fmt.Sprintf("Its current version is %s — evolve %s instead (read it first: your edit may predate it).", cur.String(), cur.String()))
 	}
 	return refuse(fmt.Sprintf("Its successor chain is longer than %d hops; the last version reached is %s.", supersessionMaxDepth, cur.String()))
+}
+
+// refuseSupersededTrustTarget returns nil when target has no successor (the
+// ordinary case). Otherwise it walks the supersession chain as far as it
+// resolves and returns an ErrTrustTargetSuperseded naming the current version,
+// so the caller can set the level on the memory that is actually served.
+//
+// Reject rather than redirect, for the reason refuseSupersededEvolveTarget
+// gives: the caller decided about the version they hold, and a newer version
+// may say something else. The caller must hold evolveLock(ws, target): without
+// it an evolve can retire target between this check and the trust write.
+//
+// Like the evolve guard this is a writer's walk, not gated by recall
+// visibility, and it costs an ordinary target one reverse-association read.
+func (e *Engine) refuseSupersededTrustTarget(ctx context.Context, ws [8]byte, target storage.ULID) error {
+	succ, err := e.distinctSuperseders(ctx, ws, target)
+	if err != nil {
+		return fmt.Errorf("trust: check for a successor: %w", err)
+	}
+	if len(succ) == 0 {
+		return nil
+	}
+	refuse := func(detail string) error {
+		return fmt.Errorf("%w: memory %s has been superseded, so a trust level set on it would not reach the version recall returns. %s",
+			ErrTrustTargetSuperseded, target.String(), detail)
+	}
+	// A long chain of evolved versions must still resolve to its head — naming
+	// the head is the whole point of the refusal — so this uses the vault's walk
+	// limit (every retired memory could be a hop), not the 8-hop slack.
+	limit := e.supersessionWalkLimit(ctx, ws)
+	visited := map[storage.ULID]bool{target: true}
+	cur := target
+	for depth := 0; depth < limit; depth++ {
+		if len(succ) > 1 {
+			return refuse(fmt.Sprintf("Its version history is forked at %s; read it with muninn_read and set the level on the version you mean.", cur.String()))
+		}
+		next := succ[0]
+		if visited[next] {
+			return refuse(fmt.Sprintf("Its supersession chain has a cycle at %s.", next.String()))
+		}
+		visited[next] = true
+		cur = next
+		succ, err = e.distinctSuperseders(ctx, ws, cur)
+		if err != nil {
+			return fmt.Errorf("trust: walk successor chain: %w", err)
+		}
+		if len(succ) == 0 {
+			return refuse(fmt.Sprintf("Its current version is %s — set the trust level on %s instead.", cur.String(), cur.String()))
+		}
+	}
+	return refuse(fmt.Sprintf("Its successor chain is longer than %d hops; the last version reached is %s.", limit, cur.String()))
 }

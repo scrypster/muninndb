@@ -1482,6 +1482,24 @@ func importanceFromRequest(p *float32) float32 {
 	return v
 }
 
+// confidenceFromRequest resolves a caller-asserted confidence into the stored
+// representation. Confidence multiplies straight into the recall score, so a
+// value outside (0,1] is never stored: above 1 clamps to 1, and NaN, zero or a
+// negative value mean "not supplied" and return 0, which the storage layer
+// writes as 1.0. A WRITE therefore cannot store 0 — it never could — and this
+// makes the rest of the range honest (a request for 5 used to be stored as 5).
+// It governs writes only: the confidence of a stored memory is moved by other
+// paths (contradiction evidence, AdjustConfidence), which have their own bounds.
+func confidenceFromRequest(c float32) float32 {
+	if math.IsNaN(float64(c)) || c <= 0 {
+		return 0
+	}
+	if c > 1 {
+		return 1
+	}
+	return c
+}
+
 // observeWriteFloor records, per vault, an engram that was persisted with no
 // summary at write time. It reads the ENGRAM rather than the WriteRequest, so it
 // reflects what was actually stored.
@@ -1630,7 +1648,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		Concept:    req.Concept,
 		Content:    req.Content,
 		Tags:       req.Tags,
-		Confidence: req.Confidence,
+		Confidence: confidenceFromRequest(req.Confidence),
 		Stability:  req.Stability,
 		Importance: importanceFromRequest(req.Importance),
 		Embedding:  req.Embedding,
@@ -2085,6 +2103,34 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 		return nil, err
 	}
 
+	// Resolve the caller's trust and confidence ONCE, before the branch is
+	// chosen, so an invalid or unauthorised trust label is refused on every
+	// branch. Resolved only on the content-change branch, an identical-content
+	// re-sync accepted trust="nonsense" — and trust=verified from a context
+	// that may not assert it — with no error. The values themselves are applied
+	// only where something is written: create (through Write) and content
+	// change (through evolveAtInternal); the identical-content branch is a
+	// no-op and ignores them.
+	//
+	// Before #872 both were honored on the CREATE branch and silently discarded
+	// on the content-change branch, so a sync job stamping trust=verified on
+	// every run produced a verified record on first sync and an inferred one on
+	// every re-sync, with no error and no warning — principle #1. A re-sync's
+	// confidence is live for the first time here, so it is range-checked like
+	// any stored confidence (confidenceFromRequest).
+	var trustPtr *storage.TrustLevel
+	if req.Trust != "" {
+		lvl, tErr := resolveTrust(ctx, req.Trust)
+		if tErr != nil {
+			return nil, tErr
+		}
+		trustPtr = &lvl
+	}
+	var confPtr *float32
+	if c := confidenceFromRequest(req.Confidence); c > 0 {
+		confPtr = &c
+	}
+
 	keyHash := sha256.Sum256([]byte(req.IdempotentID))
 	mu := e.upsertKeyLock(wsPrefix, keyHash)
 	mu.Lock()
@@ -2166,29 +2212,11 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	// supplied, importance when asserted. EffectiveAt defaults to now inside
 	// EvolveAt.
 	//
-	// Trust and confidence: the request carries both, and this branch is the one
-	// place where an evolve has a caller-asserted value to honor. Before #872
-	// they were honored on the CREATE branch and silently discarded here, so a
-	// sync job stamping trust=verified on every run produced a verified record
-	// on first sync and an inferred one on every re-sync, with no error and no
-	// warning — principle #1. nil (field omitted) falls through to
-	// evolveAtInternal's defaults, which differ by field: trust is inherited
-	// from the head, confidence is NOT (the successor is written at 1.0).
-	// resolveTrust keeps the SEC-14 gate on trust=verified attached to this
-	// path: an observe credential is REJECTED, never silently downgraded.
-	var trustPtr *storage.TrustLevel
-	if req.Trust != "" {
-		lvl, tErr := resolveTrust(ctx, req.Trust)
-		if tErr != nil {
-			return nil, tErr
-		}
-		trustPtr = &lvl
-	}
-	var confPtr *float32
-	if req.Confidence > 0 {
-		c := req.Confidence
-		confPtr = &c
-	}
+	// Trust and confidence were resolved at the top of this function. nil (not
+	// supplied) falls through to evolveAtInternal's defaults, which differ by
+	// field: trust is inherited from the head — through the same gate an
+	// asserted verified clears — and confidence is NOT inherited (the successor
+	// is written at 1.0).
 	concept := req.Concept // "" → EvolveAt inherits the predecessor's concept
 	newID, evErr := e.evolveAtInternal(
 		ctx,
@@ -2458,7 +2486,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			Concept:    req.Concept,
 			Content:    req.Content,
 			Tags:       req.Tags,
-			Confidence: req.Confidence,
+			Confidence: confidenceFromRequest(req.Confidence),
 			Stability:  req.Stability,
 			Importance: importanceFromRequest(req.Importance),
 			Embedding:  req.Embedding,
@@ -4537,6 +4565,19 @@ func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state stri
 // SetTrust changes the trust label of an engram identified by id (string ULID).
 // trust must be one of "verified", "inferred", "external", "untrusted".
 // Returns an error if the engram is not found or trust is invalid.
+//
+// Two rules it shares with the rest of the write path (#872):
+//
+//   - Setting verified clears the gate that asserting it on a write clears and
+//     that inheriting it through an evolve clears (SEC-14): resolveTrust. Every
+//     engine path that can put verified on a record goes through that one
+//     function, so the rule holds independent of how the call was routed.
+//   - A superseded target is refused, naming the current version. A level set
+//     on a retired version changes nothing recall serves, so a revocation aimed
+//     at a stale id used to succeed and be lost. The check and the write run
+//     under the id's evolve lock: an evolve of the same memory either sees the
+//     new level and carries it, or has already retired the target and this
+//     call is refused.
 func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
 	if err := e.refuseWrite(ctx); err != nil {
 		return err
@@ -4545,10 +4586,21 @@ func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
 	if err != nil {
 		return fmt.Errorf("parse trust: %w", err)
 	}
+	if level == storage.TrustVerified {
+		if _, err := resolveTrust(ctx, trust); err != nil {
+			return err
+		}
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)
 	if err != nil {
 		return fmt.Errorf("parse id: %w", err)
+	}
+	mu := e.evolveLock(ws, ulid)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := e.refuseSupersededTrustTarget(ctx, ws, ulid); err != nil {
+		return err
 	}
 	if err := e.store.UpdateTrust(ctx, ws, ulid, level); err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -4709,7 +4761,10 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 // upsertKeyHash uses: no embedded-library, MCP or REST signature moves.
 //
 // trustOverride must already have been through resolveTrust — the SEC-14 gate on
-// trust=verified lives there, and evolveAtInternal does not re-check it.
+// trust=verified lives there, and evolveAtInternal does not re-check an asserted
+// level. A nil trustOverride that would INHERIT verified is checked here, by the
+// same resolveTrust: an inherited verified clears the same gate as an asserted
+// one.
 func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time, upsertKeyHash *[32]byte, trustOverride *storage.TrustLevel, confOverride *float32) (storage.ULID, error) {
 	// Append-mode credentials cannot evolve (modify an existing memory). Guarding
 	// EvolveAt covers Evolve too, since Evolve delegates here (#687 + valid-time).
@@ -4793,24 +4848,32 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 	// evolve replaces a record's CONTENT; it does not re-adjudicate who vouched
 	// for it.
 	//
-	// The old hardcoded TrustInferred laundered an "untrusted" marking
-	// off any record simply by rewording it, and demoted a human-verified one on
-	// every routine curation — which, for a Decision/Goal/Constraint/Identity
-	// with no explicit importance, silently moved it from EffectiveImportance
-	// 0.70000005 (verified bump, at or above HighImportanceFloor) to 0.6, i.e.
-	// out of the COG-20 MaxEngrams prune exemption. Inheriting confers no
-	// privilege: every credential that can evolve can already stamp trust
-	// directly on a write (MCP muninn_evolve and muninn_trust are both in
-	// mutatingTools; REST evolve's guards admit a subset of the credentials
-	// POST /api/engrams admits, and that body carries trust), so SEC-14 is
-	// untouched. TrustUnset (0x00, legacy records written before the field
-	// existed) normalizes to TrustInferred, matching resolveTrust("").
+	// The old hardcoded TrustInferred laundered an "untrusted" marking off any
+	// record simply by rewording it, and demoted a human-verified one on every
+	// routine curation — which, for a Decision/Goal/Constraint/Identity with no
+	// explicit importance, silently moved it from EffectiveImportance 0.70000005
+	// (verified bump, at or above HighImportanceFloor) to 0.6, i.e. out of the
+	// COG-20 MaxEngrams prune exemption. TrustUnset (0x00, legacy records
+	// written before the field existed) normalizes to TrustInferred, matching
+	// resolveTrust("").
+	//
+	// An INHERITED verified clears the same gate as an ASSERTED one (SEC-14): a
+	// caller that may not assert verified on a write may not produce a verified
+	// successor. Both go through resolveTrust, here in the engine, as defence in
+	// depth: the rule holds independent of transport routing. Refused, never
+	// downgraded — a silent drop to inferred is the demotion this fix exists to
+	// stop. It is decided before anything is written. Pinned per mode by
+	// TestEvolve_VerifiedCarry_ClearsTheStampGate.
 	newTrust := oldEng.Trust
 	if newTrust == storage.TrustUnset {
 		newTrust = storage.TrustInferred
 	}
 	if trustOverride != nil {
 		newTrust = *trustOverride
+	} else if newTrust == storage.TrustVerified {
+		if _, err := resolveTrust(ctx, "verified"); err != nil {
+			return storage.ULID{}, fmt.Errorf("evolve: predecessor is trust=verified: %w", err)
+		}
 	}
 	// CONFIDENCE is NOT carried from the predecessor: the successor is written
 	// at 1.0 unless the caller supplied a value on this write. That is a

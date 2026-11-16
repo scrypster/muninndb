@@ -166,3 +166,41 @@ func TestEvolveOverMCP_CarriedTrustWarningReachesTheWire(t *testing.T) {
 			"response=%v", out)
 	}
 }
+
+// muninn_trust on the wire: a superseded id is refused with a message that names
+// the current version, so the caller can retry on the right memory — and the
+// retry, including verified, goes through. A level set on a retired version
+// would change nothing recall returns.
+func TestTrustOverMCP_SupersededIdIsRefusedNamingTheCurrentVersion(t *testing.T) {
+	eng, srv, _, cleanup := newDebtServer(t)
+	defer cleanup()
+
+	w, err := eng.Write(writeCtx(), &mbp.WriteRequest{
+		Vault:   "default",
+		Concept: "Ford crossing depth",
+		Content: "The ford is ankle deep in summer.",
+	})
+	if err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+	evolved := callTool(t, srv, "muninn_evolve", fmt.Sprintf(
+		`{"vault":"default","id":%q,"new_content":"The ford is knee deep after rain.","reason":"corrected","concept":"Ford crossing depth"}`,
+		w.ID))
+	head, _ := evolved["id"].(string)
+	if head == "" || head == w.ID {
+		t.Fatalf("premise not reproduced: evolve returned id %q", head)
+	}
+
+	msg := callToolRPCError(t, srv, "muninn_trust", fmt.Sprintf(`{"vault":"default","id":%q,"trust":"untrusted"}`, w.ID))
+	if !strings.Contains(msg, head) {
+		t.Fatalf("muninn_trust on a superseded id did not name the current version %s: %q", head, msg)
+	}
+	if !strings.Contains(msg, "superseded") {
+		t.Errorf("the refusal does not say why: %q", msg)
+	}
+
+	res := callTool(t, srv, "muninn_trust", fmt.Sprintf(`{"vault":"default","id":%q,"trust":"verified"}`, head))
+	if ok, _ := res["ok"].(bool); !ok {
+		t.Fatalf("muninn_trust(verified) on the current version did not succeed: %v", res)
+	}
+}

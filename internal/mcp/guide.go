@@ -304,8 +304,10 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- `muninn_evolve` likewise inherits the predecessor's `trust` level. ")
 	b.WriteString("An evolve replaces a memory's CONTENT; it does not re-adjudicate who vouched for it. ")
 	b.WriteString("So rewording an `untrusted` memory does NOT clear the flag, and a `verified` memory stays ")
-	b.WriteString("verified (the response warns you when either level is carried). Change the level deliberately with ")
-	b.WriteString("`muninn_trust(id, level)`. Confidence is NOT inherited: the new version is stored at confidence 1.0.\n")
+	b.WriteString("verified. `muninn_evolve` warns in its response when either level is carried; a content change made ")
+	b.WriteString("through `muninn_remember` with `upsert_mode` carries the level the same way but does NOT warn. ")
+	b.WriteString("Change the level deliberately with `muninn_trust(id, level)`, on the current version — a superseded id ")
+	b.WriteString("is refused with the current one named. Confidence is NOT inherited: the new version is stored at confidence 1.0.\n")
 
 	// Prospective memory (THE PUSH)
 	b.WriteString("\n## Prospective memory (muninn_intend)\n\n")

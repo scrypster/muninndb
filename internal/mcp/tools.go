@@ -101,7 +101,7 @@ func allToolDefinitions() []ToolDefinition {
 					"content":     map[string]any{"type": "string", "description": "The information to remember." + contentMarkupTip},
 					"concept":     map[string]any{"type": "string", "description": "Short label for this memory."},
 					"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
-					"confidence":  map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
+					"confidence":  map[string]any{"type": "number", "description": "Confidence in (0,1] (default 1.0). A value above 1 is stored as 1; 0 or less means not supplied, so a write cannot store 0."},
 					"importance":  map[string]any{"type": "number", "description": "Importance 0.0-1.0 — how much this memory matters (priority axis, orthogonal to confidence/truth). Memories with effective importance >= 0.7 are protected from capacity (max_engrams) pruning; importance does not affect decay or recall ranking. Omit to use a default derived from the memory type (decisions/goals/constraints rank higher than observations/events)."},
 					"created_at":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this memory was created (transaction time). Defaults to now."},
 					"valid_from":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact BECAME TRUE (application time — distinct from created_at, which records when it was stored). Defaults to created_at. Use for historical facts, e.g. storing today that the office moved last January."},
@@ -148,7 +148,7 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"upsert_mode": map[string]any{
 						"type":        "boolean",
-						"description": "Optional. With op_id set, keep one stable memory per key across repeated writes: created on first use, and on later writes with the SAME op_id either left alone (identical content) or EVOLVED (changed content — a new version supersedes the old one, which stays retrievable as history). Requires op_id. Differs from a plain op_id retry, which always returns the original unchanged even if the content differs. NOTE on the evolve step: content always comes from this call, and tags, memory type and type label are always inherited from the previous version (use muninn_update_tags to retag). Concept, importance and trust are inherited too UNLESS you supply them on this call, in which case your value is honored — the same on the evolve step as on the first write (trust=verified still requires a write or full credential). Confidence is NOT inherited: supply it on this call and it is applied, otherwise the new version is stored at 1.0.",
+						"description": "Optional. With op_id set, keep one stable memory per key across repeated writes: created on first use, and on later writes with the SAME op_id either left alone (identical content) or EVOLVED (changed content — a new version supersedes the old one, which stays retrievable as history). Requires op_id. Differs from a plain op_id retry, which always returns the original unchanged even if the content differs. NOTE on the evolve step: content always comes from this call, and tags, memory type and type label are always inherited from the previous version (use muninn_update_tags to retag). Concept, importance and trust are inherited too UNLESS you supply them on this call, in which case your value is honored — the same on the evolve step as on the first write (trust=verified, supplied or inherited, requires a write or full credential). Confidence is NOT inherited: supply a confidence in (0,1] on this call and it is applied, otherwise the new version is stored at 1.0. These values apply only when the content CHANGES: an identical-content call is a no-op and applies none of them (an invalid or unauthorised trust is still rejected).",
 					},
 					"embedding": map[string]any{
 						"type":        "array",
@@ -176,7 +176,7 @@ func allToolDefinitions() []ToolDefinition {
 								"content":     map[string]any{"type": "string", "description": "The information to remember." + contentMarkupTip},
 								"concept":     map[string]any{"type": "string", "description": "Short label for this memory."},
 								"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional topic tags."},
-								"confidence":  map[string]any{"type": "number", "description": "Confidence score 0.0-1.0 (default 1.0)."},
+								"confidence":  map[string]any{"type": "number", "description": "Confidence in (0,1] (default 1.0). A value above 1 is stored as 1; 0 or less means not supplied, so a write cannot store 0."},
 								"importance":  map[string]any{"type": "number", "description": "Importance 0.0-1.0 (priority axis; >= 0.7 is protected from capacity pruning; does not affect decay or ranking). Omit for a type-derived default."},
 								"created_at":  map[string]any{"type": "string", "description": "ISO 8601 timestamp (transaction time). Defaults to now."},
 								"valid_from":  map[string]any{"type": "string", "description": "ISO 8601 timestamp for when this fact became true (application time). Defaults to created_at."},
@@ -1080,13 +1080,13 @@ func allToolDefinitions() []ToolDefinition {
 		// Trust label
 		{
 			Name:        "muninn_trust",
-			Description: "Set the trust level of an engram. Trust levels control how much confidence to place in a memory. Use 'verified' for human-confirmed facts, 'inferred' for AI-generated memories (default), 'external' for imported data, and 'untrusted' to flag unreliable memories. Untrusted memories can be excluded from recall by enabling ExcludeUntrusted in vault config.",
+			Description: "Set the trust level of an engram. Trust levels control how much confidence to place in a memory. Use 'verified' for human-confirmed facts, 'inferred' for AI-generated memories (default), 'external' for imported data, and 'untrusted' to flag unreliable memories. Untrusted memories can be excluded from recall by enabling ExcludeUntrusted in vault config. Set it on the CURRENT version: a memory that has been superseded (evolved) is refused with an error naming its current version, because a level set on a retired version would not reach the memory recall returns. Setting 'verified' requires a write or full credential.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"id": map[string]any{
 						"type":        "string",
-						"description": "ULID of the engram to update",
+						"description": "ULID of the engram to update — its current version; a superseded id is refused with the current one named.",
 					},
 					"trust": map[string]any{
 						"type":        "string",
