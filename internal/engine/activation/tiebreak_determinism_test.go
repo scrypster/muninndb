@@ -25,7 +25,9 @@ import (
 // under all four scoring paths (RRF, CGDN, ACT-R, legacy weighted-sum), feeds
 // phase6Score the SAME set in many different (shuffled) input orders, and
 // asserts the surviving top-N ordering is always identical -- and equal to
-// ascending-ULID order, per the documented tie-break rule.
+// DESCENDING-ULID order (newest first), the one tie rule recall applies at
+// every cut and at the final sort on every fusion path (internal/rankorder;
+// honest clock, increment 1 — it was ascending before).
 //
 // RED (pre-fix): output order tracks input order, so different shuffles of
 // the same tied candidate set produce different top-N results/orderings.
@@ -105,7 +107,11 @@ func runPhase6ScoreTieBreak(t *testing.T, weights *Weights) {
 	defer e.Close()
 
 	base := buildTiedCandidates(t, store, n)
-	wantOrder := ascendingIDOrder(base)[:maxResults]
+	asc := ascendingIDOrder(base)
+	wantOrder := make([]storage.ULID, 0, maxResults)
+	for i := len(asc) - 1; i >= len(asc)-maxResults; i-- {
+		wantOrder = append(wantOrder, asc[i])
+	}
 
 	var firstOrder []storage.ULID
 	for run := 0; run < runs; run++ {
@@ -138,7 +144,7 @@ func runPhase6ScoreTieBreak(t *testing.T, weights *Weights) {
 	}
 
 	if !ulidSliceEqual(firstOrder, wantOrder) {
-		t.Fatalf("stable order did not match ascending-ULID tie-break rule\n  got:  %v\n  want: %v",
+		t.Fatalf("stable order did not match the newest-first (descending-ULID) tie rule\n  got:  %v\n  want: %v",
 			ulidStrings(firstOrder), ulidStrings(wantOrder))
 	}
 }

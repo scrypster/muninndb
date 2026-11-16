@@ -204,6 +204,10 @@ type ActivateResponse struct {
 	LatencyMs   float64          `protobuf:"fixed64,4,opt,name=latency_ms"`
 	Frame       int32            `protobuf:"varint,5,opt,name=frame"`
 	TotalFrames int32            `protobuf:"varint,6,opt,name=total_frames"`
+	// SemanticDegraded / SemanticDegradedReason: the recall ran keyword-led
+	// because the semantic signal was unavailable, and why.
+	SemanticDegraded       bool   `protobuf:"varint,7,opt,name=semantic_degraded"`
+	SemanticDegradedReason string `protobuf:"bytes,8,opt,name=semantic_degraded_reason"`
 }
 
 // ActivationItem message

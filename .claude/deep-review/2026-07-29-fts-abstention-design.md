@@ -69,7 +69,7 @@ methodology memory: "how we validate…") accumulates bm25 ≈ 3–6 → tanh �
 match is real at the token level ("how" ∈ both) but carries no information — and the
 mapping to `full_text_relevance` erases that distinction. So the fix is **not** primarily
 tokenization (adding "how" to stopwords is whack-a-mole; "color"/"sky" caused the same bug
-in the Vuetify case) — it is the **activation mapping**: absent query terms and low-IDF
+in the UI-theme case) — it is the **activation mapping**: absent query terms and low-IDF
 matches must drag relevance *down*, which requires query-level calibration, not a
 per-hit squash.
 
@@ -146,7 +146,7 @@ Worked before/after (N=3,296, default ACT-R path, threshold 0.1, fresh engrams, 
 | query | match | full_text before | full_text after | final before | final after | result |
 |---|---|---|---|---|---|---|
 | "how to bake sourdough bread" | "Platform validation methodology" (matched: "how") | 0.9999 | ≈0.02 | ≈0.40–1.0 | ≈0.01 | **abstains** (< 0.1) |
-| "the color of the sky at dawn" | "Vuetify theme" (matched: "color") | 0.9999 | ≈0.12 | ≈0.40+ | ≈0.05 | **abstains** |
+| "the color of the sky at dawn" | a UI-theme memory (matched: "color") | 0.9999 | ≈0.12 | ≈0.40+ | ≈0.05 | **abstains** |
 | "database performance tuning" | genuine db-perf memory (3/3 stems, sem≈0.6) | 1.0 | ≈0.85–0.96 | ≈0.7–1.0 | ≈0.70 | **returned** |
 | "pricing and revenue" | genuine pricing memory (sem≈0.55, 2/2 terms) | ≈1.0 | ≈0.9 | high | ≈0.66 | **returned** |
 | natural-language query, 3 of 6 content words covered, sem≈0.6 | genuine | 1.0 | ≈0.5 | high | ≈0.55 | **returned** |
@@ -269,7 +269,7 @@ before/after table of (top concept, score, full_text_relevance, semantic_similar
   plus 2 more nonsense probes not used during development (guard against tuning to the
   probe set).
 - **Must still return their known-good matches:** "database performance tuning",
-  "pricing and revenue", "platform validation", "Vuetify theme setup", and 2 real
+  "pricing and revenue", "platform validation", a UI-theme setup query, and 2 real
   workflow queries pulled from actual session history.
 
 † expected to **still fail** (semantic 0.54 hole, deferral #1) — report it as a known

@@ -28,10 +28,22 @@ import (
 // strictly stronger than "zero substitutions on the nonsense probes".
 //
 // It reuses TestMeasureAbstentionGate's fixture verbatim — the same 18-engram
-// synthetic billing corpus, the same 12 answerable paraphrases and 16 nonsense
-// probes, the same real bge-small embedder — so the numbers are directly
-// comparable to the recorded 0.6410 / 6.2% baseline.
+// synthetic booking corpus, the same 12 answerable paraphrases and 16 nonsense
+// probes, the same real bge-small embedder. The live-metric check compares the
+// grafted run against a graft-free run measured IN THE SAME TEST, from the same
+// embeddings, rather than against a number recorded on one machine: the
+// embedder's arithmetic is platform-dependent, so a pinned NDCG is a statement
+// about the machine it was recorded on, not about the graft.
 // ---------------------------------------------------------------------------
+
+// shadowRecordedBaseline* are the graft-free numbers recorded on one platform
+// (darwin/arm64, real bge-small) when this corpus was introduced. They are
+// LOGGED as context only and never asserted — the assertion uses the same-run
+// baseline.
+const (
+	shadowRecordedBaselineNDCG = 0.8026
+	shadowRecordedBaselineFPR  = 2.0 / 16.0
+)
 
 // shadowGraftChain marks one corpus member as a superseded predecessor,
 // exactly as EvolveAt leaves it: soft-deleted AND stamped with a closed
@@ -61,35 +73,36 @@ func shadowGraftChain(t *testing.T, store *stubStore, byConcept map[string]stora
 	return predID, succ.ID
 }
 
-// TestMeasureShadowPrecision_GraftedChain is the gate: with a declared chain in
-// the corpus, the 16 nonsense probes must produce ZERO shadows, and the
-// answerable set's NDCG@5 / the unanswerable set's FPR must not move from the
-// recorded baseline.
-func TestMeasureShadowPrecision_GraftedChain(t *testing.T) {
-	embedder, svc := realBGEEmbedder(t)
-	_ = embedder
-	embedOne := func(text string) []float32 {
-		vec, err := svc.Embed(context.Background(), []string{text})
-		if err != nil {
-			t.Fatalf("embed %q: %v", text, err)
-		}
-		return vec
-	}
+// shadowArm is one engine over the corpus: either the plain corpus (the
+// graft-free baseline) or the corpus with a declared chain grafted in.
+type shadowArm struct {
+	run       func(query string) *activation.ActivateResult
+	byConcept map[string]storage.ULID
+	pred      storage.ULID // zero on the graft-free arm
+}
 
+// shadowBuildArm writes the corpus into a fresh store, reusing the vectors in
+// corpusVecs (keyed by concept) so both arms see byte-identical embeddings, and
+// grafts the declared chain when graft is true.
+func shadowBuildArm(t *testing.T, embedder activation.Embedder, embedOne func(string) []float32,
+	corpusVecs map[string][]float32, graft bool) shadowArm {
+	t.Helper()
 	store := newStubStore()
-	vecs := make(map[storage.ULID][]float32, len(billingCorpus)+1)
-	byConcept := make(map[string]storage.ULID, len(billingCorpus))
-	for _, n := range billingCorpus {
+	vecs := make(map[storage.ULID][]float32, len(bookingCorpus)+1)
+	byConcept := make(map[string]storage.ULID, len(bookingCorpus))
+	for _, n := range bookingCorpus {
 		eng := &storage.Engram{
 			Concept: n.concept, Content: n.content,
 			Confidence: 1.0, Stability: 30.0, CreatedAt: abmFixtureNow(),
 		}
 		store.writeEngram(eng)
 		byConcept[n.concept] = eng.ID
-		vecs[eng.ID] = embedOne(n.concept + " " + n.content)
+		vecs[eng.ID] = corpusVecs[n.concept]
 	}
-	pred, succ := shadowGraftChain(t, store, byConcept, embedOne, vecs)
-	_ = succ
+	var pred storage.ULID
+	if graft {
+		pred, _ = shadowGraftChain(t, store, byConcept, embedOne, vecs)
+	}
 
 	eng := activation.New(store, &stubFTS{}, &bruteForceCosineIndex{vecs: vecs}, embedder)
 	t.Cleanup(eng.Close)
@@ -110,6 +123,55 @@ func TestMeasureShadowPrecision_GraftedChain(t *testing.T) {
 		}
 		return res
 	}
+	return shadowArm{run: run, byConcept: byConcept, pred: pred}
+}
+
+// shadowLiveMetrics measures the live gate on one arm: NDCG@5 over the
+// answerable set (gold by concept, resolved in that arm's store) and FPR over
+// the unanswerable set. perQuery holds each answerable query's NDCG@5.
+func shadowLiveMetrics(t *testing.T, a shadowArm) (ndcg, fpr float64, perQuery []float64) {
+	t.Helper()
+	var ndcgSum float64
+	for _, q := range abmAnswerable {
+		gold, ok := a.byConcept[q.goldConcept]
+		if !ok {
+			t.Fatalf("gold concept %q is not in the corpus — fixture drift", q.goldConcept)
+		}
+		v := abmNDCG5(a.run(q.query).Activations, gold)
+		perQuery = append(perQuery, v)
+		ndcgSum += v
+	}
+	falsePos := 0
+	for _, q := range abmUnanswerable {
+		if len(a.run(q).Activations) > 0 {
+			falsePos++
+		}
+	}
+	return ndcgSum / float64(len(abmAnswerable)), float64(falsePos) / float64(len(abmUnanswerable)), perQuery
+}
+
+// TestMeasureShadowPrecision_GraftedChain is the gate: with a declared chain in
+// the corpus, the 16 nonsense probes must produce ZERO shadows, and the
+// answerable set's NDCG@5 / the unanswerable set's FPR must not move from the
+// graft-free baseline measured in the same run.
+func TestMeasureShadowPrecision_GraftedChain(t *testing.T) {
+	embedder, svc := realBGEEmbedder(t)
+	embedOne := func(text string) []float32 {
+		vec, err := svc.Embed(context.Background(), []string{text})
+		if err != nil {
+			t.Fatalf("embed %q: %v", text, err)
+		}
+		return vec
+	}
+
+	// Embed the corpus ONCE; both arms reuse these vectors.
+	corpusVecs := make(map[string][]float32, len(bookingCorpus))
+	for _, n := range bookingCorpus {
+		corpusVecs[n.concept] = embedOne(n.concept + " " + n.content)
+	}
+	baseline := shadowBuildArm(t, embedder, embedOne, corpusVecs, false)
+	grafted := shadowBuildArm(t, embedder, embedOne, corpusVecs, true)
+	run, pred := grafted.run, grafted.pred
 
 	// --- the gate: zero shadows on everything the vault cannot answer -------
 	nonsenseShadows := 0
@@ -151,45 +213,31 @@ func TestMeasureShadowPrecision_GraftedChain(t *testing.T) {
 	//
 	// Shadows are excluded from maxRaw by construction (they are scored in a
 	// separate pass over a disjoint set), so a declared chain in the pool must
-	// leave the live gate's numbers exactly where TestMeasureAbstentionGate
-	// recorded them: NDCG@5 0.6410, FPR 6.2%.
-	const (
-		wantNDCG = 0.6410
-		// The recorded 6.2%% is 1 false positive in 16 probes; compare the exact
-		// fraction so the assertion is not a rounding artefact.
-		wantFPR = 1.0 / 16.0
-	)
-	var ndcgSum float64
-	for _, q := range abmAnswerable {
-		gold, ok := byConcept[q.goldConcept]
-		if !ok {
-			t.Fatalf("gold concept %q is not in the corpus — fixture drift", q.goldConcept)
-		}
-		kept := run(q.query).Activations
-		ndcgSum += abmNDCG5(kept, gold)
-	}
-	ndcg := ndcgSum / float64(len(abmAnswerable))
+	// leave the live gate's numbers where the same run WITHOUT the graft puts
+	// them. (The absolute gate does not depend on the pool, so the baseline FPR
+	// is also TestMeasureAbstentionGate's absolute-arm FPR.)
+	baseNDCG, baseFPR, basePerQuery := shadowLiveMetrics(t, baseline)
+	ndcg, fpr, perQuery := shadowLiveMetrics(t, grafted)
 
-	falsePos := 0
-	for _, q := range abmUnanswerable {
-		if len(run(q).Activations) > 0 {
-			falsePos++
+	t.Logf("graft-free baseline (this run): NDCG@5=%.4f FPR=%.1f%% | recorded on darwin/arm64, context only: NDCG@5=%.4f FPR=%.1f%%",
+		baseNDCG, 100*baseFPR, shadowRecordedBaselineNDCG, 100*shadowRecordedBaselineFPR)
+	t.Logf("with a declared chain grafted in: NDCG@5=%.4f FPR=%.1f%% (delta NDCG %+.4f)",
+		ndcg, 100*fpr, ndcg-baseNDCG)
+	for i, q := range abmAnswerable {
+		if perQuery[i] != basePerQuery[i] {
+			t.Logf("  per-query NDCG@5 moved by the graft: %.4f -> %.4f  %q", basePerQuery[i], perQuery[i], q.query)
 		}
 	}
-	fpr := float64(falsePos) / float64(len(abmUnanswerable))
-
-	t.Logf("with a declared chain grafted in: NDCG@5=%.4f (baseline %.4f) FPR=%.1f%% (baseline %.1f%%)",
-		ndcg, wantNDCG, 100*fpr, 100*wantFPR)
 	// NDCG is compared with tolerance rather than for equality: the graft
 	// REPLACES one gold document with a rewritten successor, so the query that
 	// targeted it legitimately scores differently. FPR has no such excuse —
 	// nothing about a nonsense query changed.
-	if ndcg < wantNDCG-0.10 {
-		t.Errorf("NDCG@5 %.4f fell more than 0.10 below the recorded baseline %.4f with a declared chain in the corpus",
-			ndcg, wantNDCG)
+	if ndcg < baseNDCG-0.10 {
+		t.Errorf("NDCG@5 %.4f fell more than 0.10 below the same-run graft-free baseline %.4f with a declared chain in the corpus",
+			ndcg, baseNDCG)
 	}
-	if fpr > wantFPR+1e-9 {
-		t.Errorf("FPR rose to %.1f%% from the recorded %.1f%% merely by putting a declared version chain in the corpus — "+
-			"shadows must not reach the live gate at all", 100*fpr, 100*wantFPR)
+	if fpr > baseFPR+1e-9 {
+		t.Errorf("FPR rose to %.1f%% from the same-run graft-free %.1f%% merely by putting a declared version chain in the corpus — "+
+			"shadows must not reach the live gate at all", 100*fpr, 100*baseFPR)
 	}
 }

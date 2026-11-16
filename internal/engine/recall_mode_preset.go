@@ -7,7 +7,8 @@ import (
 )
 
 // presetCarriesWeights reports whether a recall-mode preset expresses any
-// scoring-weight intent (semantic/recent do; deep and balanced don't). A
+// scoring-weight intent (only semantic does; deep, balanced and recent — an
+// empty alias of balanced — don't). A
 // weight-carrying preset defines a FULL legacy weight vector for the wire-mode
 // zero-base branch in activateCore — the RecallModePreset zero-value scheme
 // cannot express "force zero", so semantic's implicit decay=hebbian=recency=0
@@ -25,8 +26,8 @@ func presetCarriesWeights(p auth.RecallModePreset) bool {
 // effective scoring mode (actReq.Weights.UseRRFFusion) and the caller's wire
 // request (what was genuinely set by the caller vs filled by resolution).
 //
-//   - Threshold: preset thresholds are ACT-R-calibrated (semantic 0.3, recent
-//     0.2, deep 0.1). Under rrf fusion they sit far above the entire rrf score
+//   - Threshold: preset thresholds are ACT-R-calibrated (semantic 0.3, deep
+//     0.1; recent carries none — it is an alias of balanced). Under rrf fusion they sit far above the entire rrf score
 //     range (finals typically < 0.05), so the preset ABSTAINS and the
 //     mode-aware default stands (Threshold stays 0 → activation.Run() applies
 //     its rrf floor) — otherwise a mode-carrying recall re-creates the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/kljensen/snowball"
 	"github.com/scrypster/muninndb/internal/metrics"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
@@ -245,6 +247,28 @@ func docTermSet(concept, createdBy, content string, tags []string) map[string]st
 	return termSet
 }
 
+// HasPostings reports whether the engram whose document is doc has its
+// keyword postings in the index. One point read: postings are written in one
+// batch per engram, so any one of them stands for all. A document with no
+// indexable terms reports true (there is nothing to be missing).
+func (idx *Index) HasPostings(ws [8]byte, id [16]byte, doc Document) (bool, error) {
+	counts, _ := docTermCounts(doc.Concept, doc.CreatedBy, doc.Content, doc.Tags)
+	for term, fields := range counts {
+		for field := range fields {
+			_, closer, err := idx.db.Get(keys.FTSPostingKey(ws, term, field, id))
+			if err == pebble.ErrNotFound {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			closer.Close()
+			return true, nil
+		}
+	}
+	return true, nil
+}
+
 // IndexEngram writes FTS posting list entries for an engram.
 // ws is the 8-byte workspace prefix. id is the ULID.
 func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, content string, tags []string) error {
@@ -403,7 +427,7 @@ func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, cont
 // The residual: AvgDocLen does not track in-place length changes, so a vault
 // whose engrams grow their tag sets in place has a corpus average that lags low
 // and over-penalizes long documents. Direction is conservative — matches are
-// under-credited, never over-credited — and `muninn reindex-fts` recomputes
+// under-credited, never over-credited — and `muninn vault reindex-fts <name>` recomputes
 // AvgDocLen from scratch. Calling UpdateStats here is NOT the fix: it takes a
 // docLen and increments TotalEngrams, which is the N inflation this method exists
 // to avoid; a correct AvgDocLen maintenance would need a delta-aware stats update
@@ -509,7 +533,7 @@ func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) er
 // this is the path that made it reachable. The residual it leaves is bounded and
 // mild by comparison: floored at 0, one-time per spurious decrement rather than a
 // per-call ratchet, and it INFLATES the IDF of a term for the documents that do
-// hold it rather than omitting them from results. `muninn reindex-fts` recomputes
+// hold it rather than omitting them from results. `muninn vault reindex-fts <name>` recomputes
 // df_t from scratch and clears both directions.
 func (idx *Index) adjustDF(batch *pebble.Batch, ws [8]byte, term string, delta int) {
 	tkey := keys.TermStatsKey(ws, term)
@@ -577,6 +601,60 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 	start := time.Now()
 	defer func() { metrics.FTSSearchDuration.Observe(time.Since(start).Seconds()) }()
 
+	results, err := idx.scoreAll(ws, query)
+	if err != nil || results == nil {
+		return results, err
+	}
+	if topK > 0 && len(results) > topK {
+		results = results[:topK]
+	}
+	return results, nil
+}
+
+// SearchLive is Search for a vault holding RETIRED documents — superseded
+// versions whose postings are kept on purpose (COG-28: they are the keyword
+// path a query worded like an OLD version still reaches; dropping them, as
+// forget does for trash, would make that wording unable to find the current
+// fact at all). Search cuts the full score-sorted match list at topK, so
+// retired versions that out-score live documents take their slots; SearchLive
+// cuts the LIVE matches at topK and returns the best shadowBudget retired
+// matches separately, on a budget not counted against topK.
+//
+// No over-fetch is needed: BM25 coverage scoring already scores every
+// matching document before the cut, and each document's score is its own
+// (no cross-document normalisation), so skipping retired ones at the cut
+// changes no live score. Corpus statistics (N, df) still include retired
+// documents, exactly as before — a separate question from slot consumption.
+func (idx *Index) SearchLive(ctx context.Context, ws [8]byte, query string, topK int, retired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, err error) {
+	start := time.Now()
+	defer func() { metrics.FTSSearchDuration.Observe(time.Since(start).Seconds()) }()
+
+	results, err := idx.scoreAll(ws, query)
+	if err != nil || results == nil {
+		return results, nil, err
+	}
+	live = results[:0:0]
+	for _, r := range results {
+		if retired != nil && retired(r.ID) {
+			if len(shadows) < shadowBudget {
+				shadows = append(shadows, r)
+			}
+			continue
+		}
+		if topK > 0 && len(live) >= topK {
+			if len(shadows) >= shadowBudget {
+				break
+			}
+			continue
+		}
+		live = append(live, r)
+	}
+	return live, shadows, nil
+}
+
+// scoreAll scores every document matching query and returns them
+// score-descending (sortScoredIDs order), uncut. nil when nothing can match.
+func (idx *Index) scoreAll(ws [8]byte, query string) ([]ScoredID, error) {
 	// Dual-path: search both stemmed tokens (new index) and unstemmed tokens (legacy index).
 	// This ensures backward compatibility for vaults not yet re-indexed with stemming.
 	stemmedTokens := Tokenize(query)
@@ -682,10 +760,6 @@ func (idx *Index) Search(ctx context.Context, ws [8]byte, query string, topK int
 		results = append(results, ScoredID{ID: id, Score: n / denom})
 	}
 	sortScoredIDs(results)
-
-	if topK > 0 && len(results) > topK {
-		results = results[:topK]
-	}
 	return results, nil
 }
 
@@ -759,13 +833,22 @@ func (idx *Index) searchTokenCoverage(ws [8]byte, term string, numer map[[16]byt
 	return nil
 }
 
-// sortScoredIDs sorts in descending order by score.
+// sortScoredIDs sorts in descending order by score, breaking exact ties
+// newest-first (rankorder.Before: ULID descending). The tie-break is
+// load-bearing twice over. Search builds its input from a Go map, and coverage
+// is capped per term, so many documents routinely tie exactly: sorting on score
+// alone left tied documents in map-iteration order, so which of them survived
+// the topK cut — the recall candidate SET — changed between identical calls.
+// And this cut runs BEFORE recall's final sort, so its direction must be the
+// final sort's: an oldest-first cut here kept the oldest k of a set of
+// identical memories and the newest never became candidates at all.
 func sortScoredIDs(s []ScoredID) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j].Score > s[j-1].Score; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
+	sort.Slice(s, func(i, j int) bool {
+		if s[i].Score != s[j].Score {
+			return s[i].Score > s[j].Score
 		}
-	}
+		return rankorder.Before(s[i].ID, s[j].ID)
+	})
 }
 
 // FTSStats holds global FTS statistics.

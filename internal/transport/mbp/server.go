@@ -415,7 +415,9 @@ func (s *Server) handleActivate(ctx context.Context, corrID uint64, payload []by
 	}
 	req.Vault = resolved
 
-	resp, err := s.engine.Activate(ctx, &req)
+	// The response frame is the ActivateResponse verbatim, so it carries the
+	// COG-35 associated block: the engine may build it and record its ids.
+	resp, err := s.engine.Activate(WithAssociatedRendered(ctx), &req)
 	if err != nil {
 		s.queueErrorFrame(writeCh, corrID, ErrIndexError, err.Error())
 		return

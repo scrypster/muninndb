@@ -67,31 +67,44 @@ import (
 // still abstains — with a thin margin (contentMatch ~0.095 vs the 0.1 gate).
 const semanticBaselineBGE = 0.520
 
-// billingCorpus is a small, domain-coherent corpus (SaaS billing/invoicing
-// engineering notes) — coherent enough to be realistic, matching the design
-// doc's observation that in-vault text is NOT random (its cosine floor is
-// higher than pure random-pair noise), so a nonsense query against it
-// reproduces the same "in-domain-adjacent noise" shape the design measured
-// on the real vault, not an artificially easy zero-overlap case.
-var billingCorpus = []struct {
+// bookingCorpus is a small, domain-coherent corpus (the booking office of an
+// invented backcountry hut network: rates, deposits, levies, refunds, late
+// fees) — coherent enough to be realistic, matching the design doc's
+// observation that in-vault text is NOT random (its cosine floor is higher
+// than pure random-pair noise), so a nonsense query against it reproduces the
+// same "in-domain-adjacent noise" shape the design measured on a production
+// vault, not an artificially easy zero-overlap case. Every name and term here
+// is invented for this fixture.
+//
+// ORDER-SENSITIVE CONCEPT STRINGS. abmMeasureFixture marks every third concept
+// in SORTED order as Hebbian-hot, so a concept's alphabetical rank decides
+// whether it is boosted, and TestMeasureAbstentionGate's verdict depends on
+// which engrams are boosted. When this corpus replaced an earlier one, the
+// first rewording reshuffled the hot set, made one sub-floor gold engram hot,
+// and flipped that test to REJECT (NDCG@5 0.8859 -> 0.8026 for the old gate
+// vs the new) — not because any meaning changed. The concepts below were then
+// named to keep every item's sorted rank, and so its hot/cold role, identical
+// to the corpus they replaced. Renaming a concept here is a measurement change;
+// re-run that test and check the hot set before trusting its verdict.
+var bookingCorpus = []struct {
 	concept string
 	content string
 }{
-	{"Four-bucket pricing rate tiers", "The billing platform defines four pricing tiers based on monthly usage volume, each with its own per-unit rate and overage charge."},
-	{"Remittance processing flow", "Incoming remittances are matched against open invoices by reference number, then posted to the customer's account ledger."},
-	{"Dues checkoff remittance handling", "Union dues checkoff remittances arrive as a batch file and are reconciled against the member roster before posting."},
-	{"Market recovery fund calculation", "The market recovery fund surcharge is calculated as a percentage of gross billed revenue for the reporting period."},
-	{"Member classification tiers", "Members are classified into tiers based on tenure and usage; classification determines the applicable discount schedule."},
-	{"Audit score calculation", "The audit score aggregates late-payment frequency, dispute rate, and reconciliation variance into a single risk indicator."},
-	{"Per-capita billing model", "Per-capita billing charges each account a flat rate regardless of usage, recalculated annually at contract renewal."},
-	{"Ledger reconciliation procedure", "Monthly ledger reconciliation compares the billing system's posted transactions against the general ledger export."},
-	{"Employer portal onboarding", "New employer accounts are onboarded through the portal, which walks them through rate selection and payment setup."},
-	{"1919 validator quarter corrections", "Historical quarter corrections from 1919 forward were migrated into the validator's adjustment ledger during the archive import."},
-	{"JATC fund rules", "The joint apprenticeship training fund assesses a fixed per-hour contribution rate set annually by the trustees."},
-	{"Reciprocity agreement handling", "Reciprocity agreements route contributions to a member's home fund when work is performed in another jurisdiction."},
+	{"In-season bunk rate bands", "The hut booking office defines four nightly rate bands based on season and occupancy, each with its own per-bunk rate and peak surcharge."},
+	{"Reservation deposit matching", "Incoming booking deposits are matched against open reservations by confirmation code, then posted to the guest's account ledger."},
+	{"Deposit pooling for group parties", "Group leaders' pooled deposits arrive as a batch file and are reconciled against the party manifest before posting."},
+	{"Maintenance levy calculation", "The trail maintenance levy is calculated as a percentage of gross booking revenue for the reporting period."},
+	{"Overnight guest category tiers", "Guests are classified into categories based on visit count and age; the category determines the applicable discount schedule."},
+	{"Account reliability score", "The reliability score aggregates late-cancellation frequency, dispute rate, and reconciliation variance into a single risk indicator."},
+	{"Pass-holder flat rate model", "Season passes charge each holder a flat rate regardless of nights stayed, recalculated annually at pass renewal."},
+	{"Lodge cashbook reconciliation", "Monthly lodge cashbook reconciliation compares the booking system's posted transactions against the treasurer's bank export."},
+	{"Hut warden portal onboarding", "New hut wardens are onboarded through the portal, which walks them through rate selection and payout setup."},
+	{"1931 logbook season corrections", "Historical season corrections from 1931 forward were migrated into the logbook's adjustment ledger during the archive import."},
+	{"Junction footbridge fund rules", "The junction footbridge repair fund assesses a fixed per-night contribution rate set annually by the hut committee."},
+	{"Regional fee sharing", "Regional fee-sharing agreements route a guest's booking fee to the owning district when the stay is in another valley's hut."},
 	{"Invoice dispute resolution", "Disputed line items are flagged, routed to a reviewer queue, and held out of the aging report until resolved."},
 	{"Late fee assessment schedule", "Late fees accrue at a fixed percentage per 30-day period past the invoice due date, capped at four assessments."},
-	{"Batch payment file format", "Incoming batch payment files use a fixed-width layout with a header record and one detail record per remittance line."},
+	{"Batch payment file format", "Incoming batch payment files use a fixed-width layout with a header record and one detail record per payment line."},
 	{"Contract renewal rate escalation", "Renewal contracts apply an automatic rate escalation tied to a published cost index unless manually overridden."},
 	{"Overpayment refund workflow", "Overpayments detected during reconciliation are queued for refund approval before the disbursement batch runs."},
 	{"Delinquent account escalation", "Accounts thirty days past due are flagged for a first notice; sixty days triggers escalation to the collections queue."},
@@ -164,17 +177,17 @@ func realBGEEmbedder(t *testing.T) (activation.Embedder, *embedpkg.EmbedService)
 	return embedpkg.NewEmbedServiceAdapter(svc), svc
 }
 
-// buildSemanticAbstentionFixture embeds the billing corpus and wires a real
+// buildSemanticAbstentionFixture embeds the booking corpus and wires a real
 // ActivationEngine over it. Returns the engine and a lookup from concept to
 // engram ID (for identifying the correct top match).
 func buildSemanticAbstentionFixture(t *testing.T) (*activation.ActivationEngine, *stubStore, map[string]storage.ULID) {
 	t.Helper()
 	embedder, svc := realBGEEmbedder(t)
 	store := newStubStore()
-	vecs := make(map[storage.ULID][]float32, len(billingCorpus))
-	byConcept := make(map[string]storage.ULID, len(billingCorpus))
+	vecs := make(map[storage.ULID][]float32, len(bookingCorpus))
+	byConcept := make(map[string]storage.ULID, len(bookingCorpus))
 
-	for _, n := range billingCorpus {
+	for _, n := range bookingCorpus {
 		eng := &storage.Engram{
 			Concept:    n.concept,
 			Content:    n.content,
@@ -266,9 +279,9 @@ func TestSemanticAbstention_NonsenseQueryAbstainsWithFloor(t *testing.T) {
 // that also kills real signal.
 func TestSemanticAbstention_PositiveControl_GenuineQueryStillMatches(t *testing.T) {
 	eng, _, byConcept := buildSemanticAbstentionFixture(t)
-	wantID := byConcept["Four-bucket pricing rate tiers"]
+	wantID := byConcept["In-season bunk rate bands"]
 
-	const genuineQuery = "four-bucket pricing rate tiers"
+	const genuineQuery = "in-season bunk rate bands"
 	result := runSemanticQuery(t, eng, genuineQuery, semanticBaselineBGE)
 
 	if len(result.Activations) == 0 {
@@ -277,7 +290,7 @@ func TestSemanticAbstention_PositiveControl_GenuineQueryStillMatches(t *testing.
 	}
 	top := result.Activations[0]
 	if top.Engram.ID != wantID {
-		t.Errorf("top result = %q, want the pricing-tiers engram", top.Engram.Concept)
+		t.Errorf("top result = %q, want the bunk-rate-bands engram", top.Engram.Concept)
 	}
 	t.Logf("genuine query matched: concept=%q score=%.4f semantic_similarity=%.4f",
 		top.Engram.Concept, top.Score, top.Components.SemanticSimilarity)
@@ -297,12 +310,12 @@ func TestSemanticAbstention_PositiveControl_GenuineQueryStillMatches(t *testing.
 // this test exists to catch.
 func TestSemanticAbstention_PositiveControl_ParaphraseStillMatches(t *testing.T) {
 	eng, _, byConcept := buildSemanticAbstentionFixture(t)
-	wantID := byConcept["Remittance processing flow"]
+	wantID := byConcept["Reservation deposit matching"]
 
 	// Paraphrase: no shared content words with the stored concept/content
-	// ("remittance", "matched", "invoices", "posted", "ledger") beyond the
+	// ("deposit", "matched", "reservations", "posted", "ledger") beyond the
 	// generic domain vocabulary — a genuine reformulation, not a lexical echo.
-	const paraphraseQuery = "how do incoming customer payments get applied to the right open bill"
+	const paraphraseQuery = "how does money a hiker sends in get tied to the right pending stay"
 	result := runSemanticQuery(t, eng, paraphraseQuery, semanticBaselineBGE)
 
 	if len(result.Activations) == 0 {
@@ -312,7 +325,7 @@ func TestSemanticAbstention_PositiveControl_ParaphraseStillMatches(t *testing.T)
 	}
 	top := result.Activations[0]
 	if top.Engram.ID != wantID {
-		t.Errorf("top result = %q (id=%v), want the remittance-processing engram (id=%v)",
+		t.Errorf("top result = %q (id=%v), want the deposit-matching engram (id=%v)",
 			top.Engram.Concept, top.Engram.ID, wantID)
 	}
 	t.Logf("paraphrase query matched: concept=%q score=%.4f semantic_similarity=%.4f semantic_similarity_raw=%.4f",
@@ -363,7 +376,7 @@ func TestSemanticAbstention_ModerateCosineBand_GenuineMatchSurvives(t *testing.T
 }
 
 // TestSemanticAbstention_SmallVault_ZeroLexicalOverlapProbe is the small-
-// vault probe the refute called for: an 18-engram vault (the billing
+// vault probe the refute called for: an 18-engram vault (the booking
 // corpus above — no lexical overlap decoy engrams padding out a large
 // candidate pool) where a genuine, zero-lexical-overlap paraphrase must
 // survive the floor and a nonsense query must still abstain. A large-vault
@@ -382,7 +395,7 @@ func TestSemanticAbstention_SmallVault_ZeroLexicalOverlapProbe(t *testing.T) {
 		// No shared words with the stored concept/content ("overpayment",
 		// "refund", "reconciliation", "disbursement", "batch", "queued",
 		// "approval") beyond incidental filler words — a genuine
-		// reformulation. Measured raw cosine ~0.604, ~0.026 clear of the
+		// reformulation. Measured raw cosine ~0.604, ~0.032 clear of the
 		// next-closest candidate.
 		const query = "before extra money goes back out, a manager has to say yes first"
 		result := runSemanticQuery(t, eng, query, semanticBaselineBGE)
@@ -399,8 +412,8 @@ func TestSemanticAbstention_SmallVault_ZeroLexicalOverlapProbe(t *testing.T) {
 	})
 
 	t.Run("nonsense_still_abstains", func(t *testing.T) {
-		// Clearly out-of-domain (community arts scheduling vs. billing/
-		// invoicing) yet lands at the top of this corpus's in-domain-
+		// Clearly out-of-domain (community arts scheduling vs. hut booking
+		// and invoicing) yet lands at the top of this corpus's in-domain-
 		// adjacent noise (measured raw cosine ~0.545 against "Late fee
 		// assessment schedule" — the shared word "schedule" is exactly the
 		// kind of incidental lexical echo that inflates bge-small's
@@ -428,16 +441,16 @@ func TestSemanticAbstention_SmallVault_ZeroLexicalOverlapProbe(t *testing.T) {
 // registry lookup lives there, not in this package.
 func TestSemanticAbstention_UnknownModel_IdentityPlusWarn(t *testing.T) {
 	eng, _, byConcept := buildSemanticAbstentionFixture(t)
-	wantID := byConcept["Four-bucket pricing rate tiers"]
+	wantID := byConcept["In-season bunk rate bands"]
 
 	// baseline=0 is exactly what an unresolved/unregistered model falls back
 	// to (see internal/engine.resolveSemanticBaseline) — identity transform,
 	// pre-COG-26 behavior preserved for models with no calibration on record.
-	result := runSemanticQuery(t, eng, "four-bucket pricing rate tiers", 0)
+	result := runSemanticQuery(t, eng, "in-season bunk rate bands", 0)
 	if len(result.Activations) == 0 {
 		t.Fatal("identity transform (unknown-model fallback) unexpectedly abstained on a genuine query")
 	}
 	if result.Activations[0].Engram.ID != wantID {
-		t.Errorf("top result = %q, want the pricing-tiers engram", result.Activations[0].Engram.Concept)
+		t.Errorf("top result = %q, want the bunk-rate-bands engram", result.Activations[0].Engram.Concept)
 	}
 }

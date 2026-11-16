@@ -235,36 +235,28 @@ func (w *Worker) runPhase2Dedup(ctx context.Context, store *storage.PebbleStore,
 		// Persist representative updates when anything changed: tag-merge
 		// added tags, or frequency-absorption bumped AccessCount.
 		//
-		// Compute the new access count locally — do NOT mutate representative.
-		// GetEngrams returns pointers into the L1 cache that concurrent recalls
-		// may be reading (see the immutability contract on storage.L1Cache.Get);
-		// mutating the shared struct here is a data race. UpdateMetadata persists
-		// the value and invalidates the cache, so the next read is fresh.
+		// The bump is field-scoped (AddAccessCount adds to the COMMITTED count
+		// under the engram's stripe lock). This used to write the
+		// representative's whole metadata — State, Confidence, Relevance,
+		// Stability, LastAccess — from the copy GetEngrams returned at the top
+		// of the pass, so anything committed to the representative while the
+		// dream ran was reverted, and a representative forgotten mid-pass came
+		// back active (TestDedup_ConcurrentForgetOfRepresentativeSticks). It
+		// also never mutates representative, which is the L1 cache's shared
+		// struct (see the immutability contract on storage.L1Cache.Get).
 		tagsChanged := len(mergedTags) != len(representative.Tags)
-		newAccessCount := representative.AccessCount
 		if !w.DryRun && archivedCount > 0 {
-			newAccessCount += archivedCount
-		}
-		if !w.DryRun && (tagsChanged || archivedCount > 0) {
-			if err := store.UpdateMetadata(ctx, wsPrefix, representative.ID, &storage.EngramMeta{
-				State:       representative.State,
-				Confidence:  representative.Confidence,
-				Relevance:   representative.Relevance,
-				Stability:   representative.Stability,
-				AccessCount: newAccessCount,
-				UpdatedAt:   representative.UpdatedAt,
-				LastAccess:  representative.LastAccess,
-			}); err != nil {
+			if err := store.AddAccessCount(ctx, wsPrefix, representative.ID, archivedCount); err != nil {
 				slog.Warn("consolidation phase 2: failed to update representative metadata", "id", representative.ID, "error", err)
-				report.Errors = append(report.Errors, fmt.Sprintf("dedup: UpdateMetadata %s: %v", representative.ID, err))
+				report.Errors = append(report.Errors, fmt.Sprintf("dedup: AddAccessCount %s: %v", representative.ID, err))
 			}
-			if tagsChanged {
-				// Persist merged tags — UpdateMetadata patches only fixed-size
-				// metadata fields and does not touch the variable-length tag list.
-				if err := store.UpdateTags(ctx, wsPrefix, representative.ID, mergedTags); err != nil {
-					slog.Warn("consolidation phase 2: failed to update representative tags", "id", representative.ID, "error", err)
-					report.Errors = append(report.Errors, fmt.Sprintf("dedup: UpdateTags %s: %v", representative.ID, err))
-				}
+		}
+		if !w.DryRun && tagsChanged {
+			// Persist merged tags — the access-count patch touches only
+			// fixed-size metadata fields, not the variable-length tag list.
+			if err := store.UpdateTags(ctx, wsPrefix, representative.ID, mergedTags); err != nil {
+				slog.Warn("consolidation phase 2: failed to update representative tags", "id", representative.ID, "error", err)
+				report.Errors = append(report.Errors, fmt.Sprintf("dedup: UpdateTags %s: %v", representative.ID, err))
 			}
 		}
 	}

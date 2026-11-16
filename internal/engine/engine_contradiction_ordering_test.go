@@ -95,7 +95,7 @@ func TestContradictionHonesty_DominantAnswerStaysRankZero(t *testing.T) {
 
 	req := &activation.ActivateRequest{MaxResults: 10}
 	now := time.Now()
-	out, block, _ := eng.applyContradictionHonesty(context.Background(),
+	out, block := eng.applyContradictionHonesty(context.Background(),
 		eng.store.ResolveVaultPrefix("dom"), rows, req, newVisibilityGate(req, now), now)
 
 	if block == nil {
@@ -138,13 +138,11 @@ func TestContradictionHonesty_DominantAnswerStaysRankZero(t *testing.T) {
 	}
 }
 
-// TestContradictionHonesty_AdjacencyOverflowUsesPostSortRanks pins the trap the
-// re-sort introduces: keepAtLeast and adjacency_overflow are computed from
-// cluster member POSITIONS, and the demote itself can push a member below rows
-// that used to score under it, so those positions MOVE. Computing them against
-// the pre-sort ranks reports an overflow that does not describe the response
-// the caller actually receives — and cuts the conflict in half while claiming
-// it did not.
+// TestContradictionHonesty_AdjacencyOverflowUsesPostSortRanks: the demote can
+// push a disputed row's partner below rows that used to score under it. The
+// cut must still return the partner beside the disputed row — the PARTNER,
+// not the unrelated rows ranked between them (the old rule stretched the cut
+// to the partner's post-sort position and returned both unrelated rows too).
 //
 // Corpus: a dominant conflicted row (0.90) and a marginal partner (0.50) that
 // the 10% demote drops below two unrelated rows at 0.48 and 0.47.
@@ -165,7 +163,7 @@ func TestContradictionHonesty_AdjacencyOverflowUsesPostSortRanks(t *testing.T) {
 
 	req := &activation.ActivateRequest{MaxResults: 1}
 	now := time.Now()
-	out, block, keep := eng.applyContradictionHonesty(context.Background(),
+	out, block := eng.applyContradictionHonesty(context.Background(),
 		eng.store.ResolveVaultPrefix("ovf"), rows, req, newVisibilityGate(req, now), now)
 	if block == nil {
 		t.Fatal("precondition: the declared conflict must be reported")
@@ -184,11 +182,16 @@ func TestContradictionHonesty_AdjacencyOverflowUsesPostSortRanks(t *testing.T) {
 	if a != 0 || b != 3 {
 		t.Fatalf("precondition: want the demoted partner pushed to rank 3, got a=%d b=%d", a, b)
 	}
-	if keep != 4 {
-		t.Errorf("keepAtLeast = %d, want 4 — the partner's POST-SORT rank + 1. Computed against pre-sort ranks this is 2, and the caller then receives one side of a conflict alone", keep)
+	cut, overflow := applyContradictionCut(out, req.MaxResults)
+	if len(cut) != 2 || cut[0].Engram.ID.String() != ids[0] || cut[1].Engram.ID.String() != ids[1] || overflow != 1 {
+		got := []string{}
+		for _, r := range cut {
+			got = append(got, r.Engram.Concept)
+		}
+		t.Errorf("limit 1 must return the disputed row and its partner only (overflow 1), got %v overflow %d", got, overflow)
 	}
-	if block.AdjacencyOverflow != keep-req.MaxResults {
-		t.Errorf("adjacency_overflow = %d, want %d", block.AdjacencyOverflow, keep-req.MaxResults)
+	if c := cut[0].UnresolvedContradiction; c == nil || !c.PartnerInResults {
+		t.Errorf("the disputed row must report its partner as returned: %+v", c)
 	}
 }
 
@@ -232,7 +235,7 @@ func TestContradictionHonesty_PartnerChoiceIsDeterministic(t *testing.T) {
 			req := &activation.ActivateRequest{MaxResults: 10}
 			now := time.Now()
 			in := append([]activation.ScoredEngram(nil), rows...)
-			out, block, _ := eng.applyContradictionHonesty(context.Background(), ws, in, req,
+			out, block := eng.applyContradictionHonesty(context.Background(), ws, in, req,
 				newVisibilityGate(req, now), now)
 			if block == nil {
 				t.Fatal("precondition: the declared conflicts must be reported")
@@ -278,7 +281,7 @@ func TestContradictionHonesty_PartnerChoiceIsDeterministic(t *testing.T) {
 		// partner that did not match the query.
 		req := &activation.ActivateRequest{MaxResults: 10}
 		now := time.Now()
-		out, block, _ := eng.applyContradictionHonesty(context.Background(),
+		out, block := eng.applyContradictionHonesty(context.Background(),
 			eng.store.ResolveVaultPrefix("mixed"), rows[:2], req, newVisibilityGate(req, now), now)
 		if block == nil {
 			t.Fatal("precondition: the declared conflicts must be reported")

@@ -153,7 +153,7 @@ func (s *stubStore) GetEmbeddings(_ context.Context, _ [8]byte, ids []storage.UL
 	return out, nil
 }
 
-func (s *stubStore) EngramIDsByCreatedRange(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
+func (s *stubStore) EngramIDsByCreatedRangeNewestFirst(_ context.Context, _ [8]byte, since, until time.Time, limit int) ([]storage.ULID, error) {
 	var ids []storage.ULID
 	for _, id := range s.recent {
 		if meta, ok := s.metas[id]; ok {

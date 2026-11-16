@@ -2051,10 +2051,10 @@ document.addEventListener('alpine:init', () => {
     },
     plasticityPresetDescription(preset) {
         const d = {
-            'default':         'General-purpose. Temporal scoring on, Hebbian on, 2-hop BFS. Balanced weights.',
-            'reference':       'Documentation and facts. Temporal scoring OFF — memories persist indefinitely.',
-            'scratchpad':      'Ephemeral drafts. Aggressive fading (7-day halflife, 0.01 floor). No Hebbian, no hops.',
-            'knowledge-graph': 'Dense interlinked concepts. 4-hop BFS, slow fading (60-day halflife).',
+            'default':         'General-purpose. Hebbian on, PAS on, 2-hop BFS.',
+            'reference':       'Documentation and facts. Hebbian and PAS on, 3-hop BFS. Like every preset, memories do not fade from recall with age.',
+            'scratchpad':      'Ephemeral drafts. No Hebbian, no PAS, no hops. Memories do not fade on their own: set retention_days or valid_until to retire them.',
+            'knowledge-graph': 'Dense interlinked concepts. 4-hop BFS, strong Hebbian (8.0 scale).',
             'working':         'Shared workflow scratch. Default cognition (Hebbian + PAS, 2-hop) with 7-day auto-eviction. Pair with multi_user for multi-agent workflows.',
         };
         return d[preset] || '';

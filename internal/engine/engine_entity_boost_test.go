@@ -93,10 +93,16 @@ func TestEntityBoost_SurfacesEntityLinkedEngram(t *testing.T) {
 	_, aFound := idSet[respA.ID]
 	require.True(t, aFound, "engram A (strong FTS match) should be in results")
 
-	// Engram B must be in results because of entity boost via "PostgreSQL".
-	bScore, bFound := idSet[respB.ID]
+	// Engram B must be in results because of entity boost via "PostgreSQL",
+	// carrying that evidence in entity_boost (COG-35: the boost annotates; it
+	// is not B's score).
+	_, bFound := idSet[respB.ID]
 	require.True(t, bFound, "engram B should be surfaced by entity boost (shares 'PostgreSQL' entity with top result A)")
-	require.Greater(t, bScore, float32(0), "engram B score should be > 0 (boosted by entity spread activation)")
+	for _, item := range resp.Activations {
+		if item.ID == respB.ID {
+			require.Greater(t, item.ScoreComponents.EntityBoost, float32(0), "engram B must carry its entity_boost evidence")
+		}
+	}
 }
 
 // TestEntityBoost_ApplyEntityBoostDirect tests the applyEntityBoost helper
@@ -175,15 +181,19 @@ func TestEntityBoost_ApplyEntityBoostDirect(t *testing.T) {
 	require.True(t, aFound, "engram A should remain in boosted results")
 	require.GreaterOrEqual(t, aScore, 0.8, "engram A score should not decrease")
 
-	// Engram B must be added with entityBoostFactor × idf (idf = 1.0 here).
+	// Engram B must be added carrying entityBoostFactor × idf (idf = 1.0
+	// here). COG-35: on the default (content-first) path the boost is the
+	// row's association EVIDENCE, not its score — an injected row has no
+	// content score, so its Score (and Final) is 0 and it sorts after A.
 	bScore, bFound := idSet[idB]
 	require.True(t, bFound, "engram B should be added by entity boost")
-	require.InDelta(t, entityBoostFactor*entityIDF(1, 3), bScore, 0.001, "engram B score should equal entityBoostFactor × idf")
+	require.Equal(t, 0.0, bScore, "an injected row has no content score under content-first order")
+	require.Equal(t, idA, boosted[0].Engram.ID, "the scored seed must precede the unscored injection")
 
 	// The injected result must carry a full component trace (issue #569).
 	for _, r := range boosted {
 		if r.Engram.ID == idB {
-			require.InDelta(t, bScore, r.Components.EntityBoost, 1e-9, "injected result must expose its boost in Components.EntityBoost")
+			require.InDelta(t, entityBoostFactor*entityIDF(1, 3), r.Components.EntityBoost, 0.001, "injected result must expose entityBoostFactor × idf in Components.EntityBoost")
 			require.InDelta(t, bScore, r.Components.Final, 1e-9, "injected result Final must equal its score")
 			require.Greater(t, r.Components.Confidence, 0.0, "injected result must carry engram confidence")
 		}
@@ -408,7 +418,9 @@ func TestEntityBoost_SameEntityViaMultipleSeedsCountsOnce(t *testing.T) {
 	found := false
 	for _, r := range boosted {
 		if r.Engram.ID == target {
-			targetScore = r.Score
+			// COG-35: the boost arithmetic lives in Components.EntityBoost;
+			// an injected row's Score is 0 under content-first order.
+			targetScore = r.Components.EntityBoost
 			found = true
 		}
 	}
@@ -451,7 +463,7 @@ func TestEntityBoost_CapBoundsAccumulation(t *testing.T) {
 	for _, r := range boosted {
 		if r.Engram.ID == target {
 			found = true
-			require.InDelta(t, entityBoostCap, r.Score, 1e-9,
+			require.InDelta(t, entityBoostCap, r.Components.EntityBoost, 1e-9,
 				"total boost must clamp at entityBoostCap")
 		}
 	}

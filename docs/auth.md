@@ -256,7 +256,7 @@ curl -X PUT http://127.0.0.1:8475/api/admin/vaults/config \
 
 Plasticity controls the cognitive pipeline for a vault — how it learns, forgets, and traverses connections between engrams. Each vault can have its own plasticity settings independent of others.
 
-**Five preset profiles** are available: `default` (balanced Hebbian + temporal), `reference` (preserves with strong Hebbian bonds), `scratchpad` (rapid fading, minimal history), `knowledge-graph` (rich traversal, strong associative learning), and `working` (default cognition with 7-day auto-eviction for shared workflow scratch vaults; pair with `multi_user` per RFC #597).
+**Five preset profiles** are available: `default` (balanced Hebbian learning), `reference` (strong Hebbian bonds), `scratchpad` (no Hebbian, PAS off, minimal history), `knowledge-graph` (rich traversal, strong associative learning), and `working` (default cognition with 7-day auto-eviction for shared workflow scratch vaults; pair with `multi_user` per RFC #597). **No preset makes memories fade in recall:** under ACT-R scoring (every preset) a memory's age and access history do not change whether it is found or its absolute score and band (rank can still move with the in-memory Hebbian/PAS boosts, which normal recalls feed and a restart clears), so the presets' `actr_decay` values (and any explicit `actr_decay` override) are currently inert and WARN once per vault when applied. To retire memories, use `valid_until`, `muninn_forget`/`muninn_evolve`, `retention_days`, or `max_engrams` (the pruner still weighs persisted access history); `scoring_fusion: weighted_sum` is the explicit recency-weighted choice.
 
 Get the current plasticity configuration for a vault:
 
@@ -309,13 +309,13 @@ curl -X PUT "http://127.0.0.1:8475/api/admin/vault/default/plasticity" \
 |-------|------|-------|---------|
 | `preset` | string | `default` \| `reference` \| `scratchpad` \| `knowledge-graph` \| `working` | Base cognitive profile; overrides applied on top |
 | `hebbian_enabled` | bool | — | Enable/disable Hebbian co-activation learning. Symmetric (COG-32): gates weight updates, association decay, **and** the read-side boost recall applies from association weights |
-| `temporal_enabled` | bool | — | Enable/disable time-based temporal scoring |
+| `temporal_enabled` | bool | — | Accepted and stored, but no runtime path reads it — changing it has no effect (time-based scoring is not switched by this flag) |
 | `multi_user` | bool | — | Vault shared by multiple users/agents: guide + recall hints steer clients to per-user scoped recall; `where_left_off`/`session` flagged vault-global |
 | `hop_depth` | int | 0–8 | BFS hops for associative retrieval; higher = broader context |
 | `semantic_weight` | float | 0–1 | Multiplier for semantic similarity in fusion scoring |
 | `fts_weight` | float | 0–1 | Multiplier for full-text keyword match scoring |
-| `relevance_floor` | float | 0–1 | Minimum relevance score; prevents memories from becoming invisible |
-| `temporal_halflife` | float | >0 | Days before an engram reaches half-life |
+| `relevance_floor` | float | 0–1 | Accepted and stored, but no runtime path reads it — changing it has no effect |
+| `temporal_halflife` | float | >0 | Accepted and stored, but no runtime path reads it — changing it has no effect |
 | `traversal_profile` | string | `default` \| `causal` \| `confirmatory` \| `adversarial` \| `structural` | Link traversal strategy; empty = auto-infer |
 | `predictive_activation` | bool | — | Enable/disable Predictive Activation Signal (PAS); default: true |
 | `pas_max_injections` | int | 1–20 | Max transition candidates injected per activation; default: 5 |

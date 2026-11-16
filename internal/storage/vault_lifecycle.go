@@ -60,6 +60,10 @@ var clearVaultDataPrefixes = []byte{
 //   - 0x0F name index    (global by name hash, deleted by DeleteVaultNameOnly)
 //   - 0x11 digest flags  (globally keyed by ULID — orphans are acceptable)
 func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error) {
+	// Retired set (retired.go): derived from the records this range-deletes.
+	// Deferred so it runs on every exit, including a failed commit that may
+	// still have landed — dropping the set is always safe (it is rebuilt).
+	defer ps.resetRetired(ws)
 	// Capture count before anything is deleted.
 	vaultCount := ps.GetVaultCount(ctx, ws)
 
@@ -109,14 +113,14 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	if err := ps.deleteVaultEntityReverseIndex(batch, ws); err != nil {
 		return 0, fmt.Errorf("clear vault: delete entity reverse index: %w", err)
 	}
-	if err := batch.Commit(pebble.Sync); err != nil {
+	if err := ps.commitBatch(batch, pebble.Sync); err != nil {
 		return 0, fmt.Errorf("clear vault: commit: %w", err)
 	}
 
 	// Step 4: evict all in-memory caches.
 
 	// L1 engram cache — vault-scoped by hex prefix.
-	ps.cache.DeleteByVault(ws)
+	ps.cache.InvalidateVault(ws) // bumps every stripe first: an in-flight fill from before the clear is rejected
 
 	// assocCache: keys are [24]byte = ws[8] + engramID[16].
 	// Purge all entries whose first 8 bytes match the cleared vault prefix.
@@ -132,9 +136,11 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	}
 
 	// metaCache: keys are [16]byte (engramID only — not vault-scoped).
-	// We cannot filter by vault, so clear all entries. The cache is a
+	// We cannot filter by vault, so clear all entries (commitBatch's range
+	// invalidation already did; this is belt and braces). The cache is a
 	// read-through; evicting unrelated vaults only costs one extra Pebble read
-	// per metadata access, which is acceptable.
+	// per metadata access. Scoping it needs a vault in the key (an on-disk-
+	// neutral but cache-shape change), not done here.
 	ps.metaCache.Purge()
 
 	// recentActiveCache: keys are [8]byte (wsPrefix).
