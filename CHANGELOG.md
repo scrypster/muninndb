@@ -80,6 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. A pre-upgrade binary also refuses to open a migrated data directory
   outright.
 
+- Cluster: stopping the coordinator now ends and waits for the periodic replication-log prune.
+  It used to end only when the process's run context was cancelled, so a prune still running
+  when the store was closed next panicked with "pebble: closed". Seen killing a test run under
+  the race detector, and possible at server shutdown.
+
 - Declaring `supersedes` inline on a new memory now retires the old one, exactly as
   `muninn_link` does. A write can carry links to existing memories: the `relationships`
   parameter of `muninn_remember` and `muninn_remember_batch`, and the `relationships` /
