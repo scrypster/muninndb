@@ -30,3 +30,11 @@ func (s *Server) DecodedInFlightForTest() int64 { return s.decodedInFlight.Load(
 // SetHandshakeTimeoutForTest replaces the time a connection has to complete
 // HELLO, for connections accepted after the call.
 func (s *Server) SetHandshakeTimeoutForTest(d time.Duration) { s.handshakeTimeout = d }
+
+// SetMaxConnectionsForTest replaces the listener's connection cap. Call it
+// before the server serves.
+func (s *Server) SetMaxConnectionsForTest(n int) { s.maxConns = n }
+
+// ConnectionCapWarningsForTest reports how many times the server has logged
+// that it is refusing connections at its cap.
+func (s *Server) ConnectionCapWarningsForTest() int64 { return s.capWarnings.Load() }

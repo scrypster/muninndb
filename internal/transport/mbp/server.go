@@ -41,6 +41,14 @@ type Server struct {
 	shutdownM sync.Mutex
 	tlsConfig *tls.Config // nil = plain TCP
 
+	// maxConns is the most connections the listener holds at once
+	// (connection_cap.go). Zero until the server serves, when it is resolved
+	// from the memory limit or the override.
+	maxConns    int
+	openConns   atomic.Int64
+	capRefused  atomic.Int64 // refused since the last warning
+	capLastWarn atomic.Int64 // UnixNano of the last warning
+	capWarnings atomic.Int64 // warnings logged
 	// handshakeTimeout overrides helloTimeout when positive. Tests set it so
 	// they do not wait fifteen seconds for a silent connection to be closed.
 	handshakeTimeout time.Duration
@@ -84,7 +92,10 @@ func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
 		ln = tls.NewListener(ln, s.tlsConfig)
 		slog.Info("mbp: TLS enabled", "addr", ln.Addr().String())
 	}
-	slog.Info("mbp: listening", "addr", ln.Addr().String())
+	if s.maxConns <= 0 {
+		s.maxConns = resolveMaxConnections()
+	}
+	slog.Info("mbp: listening", "addr", ln.Addr().String(), "max_connections", s.maxConns)
 	s.listener = ln
 
 	// Accept connections in a goroutine
@@ -159,9 +170,17 @@ func (s *Server) acceptLoop(ctx context.Context) {
 			continue
 		}
 
+		// A place for it, or a refusal: the listener holds a bounded number of
+		// connections (SEC-28).
+		if !s.admitConnection() {
+			s.refuseAtCap(conn)
+			continue
+		}
+
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer s.releaseConnection()
 			s.handleConnection(ctx, conn)
 		}()
 	}
