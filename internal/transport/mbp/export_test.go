@@ -20,3 +20,7 @@ func DispatchedFrameClasses() map[uint8]string {
 // connections accepted after the call, so a test can watch the budget hold a
 // frame back without megabyte payloads.
 func (s *Server) SetDecodeBudgetForTest(bytes int64) { s.decodeBudget = bytes }
+
+// DecodedInFlightForTest reports the decompressed payload charged to every
+// connection's budget right now, in bytes.
+func (s *Server) DecodedInFlightForTest() int64 { return s.decodedInFlight.Load() }

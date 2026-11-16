@@ -143,8 +143,24 @@ func CompressPayload(data []byte) ([]byte, bool, error) {
 // with ErrDecodedPayloadTooLarge, having cost memory in proportion to the
 // limit and not to what the payload claims or would expand to.
 func DecompressPayload(data []byte) ([]byte, error) {
-	return decompressBounded(data, nil)
+	return decompressBounded(data, noCharge{})
 }
+
+// decodeCharger is told how many decoded bytes a frame holds, before it holds
+// them. It is how a connection's budget is charged (frameCharge).
+type decodeCharger interface {
+	// hold makes the charge exactly n bytes — not n more. An error from it
+	// ends the decode.
+	hold(n int) error
+	// keep lowers the charge to n bytes, once the frame is known to need less
+	// than it was charged for.
+	keep(n int)
+}
+
+type noCharge struct{}
+
+func (noCharge) hold(int) error { return nil }
+func (noCharge) keep(int)       {}
 
 // decompressBounded is DecompressPayload with the memory it is about to hold
 // announced first.
@@ -164,19 +180,16 @@ func DecompressPayload(data []byte) ([]byte, error) {
 // The payload must be exactly one zstd frame (requireOneFrame), which is
 // checked before anything is decoded.
 //
-// reserve, when non-nil, is called before each of those steps with the number
-// of additional bytes the call is about to hold; an error from it ends the
-// decode. It is how a connection's budget is charged for what its frames
-// decode to (connDecodeBudget).
-func decompressBounded(data []byte, reserve func(n int) error) ([]byte, error) {
+// charge.hold is called before each buffer with the TOTAL the frame then
+// holds — the scratch buffer has gone back to its pool before the large one is
+// asked for, so the frame never holds one charge while asking for another —
+// and charge.keep once the frame turns out to need less.
+func decompressBounded(data []byte, charge decodeCharger) ([]byte, error) {
 	if len(data) == 0 {
 		return []byte{}, nil // nothing to decode, as before
 	}
 	if err := initPools(); err != nil {
 		return nil, fmt.Errorf("zstd unavailable: %w", err)
-	}
-	if reserve == nil {
-		reserve = func(int) error { return nil }
 	}
 
 	var hdr zstd.Header
@@ -192,7 +205,7 @@ func decompressBounded(data []byte, reserve func(n int) error) ([]byte, error) {
 			return nil, ErrDecodedPayloadTooLarge
 		}
 		size := int(hdr.FrameContentSize)
-		if err := reserve(size); err != nil {
+		if err := charge.hold(size); err != nil {
 			return nil, err
 		}
 		decoded, err := decodeInto(data, make([]byte, 0, size))
@@ -202,7 +215,7 @@ func decompressBounded(data []byte, reserve func(n int) error) ([]byte, error) {
 		return decoded, nil
 	}
 
-	if err := reserve(probeBufferSize); err != nil {
+	if err := charge.hold(probeBufferSize); err != nil {
 		return nil, err
 	}
 	scratch := probeBuffers.Get().(*[]byte)
@@ -211,6 +224,7 @@ func decompressBounded(data []byte, reserve func(n int) error) ([]byte, error) {
 		out := make([]byte, len(decoded))
 		copy(out, decoded)
 		probeBuffers.Put(scratch)
+		charge.keep(len(out))
 		return out, nil
 	}
 	// Did it run out of room, or is the frame bad? Out of room means the
@@ -223,8 +237,9 @@ func decompressBounded(data []byte, reserve func(n int) error) ([]byte, error) {
 	}
 
 	// One buffer that holds the frame limit, with room for the block that takes
-	// the output past it.
-	if err := reserve(MaxPayloadSize - probeBufferSize); err != nil {
+	// the output past it. The scratch buffer is back in its pool, and hold
+	// gives the scratch charge back before it takes this one.
+	if err := charge.hold(MaxPayloadSize); err != nil {
 		return nil, err
 	}
 	decoded, err = decodeInto(data, make([]byte, 0, MaxPayloadSize+maxDecodedBlock+1024))
@@ -235,6 +250,7 @@ func decompressBounded(data []byte, reserve func(n int) error) ([]byte, error) {
 		// Do not keep a limit-sized buffer alive behind a small payload.
 		out := make([]byte, len(decoded))
 		copy(out, decoded)
+		charge.keep(len(out))
 		return out, nil
 	}
 	return decoded, nil

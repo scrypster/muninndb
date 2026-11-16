@@ -168,6 +168,7 @@ type matrixEnv struct {
 	eng   *engine.Engine
 	rec   *recordingEngine
 	store *auth.Store
+	srv   *mbp.Server
 	addr  string
 }
 
@@ -230,7 +231,7 @@ func newMatrixEnvWith(t *testing.T, configure func(*mbp.Server)) *matrixEnv {
 		case <-ctx.Done():
 		}
 	})
-	return &matrixEnv{eng: eng, rec: rec, store: authStore, addr: addr}
+	return &matrixEnv{eng: eng, rec: rec, store: authStore, srv: srv, addr: addr}
 }
 
 // ---------------------------------------------------------------------------

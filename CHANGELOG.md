@@ -212,11 +212,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame may carry; it was 100 MB — and the limit is enforced while decoding, so refusing a
   frame costs memory in proportion to the limit, not to what the frame claims. A compressed
   payload must be exactly one zstd frame. One connection may have at most 32 MB of decoded
-  payload in flight; a frame past that waits for the ones ahead of it. A refusal is error
-  `5005` with a message beginning "decompression failed". No request the server accepts is
-  near these limits (an engram's content is at most 16 KB), but a client that concatenated
-  several zstd frames into one payload, compressed with a window over 16 MB (`--ultra` or
-  `--long` modes), or sent more than 16 MB decoded will now get that error (SEC-21).
+  payload in flight; a compressed frame that does not fit is answered at once with error
+  `4012` and can be retried when earlier requests have been answered. The other refusals
+  are error `5005` with a message beginning "decompression failed". No request the server
+  accepts is near these limits (an engram's content is at most 16 KB), but a client that
+  concatenated several zstd frames into one payload, compressed with a window over 16 MB
+  (`--ultra` or `--long` modes), or sent more than 16 MB decoded will now get an error
+  (SEC-21).
 
 - A client that disconnects in the middle of an MBP request no longer crashes the server.
   When a connection closed, the server closed that connection's outgoing queue without

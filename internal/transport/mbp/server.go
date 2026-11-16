@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"github.com/scrypster/muninndb/internal/auth"
@@ -42,6 +43,10 @@ type Server struct {
 	// decodeBudget overrides connDecodeBudget when positive. Tests set it to
 	// watch the budget work without megabyte payloads.
 	decodeBudget int64
+	// decodedInFlight is the decompressed payload charged to every
+	// connection's budget right now, in bytes. It returns to zero when no
+	// compressed frame is being handled.
+	decodedInFlight atomic.Int64
 }
 
 // NewServer creates a new MBP server.
@@ -226,7 +231,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	}
 	connCtx = withVaultScope(connCtx, scope)
 	connCtx = context.WithValue(connCtx, auth.ContextMode, connMode)
-	connCtx = withDecodeBudget(connCtx, s.connDecodeBudget())
+	connCtx = withDecodeBudget(connCtx, s.connDecodeBudget(), &s.decodedInFlight)
 
 	// Resolve and validate the HELLO vault under the new scope, then pin the
 	// request to it so the engine registers (and the response advertises) the
@@ -361,14 +366,14 @@ func (s *Server) dispatchFrame(ctx context.Context, frame *Frame, writeCh chan *
 
 	// Decompress only now, for a frame that was admitted, into at most what a
 	// frame may carry, and charged to this connection's budget until the
-	// handler is done with it (compress.go, decode_budget.go).
+	// handler is done with it (compress.go, decode_budget.go). A frame that
+	// does not fit the budget is answered, not held: nothing here waits.
 	var payload []byte = frame.Payload
 	if (frame.Flags & FlagCompressed) != 0 {
 		decompressed, release, err := decodeCharged(ctx, frame.Payload)
 		if err != nil {
-			if ctx.Err() == nil {
-				s.queueErrorFrame(writeCh, frame.CorrelationID, ErrInternal, decompressionFailure(err))
-			}
+			code, message := decompressionFailure(err)
+			s.queueErrorFrame(writeCh, frame.CorrelationID, code, message)
 			return
 		}
 		defer release()
