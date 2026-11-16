@@ -84,14 +84,31 @@ type Index struct {
 	// statsBehindWarned rate-limits reportStatsBehind's WARN to one per vault per
 	// statsBehindWarnInterval. key: [8]byte wsPrefix, value: *atomic.Int64 (unix nanos).
 	statsBehindWarned sync.Map
+	// unindexedEdit records, per vault, when ReindexEngram last wrote postings
+	// for a document that had none. reportStatsBehind reads it to tell a count
+	// that is behind because an index job has not run yet from one that is
+	// behind for good. It feeds the report only, never a score.
+	// key: [8]byte wsPrefix, value: *atomic.Int64 (unix nanos).
+	unindexedEdit sync.Map
+	// now is time.Now, replaced by tests that need the grace period to pass.
+	now func() time.Time
 }
 
-// statsBehindWarnInterval is how often, per vault, a search may log that the
-// vault's keyword statistics are inconsistent. The counter is not rate-limited.
+// statsBehindWarnInterval is how often, per vault, a search may log that a word
+// is counted in more documents than the vault holds. The counter is not
+// rate-limited.
 const statsBehindWarnInterval = 10 * time.Minute
 
+// unindexedEditGrace is how long after an in-place edit of a not-yet-indexed
+// memory a document count that is behind is taken as expected. The memory's
+// index job is queued and normally runs within the worker's 100 ms tick; a
+// minute leaves room for a backlog. It is a patience for a log line, not a
+// scoring constant: past it the same observation is reported, and the report
+// says to act only if it keeps appearing.
+const unindexedEditGrace = time.Minute
+
 func New(db *pebble.DB) *Index {
-	return &Index{db: db}
+	return &Index{db: db, now: time.Now}
 }
 
 // tokenizeRaw applies lowercase, character normalization, length filtering,
@@ -447,6 +464,16 @@ func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) er
 	batch := idx.db.NewBatch()
 	defer batch.Close()
 
+	// Is this an edit of a document with no postings? Its first index has not
+	// run, or was dropped, or it is a forgotten memory being restored. The first
+	// two leave a word's frequency ahead of the document count until the first
+	// index runs (see reportStatsBehind), so the edit is noted for the report.
+	indexed, err := idx.HasPostings(ws, id, prev)
+	if err != nil {
+		idx.mu.Unlock()
+		return fmt.Errorf("fts: read postings: %w", err)
+	}
+
 	// Drop everything the OLD document put in the index first.
 	for term := range oldTerms {
 		for _, field := range []uint8{FieldConcept, FieldContent, FieldTags, FieldCreatedBy} {
@@ -490,8 +517,11 @@ func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) er
 		}
 	}
 
-	err := batch.Commit(pebble.Sync)
+	err = batch.Commit(pebble.Sync)
 	idx.mu.Unlock()
+	if err == nil && !indexed {
+		idx.noteUnindexedEdit(ws)
+	}
 	return err
 }
 
@@ -980,10 +1010,12 @@ func (idx *Index) readStats(r pebble.Reader, ws [8]byte) (FTSStats, error) {
 // memo saved one point read per query word, against a posting scan per word.
 //
 // N is clamped up to df. Every document counted in df is a document of the
-// corpus, so df > N means N is behind. A search no longer meets that in passing
-// — it reads N and df from one snapshot, and IndexEngram commits both in one
-// batch — so when it happens the statistics on disk disagree, and
-// reportStatsBehind says so. Unclamped, df = N+1 makes the logarithm negative
+// corpus, so df > N means N is behind. That is never a torn read any more — a
+// search reads N and df from one snapshot, and IndexEngram commits both in one
+// batch — but it is still a state the index can be committed in: an in-place
+// edit of a memory whose first index has not run yet adds to a word's frequency
+// before the memory is counted. reportStatsBehind lists the causes and reports
+// the ones a pending index job does not explain. Unclamped, df = N+1 makes the logarithm negative
 // for a term every document holds, and a non-positive IDF is indistinguishable
 // from "never counted": the term's postings are not scanned and it is charged as
 // absent. With the clamp a term that has a record always has a positive, finite
@@ -1019,25 +1051,53 @@ func (idx *Index) getIDF(r pebble.Reader, ws [8]byte, term string, N float64) (f
 }
 
 // reportStatsBehind records that a search found a word counted in more
-// documents than the vault's corpus statistics say exist. A search reads both
-// numbers from one snapshot and IndexEngram commits both in one batch, so this
-// is not a race: the statistics on disk disagree, and will until they are
-// rebuilt. The search still answers, with N clamped (see getIDF); this is what
-// makes the condition visible instead of merely survivable.
+// documents than the vault's document count. A search reads both numbers from
+// one snapshot, so this is never a torn read: it is a state the index was
+// committed in. The search still answers, with N clamped (see getIDF); this is
+// what makes the state visible instead of merely survivable.
 //
-// Known ways to get here that are not corruption: a store last written by a
-// build that committed the document count in a separate, unsynced write and
-// crashed in between; and a memory whose first index never ran and that was
-// then edited in place, which adds to a word's frequency through ReindexEngram
-// without adding to the document count.
+// It is NOT always a fault, and one cause is ordinary:
+//
+//   - A memory is edited in place before its first index has run. Write memory
+//     A tagged X and let it index; write memory B; retag B with X before the
+//     index worker reaches B's job. ReindexEngram adds one to df(X) for the tag
+//     entering B and does not touch N, and B's first index — which is what
+//     counts B in N — has not run: df(X) = 2, N = 1. It clears by itself when
+//     the job runs. It becomes permanent only if that job is dropped (queue
+//     full) or the process stops first.
+//
+// The durable causes:
+//
+//   - That same edit when the first index never does run.
+//   - A retag of a memory while `reindex-fts` is rebuilding its vault: the edit
+//     counts the new tag and the rebuild, reading the memory after the retag,
+//     counts it again.
+//   - A store last written by a build that committed the document count in a
+//     separate, unsynced write, and that stopped between the two writes.
+//   - Corruption.
+//
+// Telling them apart: ReindexEngram notes, per vault, when it last wrote
+// postings for a document that had none. An observation within
+// unindexedEditGrace of such an edit is counted as "expected" and not logged.
+// Anything else is counted as "unexplained" and logged once per vault per
+// statsBehindWarnInterval, in words that say what was seen and that a rebuild is
+// needed only if it keeps appearing. The note lives in this process, so after a
+// restart — when no index job can still be pending — the same state is reported
+// at once.
 //
 // The word itself is not logged: it is memory content.
 func (idx *Index) reportStatsBehind(ws [8]byte, df uint32, n float64) {
-	metrics.FTSStatsInconsistent.Inc()
+	now := idx.now().UnixNano()
+	if v, ok := idx.unindexedEdit.Load(ws); ok {
+		if edited := v.(*atomic.Int64).Load(); now-edited < int64(unindexedEditGrace) {
+			metrics.FTSStatsInconsistent.WithLabelValues("expected").Inc()
+			return
+		}
+	}
+	metrics.FTSStatsInconsistent.WithLabelValues("unexplained").Inc()
 
 	v, _ := idx.statsBehindWarned.LoadOrStore(ws, new(atomic.Int64))
 	last := v.(*atomic.Int64)
-	now := time.Now().UnixNano()
 	prev := last.Load()
 	if prev != 0 && now-prev < int64(statsBehindWarnInterval) {
 		return
@@ -1045,8 +1105,15 @@ func (idx *Index) reportStatsBehind(ws [8]byte, df uint32, n float64) {
 	if !last.CompareAndSwap(prev, now) {
 		return // another search just logged it
 	}
-	slog.Warn("fts: keyword statistics are inconsistent — a word is counted in more documents than the vault holds; scores use a clamped count until `muninn vault reindex-fts <vault>` rebuilds them",
+	slog.Warn("fts: a word is counted in more documents than the vault's document count; scores use a clamped count. An in-place edit of a memory whose keyword index has not been built yet causes this until its index job runs. If this keeps being logged, run `muninn vault reindex-fts <vault>`",
 		"vault_prefix", fmt.Sprintf("%x", ws), "document_frequency", df, "documents", uint64(n))
+}
+
+// noteUnindexedEdit records that ReindexEngram just wrote postings for a
+// document that had none (see reportStatsBehind).
+func (idx *Index) noteUnindexedEdit(ws [8]byte) {
+	v, _ := idx.unindexedEdit.LoadOrStore(ws, new(atomic.Int64))
+	v.(*atomic.Int64).Store(idx.now().UnixNano())
 }
 
 // statsWithDocument returns the vault's corpus statistics as they stand after

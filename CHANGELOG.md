@@ -60,8 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   What changed. Rarity is worked out on every search. A search reads the memory count, every
   word's count and every posting list from one snapshot, so a score always belongs to a state
-  the index was really in (before, under a concurrent writer, 339 of 383,404 scores for one
-  memory matched no such state). A memory's postings, its words' counts and the vault's
+  the index was really in (under a concurrent writer, 339 of 383,404 scores for one memory
+  matched no such state before, and 0 of 602,783 after). A memory's postings, its words' counts and the vault's
   memory count are committed together. A word that has a count record always counts as
   present. Searches no longer wait on the keyword indexer: with one writer indexing
   continuously, median keyword search time went from 17 ms to 0.2 ms. A search does one more
@@ -81,10 +81,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later retagged or restored. That predates this change and a restart does not clear it. And
   a vault last written by an older build that stopped between its two writes carries a memory
   count one behind; for words almost every memory holds, that changes a rarity by up to about
-  3x and a keyword score by up to 0.25. When a word's count exceeds the memory count the
-  server now says so: `muninndb_fts_stats_inconsistent_total` counts it, and one `WARN` per
-  vault per ten minutes names the vault prefix. `muninn vault reindex-fts <name>` rebuilds
-  the statistics.
+  3x and a keyword score by up to 0.25.
+
+  A word counted in more memories than the vault holds. The server now reports this with
+  `muninndb_fts_stats_inconsistent_total`. One cause is ordinary and clears by itself: a
+  memory retagged before its keyword index was built (write it, then retag it inside the
+  indexer's 100 ms) has its new tag counted before the memory itself is. Seen within a minute
+  of such an edit it is counted as `state="expected"` and nothing is logged. Anything else is
+  counted as `state="unexplained"` and logged once per vault per ten minutes with the vault
+  prefix. That covers the same edit when the memory's index job was then dropped or the
+  server stopped first, a retag that landed while `reindex-fts` was rebuilding the vault (the
+  new tag is counted twice), and a vault last written by an older build that stopped between
+  its two writes. The log line says what was seen and to run `muninn vault reindex-fts <name>`
+  only if it keeps appearing.
 
 - A keyword index that cannot be read no longer answers "no match" or corrupts its counts.
   Every read error in the keyword index was treated as "not found". A search over an
@@ -92,10 +101,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   miss. Indexing, retagging or restoring a memory while a read failed took the unreadable
   count as zero and saved 1 over it: indexing one memory while reads were failing took a
   word's count from 6 to 1 and the vault's memory count from 6 to 1, durably, and reported
-  success. Read errors are now returned. Recall logs `activation: fts search degraded` for the vault and still returns
-  what the vector channel found; an index write that cannot read its counts fails without
-  writing anything. A recall response carries no marker that its keyword channel was down:
-  the log line is the only signal.
+  success. Read errors are now returned. Recall logs `activation: fts search degraded` for
+  the vault and still returns what the vector channel found; an index write that cannot read
+  its counts fails without writing anything. Two things to know. An index job that fails this
+  way is logged (`fts: worker failed to index engram`) and dropped, with no retry, so that
+  memory has no keyword entries until the vault is reindexed. And a recall response carries
+  no marker that its keyword channel was down: on a vault with no vectors a keyword read
+  error gives an empty result, and the log line is the only signal.
 
 - After a cluster failover, replicas no longer discard the new leader's writes. A replica
   does not advance its own replication sequence counter while it follows, so a replica that

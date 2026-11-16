@@ -27,9 +27,12 @@ import (
 //     corpus statistics in one batch, so there is no committed state in which a
 //     word is counted in a document the corpus size does not include.
 //
-// With both, a word counted in more documents than the vault holds is no longer
-// something a search can see in passing. It means the statistics on disk
-// disagree, and the third test pins that this is reported, not just survived.
+// With both, a word counted in more documents than the vault holds is never a
+// torn read. It is still a state the index can be committed in — an edit of a
+// memory whose first index has not run yet puts it there for a moment, and a
+// dropped index job or an older build's crash for good — so the tests after
+// those two pin how it is reported: counted and logged when nothing explains
+// it, counted quietly while an index job is still due.
 
 // readGate counts sstable reads and can stop the caller inside the Nth one. It
 // is the hook for forcing an interleaving without touching product code and
@@ -215,28 +218,39 @@ func TestIndexEngram_CorpusStatisticsCommitWithThePostings(t *testing.T) {
 	requireAllFound(t, idx, ws, idfTestTerm, 3, "after the crash")
 }
 
+func statsBehindCount(state string) float64 {
+	return testutil.ToFloat64(metrics.FTSStatsInconsistent.WithLabelValues(state))
+}
+
+func captureFTSLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+const statsBehindLogged = "counted in more documents than the vault's document count"
+
 // TestSearch_ReportsStatisticsThatDisagree: a word counted in more documents
-// than the vault holds is counted on every search that meets it and logged once
-// per vault per interval, naming the vault prefix and never the word.
+// than the vault holds, with nothing that explains it, is counted on every
+// search that meets it and logged once per vault per interval, naming the vault
+// prefix and never the word.
 func TestSearch_ReportsStatisticsThatDisagree(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
 	idx := New(db)
 	ctx := context.Background()
-
-	buf := &bytes.Buffer{}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	defer slog.SetDefault(prev)
-	const msg = "keyword statistics are inconsistent"
+	logs := captureFTSLogs(t)
 
 	// A consistent vault reports nothing.
 	healthy := keys.VaultPrefix("stats-agree")
 	idfTestIndex(t, idx, healthy, 1, 3)
-	base := testutil.ToFloat64(metrics.FTSStatsInconsistent)
+	base, baseExpected := statsBehindCount("unexplained"), statsBehindCount("expected")
 	requireAllFound(t, idx, healthy, idfTestTerm, 3, "consistent vault")
-	if got := testutil.ToFloat64(metrics.FTSStatsInconsistent) - base; got != 0 || strings.Contains(buf.String(), msg) {
-		t.Fatalf("a consistent vault was reported: counter +%v, log %q", got, buf.String())
+	if got := statsBehindCount("unexplained") - base; got != 0 || strings.Contains(logs.String(), statsBehindLogged) {
+		t.Fatalf("a consistent vault was reported: counter +%v, log %q", got, logs.String())
 	}
 
 	// A vault whose document count is one behind a word's frequency.
@@ -252,19 +266,125 @@ func TestSearch_ReportsStatisticsThatDisagree(t *testing.T) {
 			t.Fatalf("Search = %d matches, err %v; want 3, nil", len(res), err)
 		}
 	}
-	if got := testutil.ToFloat64(metrics.FTSStatsInconsistent) - base; got != 3 {
-		t.Errorf("muninndb_fts_stats_inconsistent_total moved by %v over three searches, want 3", got)
+	if got := statsBehindCount("unexplained") - base; got != 3 {
+		t.Errorf("muninndb_fts_stats_inconsistent_total{state=unexplained} moved by %v over three searches, want 3", got)
 	}
-	logs := buf.String()
-	if n := strings.Count(logs, msg); n != 1 {
-		t.Errorf("logged the inconsistency %d times over three searches, want once per vault per interval. Log:\n%s", n, logs)
+	if got := statsBehindCount("expected") - baseExpected; got != 0 {
+		t.Errorf("muninndb_fts_stats_inconsistent_total{state=expected} moved by %v with no edit to explain it, want 0", got)
 	}
-	if !strings.Contains(logs, fmt.Sprintf("vault_prefix=%x", ws)) {
-		t.Errorf("the WARN does not name the vault prefix. Log:\n%s", logs)
+	out := logs.String()
+	if n := strings.Count(out, statsBehindLogged); n != 1 {
+		t.Errorf("logged it %d times over three searches, want once per vault per interval. Log:\n%s", n, out)
 	}
-	if strings.Contains(logs, idfTestTerm) {
-		t.Errorf("the WARN carries the word itself, which is memory content. Log:\n%s", logs)
+	if !strings.Contains(out, fmt.Sprintf("vault_prefix=%x", ws)) {
+		t.Errorf("the WARN does not name the vault prefix. Log:\n%s", out)
 	}
+	if !strings.Contains(out, "If this keeps being logged") {
+		t.Errorf("the WARN tells the operator to rebuild without saying only if it persists. Log:\n%s", out)
+	}
+	if strings.Contains(out, idfTestTerm) {
+		t.Errorf("the WARN carries the word itself, which is memory content. Log:\n%s", out)
+	}
+}
+
+// TestSearch_AnEditAwaitingItsFirstIndexIsNotAnAlarm is the ordinary sequence
+// that makes a word's frequency exceed the document count on a healthy store:
+// memory A is tagged kestrel and indexed; memory B is written; B is retagged
+// kestrel BEFORE the index worker has run B's job. ReindexEngram counts the tag
+// entering B, and B itself is not counted until its first index runs: df = 2,
+// N = 1. That clears by itself, so it must not tell an operator to rebuild.
+//
+// The same state must still be reported when it does NOT clear: the job was
+// dropped and the grace period has passed, or the process restarted (no job can
+// be pending in a process that has just started).
+func TestSearch_AnEditAwaitingItsFirstIndexIsNotAnAlarm(t *testing.T) {
+	a, b := [16]byte{0x01}, [16]byte{0x02}
+	docB := Document{Concept: "tide office", Content: "a barge logged at noon", Tags: []string{"osprey"}}
+	retagged := docB
+	retagged.Tags = []string{"kestrel"}
+
+	// setup leaves the store in the state the retag creates, with a clock the
+	// test owns.
+	setup := func(t *testing.T) (*pebble.DB, *Index, [8]byte, *time.Time) {
+		db, cleanup := openTestDB(t)
+		t.Cleanup(cleanup)
+		idx := New(db)
+		clock := time.Unix(1_800_000_000, 0)
+		idx.now = func() time.Time { return clock }
+		ws := keys.VaultPrefix("edit-before-first-index")
+		if err := idx.IndexEngram(ws, a, "harbor tally", "", "a crate counted at dusk", []string{"kestrel"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := idx.ReindexEngram(ws, b, docB, retagged); err != nil { // the retag; B's index job is still queued
+			t.Fatal(err)
+		}
+		if df, _, err := readDF(db, ws, "kestrel"); err != nil || df != 2 || mustStats(t, idx, ws).TotalEngrams != 1 {
+			t.Fatalf("setup: df(kestrel) = %d, N = %d (err %v); want the 2 and 1 this sequence leaves", df, mustStats(t, idx, ws).TotalEngrams, err)
+		}
+		return db, idx, ws, &clock
+	}
+	search := func(t *testing.T, idx *Index, ws [8]byte) (unexplained, expected float64) {
+		t.Helper()
+		u, e := statsBehindCount("unexplained"), statsBehindCount("expected")
+		if res, err := idx.Search(context.Background(), ws, "kestrel", 10); err != nil || len(res) != 2 {
+			t.Fatalf("Search(kestrel) = %d matches, err %v; want both memories", len(res), err)
+		}
+		return statsBehindCount("unexplained") - u, statsBehindCount("expected") - e
+	}
+
+	t.Run("while the index job is pending, then once it has run", func(t *testing.T) {
+		_, idx, ws, _ := setup(t)
+		logs := captureFTSLogs(t)
+
+		unexplained, expected := search(t, idx, ws)
+		if unexplained != 0 || strings.Contains(logs.String(), statsBehindLogged) {
+			t.Errorf("a retag before the memory's first index raised the alarm: unexplained +%v, log:\n%s", unexplained, logs.String())
+		}
+		if expected != 1 {
+			t.Errorf("state=expected moved by %v, want 1: the observation is counted, just not as a fault", expected)
+		}
+
+		// The queued job runs. It carries the memory as it was written.
+		if err := idx.IndexEngram(ws, b, docB.Concept, "", docB.Content, docB.Tags); err != nil {
+			t.Fatal(err)
+		}
+		unexplained, expected = search(t, idx, ws)
+		if unexplained != 0 || expected != 0 || strings.Contains(logs.String(), statsBehindLogged) {
+			t.Errorf("after the index job ran: unexplained +%v, expected +%v, want nothing left to report. Log:\n%s", unexplained, expected, logs.String())
+		}
+	})
+
+	t.Run("the index job never runs", func(t *testing.T) {
+		_, idx, ws, clock := setup(t)
+		logs := captureFTSLogs(t)
+
+		*clock = clock.Add(unindexedEditGrace - time.Second)
+		if unexplained, _ := search(t, idx, ws); unexplained != 0 || strings.Contains(logs.String(), statsBehindLogged) {
+			t.Fatalf("still inside the grace period: unexplained +%v, log:\n%s", unexplained, logs.String())
+		}
+		*clock = clock.Add(2 * time.Second) // past it
+		unexplained, expected := search(t, idx, ws)
+		if unexplained != 1 || expected != 0 {
+			t.Errorf("past the grace period with the job still not run: unexplained +%v, expected +%v; want 1 and 0", unexplained, expected)
+		}
+		if n := strings.Count(logs.String(), statsBehindLogged); n != 1 {
+			t.Errorf("logged %d times, want once. Log:\n%s", n, logs.String())
+		}
+	})
+
+	t.Run("the process restarted before the index job ran", func(t *testing.T) {
+		db, _, ws, _ := setup(t)
+		logs := captureFTSLogs(t)
+
+		restarted := New(db) // a new process: nothing is queued, nothing is remembered
+		unexplained, expected := search(t, restarted, ws)
+		if unexplained != 1 || expected != 0 {
+			t.Errorf("after a restart: unexplained +%v, expected +%v; want 1 and 0 — the job is gone, so the state will not clear", unexplained, expected)
+		}
+		if !strings.Contains(logs.String(), statsBehindLogged) {
+			t.Errorf("after a restart the state was not logged. Log:\n%s", logs.String())
+		}
+	})
 }
 
 // TestSearch_CompletesWhileAWriterHoldsTheIndexLock pins that a search takes no
