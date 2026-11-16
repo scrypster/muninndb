@@ -260,17 +260,23 @@ func setHostPorts(hostPort string) {
 
 // authenticateAdmin obtains a session cookie. Priority:
 //  1. If password was provided explicitly, use it.
-//  2. Try auto-auth with default credentials (root/password).
+//  2. On this machine only, try auto-auth with default credentials
+//     (root/password).
 //  3. If -p flag was given (no inline password), prompt interactively.
-//  4. If auto-auth failed and no -p flag, prompt interactively.
+//  4. If auto-auth failed or was not tried and no -p flag, prompt
+//     interactively.
 func authenticateAdmin(username, password string, prompted bool) error {
 	if password != "" {
 		return loginAdmin(username, password)
 	}
 
-	// Try default credentials first.
-	if err := loginAdmin("root", "password"); err == nil {
-		return nil
+	// Try default credentials first, on this machine only. Another machine is
+	// sent no credential the user did not supply (defaultCredentialsAllowed):
+	// the one rule for every command.
+	if defaultCredentialsAllowed(vaultUIBase) {
+		if err := loginAdmin("root", "password"); err == nil {
+			return nil
+		}
 	}
 
 	// Default creds failed — need explicit password.
