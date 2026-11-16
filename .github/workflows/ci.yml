@@ -588,6 +588,10 @@ jobs:
           # "// protoc v7.35.1"); a different protoc would rewrite that header and
           # flap `make proto-check`. Keep in sync with the dev toolchain.
           version: "35.1"
+          # Without a token the action pages the GitHub releases API anonymously
+          # (60 requests an hour per runner IP, shared with every other job on
+          # that IP) and fails the job when the limit is hit.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install protoc-gen-go & protoc-gen-go-grpc
         run: |
