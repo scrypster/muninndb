@@ -27,6 +27,27 @@ func openTestDB(t *testing.T) (*pebble.DB, func()) {
 	}
 }
 
+// mustStats and mustIDF read the corpus statistics and a term's IDF the way a
+// search does, failing the test on a read error instead of returning a value
+// derived from one.
+func mustStats(t testing.TB, idx *Index, ws [8]byte) FTSStats {
+	t.Helper()
+	st, err := idx.readStats(idx.db, ws)
+	if err != nil {
+		t.Fatalf("readStats: %v", err)
+	}
+	return st
+}
+
+func mustIDF(t testing.TB, idx *Index, ws [8]byte, term string, n float64) float64 {
+	t.Helper()
+	idf, err := idx.getIDF(idx.db, ws, term, n)
+	if err != nil {
+		t.Fatalf("getIDF(%q): %v", term, err)
+	}
+	return idf
+}
+
 // TestIndexEngramUpdatesStats verifies that IndexEngram updates per-term document
 // frequency and global stats so that BM25 search returns non-zero scores.
 //
@@ -49,7 +70,7 @@ func TestIndexEngramUpdatesStats(t *testing.T) {
 	}
 
 	// Stats must be updated
-	stats := idx.readStats(ws)
+	stats := mustStats(t, idx, ws)
 	if stats.TotalEngrams == 0 {
 		t.Errorf("TotalEngrams = 0, want >= 1 after IndexEngram")
 	}
@@ -129,7 +150,7 @@ func TestFTSMultipleEngrams(t *testing.T) {
 		_ = idx.IndexEngram(ws, id, "system concept", "", "this is a system component", nil)
 	}
 
-	stats := idx.readStats(ws)
+	stats := mustStats(t, idx, ws)
 	if stats.TotalEngrams != 3 {
 		t.Errorf("TotalEngrams = %d, want 3", stats.TotalEngrams)
 	}
@@ -273,8 +294,6 @@ func TestFTS_DualPathSearch(t *testing.T) {
 		if err := db.Set(import_tkey, import_df, nil); err != nil {
 			t.Fatalf("db.Set term-stats for 'running': %v", err)
 		}
-		// Invalidate IDF cache so stale values are not returned.
-		idx.InvalidateIDFCache()
 	}
 
 	// Now search "running" — dual-path must include both stemmed "run" (→ id1)
@@ -466,10 +485,11 @@ func TestMultiFieldPostingNoOverwrite(t *testing.T) {
 	}
 }
 
-// TestIDFCacheVaultIsolation verifies that IDF values are cached per (vault, term)
-// pair, not globally by term. Before the fix, idfCache was keyed by term only:
-// vault A's cached IDF for "robot" would be returned for vault B's search,
-// producing incorrect BM25 scores in multi-vault setups.
+// TestIDFCacheVaultIsolation verifies that a term's IDF is per vault. It dates
+// from when IDF values were memoized and the memo was keyed by term only:
+// vault A's IDF for "robot" was returned for vault B's search, producing
+// incorrect BM25 scores in multi-vault setups. The memo is gone (see getIDF);
+// the property still has to hold.
 func TestIDFCacheVaultIsolation(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
@@ -498,8 +518,8 @@ func TestIDFCacheVaultIsolation(t *testing.T) {
 	_, _ = idx.Search(ctx, wsA, "robot", 10)
 
 	// vault-b IDF for "robot" must be lower than vault-a's (it's common in vault-b).
-	idfA := idx.getIDF(wsA, "robot", float64(10))
-	idfB := idx.getIDF(wsB, "robot", float64(3))
+	idfA := mustIDF(t, idx, wsA, "robot", float64(10))
+	idfB := mustIDF(t, idx, wsB, "robot", float64(3))
 
 	if idfA <= idfB {
 		t.Errorf("idfA (%v) should be > idfB (%v): robot is rare in vault-a but common in vault-b", idfA, idfB)
