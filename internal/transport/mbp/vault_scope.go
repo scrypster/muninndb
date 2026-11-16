@@ -31,9 +31,9 @@ type vaultScope struct {
 }
 
 // maxSubscriptionsPerConnection is how many subscriptions one connection may
-// hold. With the listener's default of 64 connections that is at most 512, half
-// of the server-wide subscription limit (1000), and one connection can take at
-// most 8 of the 100 a vault allows.
+// hold. A subscription over MBP is a record on its connection and nothing else
+// (it registers nothing with the engine and takes none of a vault's places:
+// SEC-26), so this bounds only what the connection itself remembers.
 const maxSubscriptionsPerConnection = 8
 
 // connSubscriptions is the set of subscription ids one connection owns.

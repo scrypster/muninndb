@@ -364,22 +364,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the moment each one is accepted. A connection past the limit is answered with
   error `4012` ("server is at its connection limit") and closed. The default comes from
   the server's memory limit. It is the number of connections that fit in a quarter of
-  that limit if every one of them holds a full 16 MB request, which is 64 at the default
-  `MUNINN_MEM_LIMIT_GB=4` and 256 at 16. Set `MUNINN_MBP_MAX_CONNECTIONS` to choose the
-  number yourself. **If you run more MBP clients at once than the default allows, set it
-  before you upgrade, or the extra clients will be refused.** Refusals are logged at WARN
+  that limit if every one of them holds as much as a connection can, which is 69 MB (see
+  the next entry). That is 16 at the default `MUNINN_MEM_LIMIT_GB=4`, 59 at 16 and 237
+  at 64. Set `MUNINN_MBP_MAX_CONNECTIONS` to choose the number yourself.
+  **If you run more than 16 MBP clients at once, set it before you upgrade, or the extra
+  clients will be refused.** Refusals are logged at WARN
   at most once every 10 seconds, with a count. The limit keeps the server and its other
   transports running when someone floods this port. It does not keep the port usable.
   One source can occupy every connection slot, and other MBP clients are then refused
   until it lets go (SEC-28).
 
+- An MBP client that does not read its replies can no longer make the server hold them.
+  Replies waited in a queue of 256 with no limit on their size, and the server kept
+  writing to a client that was not reading for as long as the client stayed connected.
+  A client that sent requests and never read the answers kept every answer in the
+  server's memory. One connection with no key held 192 MB with sixteen requests, and 183
+  MB with two hundred ordinary recalls, until it disconnected. The limit was about 5 GB
+  for one connection. A client that sent more than 256 requests before reading also lost
+  answers without being told: of 1,000, between 75 and 134 never arrived.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
+  trust, in every release up to v0.11.0. No key is needed when a vault is public. A
+  well-behaved client that pipelined more than 256 requests was affected by the lost
+  answers.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port.
+  **What changed:** four things. The replies one connection has not read are limited to
+  17 MB. A read or a recall takes its share of that before it is carried out, and waits
+  if there is no room, so a slow client is served at the speed it reads and every request
+  it sent is answered. The server stops reading requests from a connection whose replies
+  are backing up, and from one that has 4 MB of requests in progress. And a connection
+  that accepts no reply data at all for 15 seconds is closed. That last limit is on
+  making no progress, not on how long a reply takes: a client that keeps reading, however
+  slowly, is not cut off. With this, one connection can make the server hold at most 69
+  MB of requests and replies: 20 MB of requests in progress, 32 MB of decompressed
+  payloads and 17 MB of unread replies. The same test now holds 16 MB where it held 183.
+  **What a client will notice:** a `PING` may carry at most 1,024 bytes. A larger one is
+  refused with error `4003`. `PONG` repeats what `PING` sent, and that was the cheapest
+  way to make the server queue large replies. A reply too large for one frame (16 MB) is
+  now refused with error `4013`, "ask for fewer results". Before, it stopped every later
+  reply on the connection. A client that stops reading for 15 seconds while replies are
+  waiting is disconnected. More than 256 pipelined requests are now all answered.
+  **What this does not cover:** the memory the server uses to carry out requests. One
+  connection can have 64 in progress at once, on this port as on the others (SEC-30).
+
 - Limits of the MBP listener that this release does not change. The fixes above do not
   make it safe to expose the MBP port to clients you do not trust. A connection that has
-  completed its handshake has no idle timeout. Every request that is being read or
-  handled holds its raw payload in memory, up to 16 MB each and up to 64 at a time on one
-  connection, and the memory for a request is set aside as soon as its 16-byte header
-  arrives. The connection limit bounds how many connections can do this. It does not
-  bound how much each one holds. One source can occupy every connection slot, with no key
+  completed its handshake has no idle timeout, and a request that is being read has no
+  deadline. The memory for a request is set aside as soon as its 16-byte header arrives,
+  up to 16 MB, so a connection can hold that much for sixteen bytes. The connection
+  limit bounds how many connections there are, and each can hold up to the 69 MB
+  described above. One source can occupy every connection slot, with no key
   if any vault is public, and lock other clients out of this port. The limit is not
   applied per source address, because clients on the same machine, behind a proxy, or
   reaching a container through a published port all arrive from one address. A client

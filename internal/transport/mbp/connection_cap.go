@@ -17,34 +17,48 @@ import (
 // # Where the default comes from
 //
 // There was no listener-level connection limit anywhere in the tree to follow,
-// so the default is derived from what a connection can make the server hold,
-// which was measured (a real server and engine, 400 connections):
+// so the default is derived from what one connection can make the server hold.
 //
-//	accepted, no HELLO yet        about 5 KiB, 1 goroutine
-//	established and idle          about 21 KiB, 2 goroutines
-//	established, and has sent a
-//	16-byte frame header that
-//	declares a 16 MiB payload     16 MiB, for as long as it stays connected
+// Before it has said HELLO a connection holds about 5 KiB and may send at most
+// 64 KiB (SEC-27). Established and idle it holds about 21 KiB (measured, 400
+// connections against a real engine). What sets the default is an established
+// connection doing its worst, and that is bounded by connMemoryBound
+// (reply_flow.go), 69 MiB:
 //
-// The last one sets the default. It needs no key on a public vault and costs
-// the peer sixteen bytes, because a frame's payload buffer is allocated at its
-// declared size when the header is read and the read then waits. So the cap is
-// the number of such connections that fit in a quarter of the process's memory
-// limit: at the default limit of 4 GiB (MUNINN_MEM_LIMIT_GB) that is
-// 1 GiB / 16 MiB = 64 connections. A server given a larger memory limit gets a
-// proportionally larger cap without being told.
+//	requests being handled   20 MiB   connRequestGate, and the one frame read past it
+//	decompressed payloads    32 MiB   connDecodeBudget
+//	replies not yet read     17 MiB   connReplyBudget, and a queue of small ones
+//
+// The first of those includes the cheapest thing a connection can do: a frame
+// header that declares a 16 MiB payload makes the server set 16 MiB aside and
+// wait for it, for sixteen bytes and no key on a public vault.
+//
+// The cap is the number of connections at that bound that fit in a quarter of
+// the process's memory limit. At the default limit of 4 GiB
+// (MUNINN_MEM_LIMIT_GB) that is 1 GiB / 69 MiB = 14, which is under the floor
+// of 16, so the default is 16. At 16 GiB it is 59. A server given a larger
+// memory limit gets a proportionally larger cap without being told.
+//
+// An earlier version of this derivation divided by 16 MiB, one frame's worth,
+// and arrived at 64. That was what a connection held while a frame was being
+// read, not what it could hold: replies it did not read were not bounded at
+// all then.
+//
+// What the bound does not cover is the working memory of the requests being
+// handled: what the engine allocates to carry out up to maxConcurrentFrames
+// requests at once. That is the cost of serving them, on any transport.
 const (
 	// maxConnectionsEnv overrides the derived default.
 	maxConnectionsEnv = "MUNINN_MBP_MAX_CONNECTIONS"
 
 	// connectionMemoryShare is the fraction of the memory limit that a full
-	// set of connections, each holding one frame's worth, may add up to: one
-	// part in connectionMemoryShare.
+	// set of connections, each at connMemoryBound, may add up to: one part in
+	// connectionMemoryShare.
 	connectionMemoryShare = 4
 
 	// fallbackMaxConnections is the cap when the process has no memory limit
 	// to derive one from: what the derivation gives at the default 4 GiB.
-	fallbackMaxConnections = 64
+	fallbackMaxConnections = 16
 
 	// minDerivedConnections keeps a server with a very small memory limit
 	// usable. An explicit override may still go lower.
@@ -59,7 +73,7 @@ func derivedMaxConnections(memoryLimit int64) int {
 	if memoryLimit <= 0 || memoryLimit == math.MaxInt64 {
 		return fallbackMaxConnections
 	}
-	n := memoryLimit / connectionMemoryShare / MaxPayloadSize
+	n := memoryLimit / connectionMemoryShare / connMemoryBound
 	if n < minDerivedConnections {
 		return minDerivedConnections
 	}
