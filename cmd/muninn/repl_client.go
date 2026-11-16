@@ -81,6 +81,9 @@ func (r *replState) cmdShowVaults() vaultListOutcome {
 	// other name the cookie is ignored and the list is the caller's own vault
 	// only. It is sent only to the host that issued it (sessionCookieFor).
 	if cookie := sessionCookieFor(req.URL, r.sessionCookie, r.sessionHosts...); cookie != "" {
+		if len(r.sessionHosts) > 0 {
+			announceSessionSentElsewhere(req.URL, r.sessionHosts[0]) // the first is the issuer
+		}
 		req.AddCookie(&http.Cookie{Name: "muninn_session", Value: cookie})
 	}
 	resp, err := client.Do(req)

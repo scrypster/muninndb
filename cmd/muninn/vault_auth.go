@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/term"
@@ -24,13 +25,16 @@ var (
 	// that returned it was sent. The cookie goes back to that host
 	// (sessionCookieFor).
 	vaultCookieHost string
-	// vaultPairedHost is the admin API host the operator has explicitly said
-	// belongs to the same server as the sign-in address, by setting BOTH
-	// MUNINNDB_ADMIN_URL and MUNINNDB_UI_URL. It is "" otherwise. A server
-	// behind a proxy can have its API and its console on two host names; the
-	// session issued on one is then sent to the other, because the operator
-	// named them together. An address the CLI fell back to on its own is never
-	// paired with one the operator gave.
+	// vaultPairedHost is the admin API host that is taken to be the same
+	// server as the sign-in address although its name differs. It is set only
+	// when BOTH MUNINNDB_ADMIN_URL and MUNINNDB_UI_URL are given AND the two
+	// are on the same side of this machine's edge (cliBases), and is ""
+	// otherwise. A server behind a proxy can have its API and its console on
+	// two host names; the session issued on one is then sent to the other, and
+	// the CLI says so when it does (announceSessionSentElsewhere). An address
+	// the CLI fell back to on its own is never paired with one the operator
+	// gave, and an address on this machine is never paired with one that is
+	// not.
 	vaultPairedHost string
 )
 
@@ -49,8 +53,16 @@ func init() {
 // another server signed in to the local one and carried that session to the
 // other.
 //
-// pairedHost is the admin host when BOTH were given, and "" otherwise: see
-// vaultPairedHost.
+// pairedHost is the admin host when BOTH were given and both are on this
+// machine or both are not, and "" otherwise: see vaultPairedHost.
+//
+// Giving both is not enough on its own. It was, and that reproduced the leak
+// the derivation above closes: a console address left in the environment and a
+// one-off MUNINNDB_ADMIN_URL for another server meant "sign in here, and send
+// the session there". A session issued by a daemon on this machine is never
+// valid on another machine, and no real deployment has a loopback console in
+// front of a remote API (or the reverse), so those two are not one server
+// whatever the variables say.
 func cliBases(adminEnv, uiEnv string) (admin, ui, pairedHost string) {
 	admin, ui = "http://127.0.0.1:8475", "http://127.0.0.1:8476"
 	if adminEnv != "" {
@@ -60,7 +72,7 @@ func cliBases(adminEnv, uiEnv string) (admin, ui, pairedHost string) {
 	if uiEnv != "" {
 		ui = uiEnv
 	}
-	if adminEnv != "" && uiEnv != "" {
+	if adminEnv != "" && uiEnv != "" && isLoopbackURL(adminEnv) == isLoopbackURL(uiEnv) {
 		pairedHost = hostOf(adminEnv)
 	}
 	return admin, ui, pairedHost
@@ -114,6 +126,28 @@ func sessionCookieFor(u *url.URL, cookie string, hosts ...string) string {
 	}
 	return ""
 }
+
+// sessionSentElsewhere records that the notice below has been printed.
+var sessionSentElsewhere atomic.Bool
+
+// announceSessionSentElsewhere says, once per run and on stderr, that an admin
+// session is being sent to a host other than the one that issued it. That
+// happens only for a host the operator paired with the sign-in address, and it
+// is never done silently: a session is a credential, and the person running
+// the command should be able to see where it went.
+func announceSessionSentElsewhere(u *url.URL, issuerHost string) {
+	if u == nil || issuerHost == "" || strings.ToLower(u.Hostname()) == issuerHost {
+		return
+	}
+	if sessionSentElsewhere.CompareAndSwap(false, true) {
+		fmt.Fprintf(os.Stderr, "Note: the admin session issued by %s is being sent to %s, because MUNINNDB_UI_URL and MUNINNDB_ADMIN_URL name them together.\n",
+			issuerHost, strings.ToLower(u.Hostname()))
+	}
+}
+
+// resetSessionNotice lets the next session sent to a host other than its
+// issuer be announced again. Tests only.
+func resetSessionNotice() { sessionSentElsewhere.Store(false) }
 
 // sessionIssuer is the host vaultCookie came from. loginAdmin records it. A
 // cookie with no recorded host can only have come from a login at vaultUIBase,
@@ -331,6 +365,7 @@ func getWithAdminSession(url string) (*http.Response, error) {
 // if one has been obtained.
 func addSessionCookie(req *http.Request) {
 	if cookie := sessionCookieFor(req.URL, vaultCookie, sessionIssuer(), vaultPairedHost); cookie != "" {
+		announceSessionSentElsewhere(req.URL, sessionIssuer())
 		req.AddCookie(&http.Cookie{Name: "muninn_session", Value: cookie})
 	}
 }

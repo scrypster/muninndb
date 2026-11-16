@@ -415,8 +415,9 @@ func printHelp() {
 	fmt.Printf("  MCP endpoint: %s://127.0.0.1:%s/mcp\n", localScheme(), defaultMCPPort)
 	fmt.Printf("  %-28s %s\n", "MUNINN_MCP_URL", "Override MCP server URL (also used by 'muninn mcp' proxy)")
 	fmt.Printf("  %-28s %s\n", "MUNINNDB_DATA", "Override default data directory")
-	fmt.Printf("  %-28s %s\n", "MUNINNDB_ADMIN_URL", "TLS: base URL for 'muninn status'/admin REST probes")
-	fmt.Printf("  %-28s %s\n", "MUNINNDB_UI_URL", "TLS: base URL for 'muninn status' Web UI probe")
+	fmt.Printf("  %-28s %s\n", "MUNINNDB_ADMIN_URL", "Base URL of the server's REST API: where admin commands are sent")
+	fmt.Printf("  %-28s %s\n", "MUNINNDB_UI_URL", "Base URL the CLI SIGNS IN at (the console). Default: the admin URL's host, next port")
+	fmt.Printf("  %-28s %s\n", "", "An admin session goes only to the host that issued it. Set both only for one server.")
 	fmt.Printf("  %-28s %s\n", "MUNINNDB_MCP_URL", "TLS: base URL for 'muninn status'/'start' MCP probe")
 	fmt.Println()
 
