@@ -612,6 +612,13 @@ components:
             vault scores with weighted_sum or rrf.
         source_type:
           type: string
+          description: >-
+            Where the memory came from, read from the provenance entry that
+            created it (human, llm, document, inferred, external,
+            working_memory, synthetic). It does not change when the memory is
+            later read or updated. Every ordinary write is currently recorded
+            as "human" whoever made it, so the field does not yet tell a person
+            from an agent; use trust for that.
         state:
           type: integer
           format: uint8

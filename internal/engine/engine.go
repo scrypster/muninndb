@@ -3563,13 +3563,20 @@ func (e *Engine) activateCore(ctx context.Context, req *mbp.ActivateRequest, str
 		// engine:spawn-ok — tracked by local wg, drained by wg.Wait() a few lines below
 		go func(idx int, id [16]byte) {
 			defer wg.Done()
-			entries, err := e.prov.Get(ctx, wsPrefix, id)
+			// source_type says where the memory CAME FROM, so it is read from
+			// the entry that created it. It used to be read from the LAST
+			// entry, and the first access or feedback appends an
+			// update-meta entry written as "inferred" (TouchAccess), so the
+			// field flipped from the writer's source to "inferred" after one read:
+			// it reported who touched the memory last. Origin stops at the
+			// creating entry instead of loading the whole log.
+			origin, ok, err := e.prov.Origin(ctx, wsPrefix, id)
 			if err != nil {
 				slog.Warn("activate: provenance lookup failed", "id", id, "err", err)
 				return
 			}
-			if len(entries) > 0 {
-				items[idx].SourceType = sourceTypeString(entries[len(entries)-1].Source)
+			if ok {
+				items[idx].SourceType = sourceTypeString(origin.Source)
 			}
 		}(i, [16]byte(scored.Engram.ID))
 	}
