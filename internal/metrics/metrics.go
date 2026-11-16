@@ -47,6 +47,11 @@ var (
 		Help: "Total number of FTS index write failures during reindex.",
 	}, []string{"vault"})
 
+	FTSStatsInconsistent = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "muninndb_fts_stats_inconsistent_total",
+		Help: "Query-word IDF computations that found the word counted in more documents than the vault's document count (the count is clamped). state=expected: within a minute of an in-place edit of a memory whose keyword index was not built yet, which clears when its index job runs. state=unexplained: anything else; if it keeps rising, `muninn vault reindex-fts` rebuilds the statistics.",
+	}, []string{"state"})
+
 	WriteDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "muninndb_write_duration_seconds",
 		Help:    "Engine write latency per vault",

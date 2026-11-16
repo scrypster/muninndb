@@ -95,7 +95,10 @@ func (m *ConnManager) HasLivePeerAt(addr string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, p := range m.peers {
-		if p.addr == addr && p.conn != nil && !p.closed {
+		// IsConnected takes the peer's own lock. Send marks a connection dead
+		// under that lock when a write fails, so reading conn and closed here
+		// with only the manager's lock held was a data race.
+		if p.addr == addr && p.IsConnected() {
 			return true
 		}
 	}
@@ -150,7 +153,8 @@ func (m *ConnManager) RegisterConnKind(nodeID, addr string, conn net.Conn, kind 
 	defer m.mu.Unlock()
 
 	existing, ok := m.peers[nodeID]
-	liveExisting := ok && existing.conn != nil && !existing.closed
+	// IsConnected, not the bare fields: see HasLivePeerAt.
+	liveExisting := ok && existing.IsConnected()
 	if liveExisting {
 		if existing.kind == kindJoin && kind != kindJoin {
 			return existing, false // never evict a live join with a hello
