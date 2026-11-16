@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that total, so the ratio reads low on a server that has such vaults. Tree writes and the
   upsert-evolve path are not covered.
 
+### Changed
+
+- Vaults with no explicit access policy are reported in one startup line, with the count and
+  the names, instead of one `WARN` per vault on every start. Such a vault is locked and requires
+  an API key, which is the secure default and not a fault, so the line is `INFO`; the per-vault
+  line is now `DEBUG`. A failure to build the list is still a `WARN`. Behaviour is unchanged.
+
 ### Fixed
 
 - A connected follower no longer serves a memory that was soft-deleted on the leader.

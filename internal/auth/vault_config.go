@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/cockroachdb/pebble"
@@ -32,8 +33,15 @@ func (s *Store) GetVaultConfig(vault string) (VaultConfig, error) {
 		// Fail-closed: any vault that has never been explicitly configured
 		// requires an API key. Operators should call SetVaultConfig to
 		// establish an explicit policy for each vault.
+		//
+		// Logged once per vault per process, at DEBUG. Locked is the secure
+		// default, not a fault: at WARN this printed one line per unconfigured
+		// vault on every start, a permanent alarm for a state that is by
+		// design. The server reports the same vaults in ONE startup line
+		// (UnconfiguredVaults); a caller without a key still gets the auth
+		// error at the request, which is where it is actionable.
 		if _, already := warnedUnconfiguredVaults.LoadOrStore(vault, struct{}{}); !already {
-			slog.Warn("vault has no explicit config — defaulting to locked access (fail-closed); call SetVaultConfig to set an explicit policy",
+			slog.Debug("vault has no explicit config — defaulting to locked access (fail-closed); call SetVaultConfig to set an explicit policy",
 				"vault", vault,
 			)
 		}
@@ -46,6 +54,28 @@ func (s *Store) GetVaultConfig(vault string) (VaultConfig, error) {
 		return VaultConfig{}, fmt.Errorf("corrupt vault config: %w", err)
 	}
 	return cfg, nil
+}
+
+// UnconfiguredVaults returns, sorted, the names in vaults that have no stored
+// config: the vaults that take the fail-closed default and require an API key.
+// It is what the server reports in its one-line startup notice.
+func (s *Store) UnconfiguredVaults(vaults []string) ([]string, error) {
+	cfgs, err := s.ListVaultConfigs()
+	if err != nil {
+		return nil, err
+	}
+	configured := make(map[string]struct{}, len(cfgs))
+	for _, c := range cfgs {
+		configured[c.Name] = struct{}{}
+	}
+	var out []string
+	for _, v := range vaults {
+		if _, ok := configured[v]; !ok {
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // SetVaultConfig persists the vault configuration.
