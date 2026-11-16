@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/scrypster/muninndb/internal/auth"
 )
@@ -24,72 +23,6 @@ type vaultScope struct {
 	// end stops the connection reading. The frames it is already handling
 	// finish and are answered; then it is closed. Set by handleConnection.
 	end func()
-
-	// subs are the subscriptions made on this connection (SEC-26). UNSUB
-	// reaches these and no others, and they are ended when the connection is.
-	subs connSubscriptions
-}
-
-// maxSubscriptionsPerConnection is how many subscriptions one connection may
-// hold. A subscription over MBP is a record on its connection and nothing else
-// (it registers nothing with the engine and takes none of a vault's places:
-// SEC-26), so this bounds only what the connection itself remembers.
-const maxSubscriptionsPerConnection = 8
-
-// connSubscriptions is the set of subscription ids one connection owns.
-type connSubscriptions struct {
-	mu      sync.Mutex
-	ids     map[string]struct{}
-	pending int // SUBSCRIBEs admitted and not yet registered
-}
-
-// reserve takes room for one more subscription, or reports there is none.
-func (c *connSubscriptions) reserve() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.ids)+c.pending >= maxSubscriptionsPerConnection {
-		return false
-	}
-	c.pending++
-	return true
-}
-
-// settle ends a reservation: with the id of the subscription it became, or
-// with "" when the subscription was not made.
-func (c *connSubscriptions) settle(id string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.pending--
-	if id == "" {
-		return
-	}
-	if c.ids == nil {
-		c.ids = make(map[string]struct{})
-	}
-	c.ids[id] = struct{}{}
-}
-
-// release gives up a subscription, and reports whether this connection owned it.
-func (c *connSubscriptions) release(id string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, owned := c.ids[id]; !owned {
-		return false
-	}
-	delete(c.ids, id)
-	return true
-}
-
-// drain returns every subscription the connection still owns and forgets them.
-func (c *connSubscriptions) drain() []string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	ids := make([]string, 0, len(c.ids))
-	for id := range c.ids {
-		ids = append(ids, id)
-	}
-	c.ids = nil
-	return ids
 }
 
 // errInvalidVaultName is the refusal for a request that names something no

@@ -370,12 +370,6 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	// Start reader loop. When it returns, no handler is still running.
 	s.readerLoop(connCtx, conn, writeCh, helloResp.Capabilities)
 
-	// The connection is over, and so are the subscriptions it made. No handler
-	// is running, so none can be added after this.
-	for _, id := range scope.subs.drain() {
-		_ = s.engine.Unsubscribe(connCtx, id)
-	}
-
 	close(writeCh)
 
 	// Wait for writer goroutine
@@ -583,62 +577,41 @@ func (s *Server) handleActivate(ctx context.Context, corrID uint64, payload []by
 	s.queueActivateResponse(ctx, writeCh, corrID, resp, caps)
 }
 
+// msgSubscribeNotServed is what SUBSCRIBE is answered with.
+const msgSubscribeNotServed = "subscriptions are not delivered over this protocol: use the REST stream (GET /api/subscribe, server-sent events) or the gRPC Subscribe call"
+
+// handleSubscribe refuses. Nothing is delivered over MBP: the server writes no
+// ACTIVATION frame and never has. SUBSCRIBE used to be answered SUB_OK with the
+// status "active" all the same, which told a client it would be sent pushes
+// that could not come. It is refused by name, with where subscriptions do work
+// (SEC-26).
+//
+// A session that may not read, or that names a vault it may not use, is refused
+// for that first, as for every other frame: the answer to those does not
+// depend on what the protocol offers.
 func (s *Server) handleSubscribe(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
 	var req SubscribeRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
 		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidEngram, "invalid subscribe request")
 		return
 	}
-
-	resolved, err := s.scopeVault(ctx, req.Vault)
-	if err != nil {
+	if _, err := s.scopeVault(ctx, req.Vault); err != nil {
 		s.queueErrorFrame(ctx, writeCh, corrID, ErrAuthFailed, err.Error())
 		return
 	}
-	req.Vault = resolved
-
-	// The subscription belongs to this connection: it counts against the
-	// connection's limit, only this connection can end it, and it ends when the
-	// connection does (SEC-26).
-	sc, _ := ctx.Value(vaultScopeKey).(*vaultScope)
-	if sc == nil {
-		s.queueErrorFrame(ctx, writeCh, corrID, ErrAuthFailed, "vault access denied: connection is not authorized")
-		return
-	}
-	if !sc.subs.reserve() {
-		s.queueErrorFrame(ctx, writeCh, corrID, ErrRateLimited, "subscription limit reached for this connection")
-		return
-	}
-
-	resp, err := s.engine.Subscribe(ctx, &req)
-	if err != nil {
-		sc.subs.settle("")
-		s.queueErrorFrame(ctx, writeCh, corrID, ErrSubscriptionNotFound, err.Error())
-		return
-	}
-	sc.subs.settle(resp.SubID)
-
-	s.queueFrame(ctx, writeCh, TypeSubOK, corrID, resp, caps)
+	s.queueErrorFrame(ctx, writeCh, corrID, ErrSubscriptionNotFound, msgSubscribeNotServed)
 }
 
+// handleUnsub has nothing to end: no subscription is made over MBP. It answers
+// as UNSUB of an id nobody holds always has, whatever id it is sent, so the
+// answer says nothing about whether a subscription with that id exists
+// elsewhere, and it reaches none (SEC-26).
 func (s *Server) handleUnsub(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
 	var req UnsubscribeRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
 		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidEngram, "invalid unsub request")
 		return
 	}
-
-	// Only a subscription made on this connection. Any other id — another
-	// connection's, another vault's, one that does not exist — is left alone,
-	// and answered exactly as an id nobody holds always has been, so the answer
-	// says nothing about whether it exists (SEC-26).
-	if sc, _ := ctx.Value(vaultScopeKey).(*vaultScope); sc != nil && sc.subs.release(req.SubID) {
-		if err := s.engine.Unsubscribe(ctx, req.SubID); err != nil {
-			s.queueErrorFrame(ctx, writeCh, corrID, ErrSubscriptionNotFound, err.Error())
-			return
-		}
-	}
-
 	s.queueFrame(ctx, writeCh, TypeUnsubOK, corrID, &UnsubscribeResponse{OK: true}, caps)
 }
 

@@ -64,9 +64,9 @@ const (
 //	STAT       GET /api/stats (WriteOnlyGuard)            read         muninn_status: read-only
 //	PING       (none; GET /api/health is public)          (keepalive)  (no tool)
 //
-// UNSUB has no counterpart elsewhere. It takes the class of SUBSCRIBE: it can
-// only end a subscription made on the same connection (SEC-26), and a
-// connection that may not SUBSCRIBE has made none.
+// UNSUB has no counterpart elsewhere. It takes the class of SUBSCRIBE. Neither
+// does anything over MBP now: SUBSCRIBE is refused by name, because nothing is
+// delivered over this protocol, and UNSUB has nothing to end (SEC-26).
 var wantFrameClasses = map[uint8]string{
 	mbp.TypeWrite:     classMutate,
 	mbp.TypeRead:      classRead,
@@ -78,6 +78,9 @@ var wantFrameClasses = map[uint8]string{
 	mbp.TypeStat:      classRead,
 	mbp.TypePing:      classControl,
 }
+
+// subscribeNotServed is what SUBSCRIBE is answered with.
+const subscribeNotServed = "subscriptions are not delivered over this protocol: use the REST stream (GET /api/subscribe, server-sent events) or the gRPC Subscribe call"
 
 // The refusal messages are the ones REST and gRPC use for the same refusal.
 const (
@@ -437,6 +440,11 @@ type matrixOp struct {
 	frame      uint8
 	okFrame    uint8  // the frame type that answers it on success
 	engineCall string // the EngineAPI method that serves it; "" when none does
+	// notServed, when set, is the refusal every session that MAY send the frame
+	// gets for it: the operation is not offered over this protocol. A session
+	// that may not send the frame at all is still refused for that reason
+	// first.
+	notServed string
 	// modifiesExisting marks a request that changes or deletes a memory that
 	// already exists. The engine refuses those to an append credential
 	// (SEC-15); the transport does not look inside the payload to tell.
@@ -555,39 +563,26 @@ var matrixOps = []matrixOp{
 		},
 	},
 	{
-		name: "SUBSCRIBE", frame: mbp.TypeSubscribe, okFrame: mbp.TypeSubOK, engineCall: "Subscribe",
+		// Nothing is delivered over MBP, so SUBSCRIBE is refused, by name, for
+		// every session that may read. An ingest-only session is refused as
+		// what it is, before that.
+		name: "SUBSCRIBE", frame: mbp.TypeSubscribe, notServed: subscribeNotServed,
 		request: func(c *cell) any {
 			return &mbp.SubscribeRequest{Vault: c.vault, Context: []string{"berth closures"}, TTL: 60}
 		},
-		check: func(c *cell, r reply, went bool) {
-			if !went {
-				return
+		check: func(c *cell, _ reply, _ bool) {
+			if got := c.env.subscriptionIDs(c.vault); len(got) != 0 {
+				c.t.Errorf("SUBSCRIBE over MBP registered %v", got)
 			}
-			var resp mbp.SubscribeResponse
-			if err := mbp.DecodeMsgpack(r.payload, &resp); err != nil || resp.SubID == "" {
-				c.t.Errorf("SUB_OK carries no subscription id (err %v)", err)
-				return
-			}
-			_ = c.env.eng.Unsubscribe(fullCtx(), resp.SubID)
 		},
 	},
 	{
-		name: "UNSUB", frame: mbp.TypeUnsub, okFrame: mbp.TypeUnsubOK, engineCall: "Unsubscribe",
+		// UNSUB has nothing of its own to end. It is answered as an id nobody
+		// holds always was, and reaches no subscription, whoever holds it.
+		name: "UNSUB", frame: mbp.TypeUnsub, okFrame: mbp.TypeUnsubOK,
 		request: func(c *cell) any {
-			// UNSUB reaches only a subscription made on the same connection
-			// (SEC-26), so the one to end is made there when the session may
-			// subscribe at all.
-			if c.client != nil {
-				if id, _ := c.client.subscribe(c.vault, ""); id != "" {
-					c.subID = id
-					return &mbp.UnsubscribeRequest{SubID: c.subID}
-				}
-			}
-			// A session that may not subscribe has none of its own. It is
-			// given the id of a real subscription held elsewhere, the way a
-			// REST or gRPC subscriber holds one, which it must not be able to
-			// end either. (One made with no delivery function would not be
-			// registered at all: SEC-26.)
+			// A real subscription held elsewhere, the way a REST or gRPC
+			// subscriber holds one. No session over MBP may end it.
 			id, err := c.env.eng.SubscribeWithDeliver(fullCtx(), &mbp.SubscribeRequest{Vault: c.vault, Context: []string{"tug roster"}, TTL: 60}, delivered)
 			if err != nil {
 				c.t.Fatalf("seed a subscription: %v", err)
@@ -596,13 +591,13 @@ var matrixOps = []matrixOp{
 			c.t.Cleanup(func() { _ = c.env.eng.Unsubscribe(fullCtx(), id) })
 			return &mbp.UnsubscribeRequest{SubID: c.subID}
 		},
-		check: func(c *cell, _ reply, went bool) {
+		check: func(c *cell, _ reply, _ bool) {
 			still := false
 			for _, id := range c.env.subscriptionIDs(c.vault) {
 				still = still || id == c.subID
 			}
-			if still == went {
-				c.t.Errorf("subscription still registered = %v; want %v", still, !went)
+			if !still {
+				c.t.Errorf("an UNSUB over MBP ended a subscription held elsewhere")
 			}
 		},
 	},
@@ -796,6 +791,13 @@ func TestCredentialModeMatrix(t *testing.T) {
 						}
 						if strings.Join(reached, ",") != op.engineCall {
 							t.Errorf("engine calls = %v; want the transport to pass the frame on to %s, which refuses it", reached, op.engineCall)
+						}
+					case op.notServed != "":
+						if !r.isError() || r.code != mbp.ErrSubscriptionNotFound || r.message != op.notServed {
+							t.Errorf("answered with frame 0x%02x %d %q; want error %d %q", r.frameType, r.code, r.message, mbp.ErrSubscriptionNotFound, op.notServed)
+						}
+						if len(reached) != 0 {
+							t.Errorf("the frame reached the engine (%v); it is not served", reached)
 						}
 					default:
 						if r.isError() {

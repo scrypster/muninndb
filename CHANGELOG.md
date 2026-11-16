@@ -639,10 +639,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ports.
   **What changed:** the server always chooses the subscription id. A `subscription_id`
   sent by a client is ignored, on MBP and on gRPC, and the id in the answer is the one to
-  use. Over MBP a connection can cancel only the subscriptions it made and may hold at
-  most 8. Cancelling an id that is not the connection's own is answered the same way as
-  cancelling one that does not exist. An MBP subscription is no longer registered with
-  the push system at all, so it takes none of the vault's 100 places. Over gRPC one
+  use. Over MBP nothing can be subscribed or cancelled any more (next entry), so nothing
+  sent over MBP takes one of a vault's 100 places or ends a subscription held
+  elsewhere. Cancelling any id over MBP is answered the same way as cancelling one that
+  does not exist. Over gRPC one
   connection may have at most 8 `Subscribe` streams open at once. The ninth is refused
   with `ResourceExhausted`. A vault's limit also now holds when many subscribers arrive
   at the same moment. Before, they could all get in.
@@ -650,15 +650,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on one connection must open another connection for the rest. A subscribe refused
   because the vault or the server is full is now `ResourceExhausted` over gRPC, where it
   was `Unknown`.
-  **What has not changed:** a subscription made over MBP does not receive push
-  notifications, and the answer to it still says "active". Use REST or gRPC to receive
-  them.
+  **Subscribing over MBP is now refused.** See the next entry.
   **What is still open:** a vault's limit of 100 subscriptions can still be used up by a
   caller who is allowed to subscribe to it. Over REST, 100 requests to
   `GET /api/subscribe` do it, and on a public vault they need no key. `default` is public
   unless you lock it. Over gRPC it takes thirteen connections. If your subscribers must
   not be shut out, lock the vault and give them keys, and keep the REST and gRPC ports
   away from clients you do not trust (SEC-26).
+
+- `SUBSCRIBE` over MBP is now refused instead of being answered as if it worked. MBP has
+  never delivered a push notification: the server has no code that sends one over this
+  protocol. A `SUBSCRIBE` was answered `SUB_OK` with the status "active" all the same,
+  and the client then waited for notifications that could not arrive.
+  **Who is affected:** any MBP client that sends `SUBSCRIBE`, in every release up to
+  v0.11.0. No such client can have been receiving anything.
+  **What changed:** `SUBSCRIBE` is answered with error `4006` and the message
+  "subscriptions are not delivered over this protocol: use the REST stream (GET
+  /api/subscribe, server-sent events) or the gRPC Subscribe call". `UNSUB` is still
+  answered `UNSUB_OK` and does nothing, as it always did for an id nobody held. A key
+  that may not read is refused for that first, as before.
+  **What to do:** receive push notifications over REST or gRPC. Both deliver them.
+  The feature reference, which said MBP has native push frames, is corrected (SEC-26).
 
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
