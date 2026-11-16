@@ -10,6 +10,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/scrypster/muninndb/internal/auth"
@@ -229,6 +230,11 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		scope.key = &key
 		connMode = key.Mode
 	}
+	// Ending the session stops the reader; the frames already being handled
+	// finish and are answered (the refusal that ended it among them), and then
+	// the connection is closed (readerLoop, SEC-22).
+	var endOnce sync.Once
+	scope.end = func() { endOnce.Do(func() { _ = conn.SetReadDeadline(time.Now()) }) }
 	connCtx = withVaultScope(connCtx, scope)
 	connCtx = context.WithValue(connCtx, auth.ContextMode, connMode)
 	connCtx = withDecodeBudget(connCtx, s.connDecodeBudget(), &s.decodedInFlight)
@@ -242,6 +248,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 	helloReq.Vault = resolvedVault
+	scope.openedOn = resolvedVault
 
 	// Call engine's Hello handler
 	helloResp, err := s.engine.Hello(connCtx, &helloReq)
@@ -357,6 +364,16 @@ func (s *Server) dispatchFrame(ctx context.Context, frame *Frame, writeCh chan *
 	// called: the answer depends on the frame type and the connection alone, so
 	// it is the same whether or not the request is well formed or its target
 	// exists.
+	// Is there still a session? What authorised it at HELLO — a key, or a
+	// public vault — is checked again for every frame, of every type, so a key
+	// revoked or expired while the connection is open stops working on the
+	// next frame rather than when the client chooses to reconnect (SEC-23).
+	if ended := s.sessionEnded(ctx); ended != "" {
+		s.queueErrorFrame(writeCh, frame.CorrelationID, ErrAuthFailed, ended)
+		endSession(ctx)
+		return
+	}
+
 	mode, _ := ctx.Value(auth.ContextMode).(string)
 	handle, code, refusal := admit(frameRoutes, frame.Type, mode)
 	if handle == nil {

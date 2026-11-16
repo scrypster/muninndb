@@ -99,6 +99,9 @@ const (
 	msgReadOnlyKey      = "read-only key cannot write"
 	msgWriteOnlyKey     = "write-only key cannot read"
 	msgUnrecognizedMode = "unrecognized key mode"
+	// msgKeyNoLongerValid answers every frame on a connection whose key has
+	// been revoked or has expired since HELLO (vault_scope.go sessionEnded).
+	msgKeyNoLongerValid = "api key is no longer valid"
 )
 
 // modeRefusal returns why a session whose credential has the given mode may

@@ -174,14 +174,14 @@ type matrixEnv struct {
 
 // newMatrixEnv starts a real MBP server on an ephemeral loopback port, backed
 // by a real engine and auth store on an in-memory filesystem.
-func newMatrixEnv(t *testing.T) *matrixEnv {
+func newMatrixEnv(t testing.TB) *matrixEnv {
 	t.Helper()
 	return newMatrixEnvWith(t, nil)
 }
 
 // newMatrixEnvWith is newMatrixEnv with the server handed to configure before
 // it serves anything.
-func newMatrixEnvWith(t *testing.T, configure func(*mbp.Server)) *matrixEnv {
+func newMatrixEnvWith(t testing.TB, configure func(*mbp.Server)) *matrixEnv {
 	t.Helper()
 	opts := storage.DefaultOptions()
 	opts.FS = vfs.NewMem()
@@ -239,14 +239,14 @@ func newMatrixEnvWith(t *testing.T, configure func(*mbp.Server)) *matrixEnv {
 // ---------------------------------------------------------------------------
 
 type mbpClient struct {
-	t    *testing.T
+	t    testing.TB
 	conn net.Conn
 	next uint64
 }
 
 // dialMBP connects and completes the HELLO handshake. An empty token is a
 // credential-less session (auth_method "none").
-func dialMBP(t *testing.T, addr, token, vault string) *mbpClient {
+func dialMBP(t testing.TB, addr, token, vault string) *mbpClient {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {

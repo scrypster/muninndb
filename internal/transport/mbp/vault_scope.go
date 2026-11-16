@@ -14,6 +14,14 @@ import (
 // session that may only touch public vaults.
 type vaultScope struct {
 	key *auth.APIKey
+
+	// openedOn is the vault the session named at HELLO. A session with no key
+	// exists because that vault is public, and ends when it stops being so.
+	openedOn string
+
+	// end stops the connection reading. The frames it is already handling
+	// finish and are answered; then it is closed. Set by handleConnection.
+	end func()
 }
 
 type vaultScopeKeyType struct{}
@@ -63,4 +71,44 @@ func (s *Server) scopeVault(ctx context.Context, reqVault string) (string, error
 		return "", fmt.Errorf("vault %q requires an API key", vault)
 	}
 	return vault, nil
+}
+
+// sessionEnded reports why the connection's session is over, or "" while it is
+// not. It is asked for every frame, before anything else is decided about the
+// frame (dispatchFrame), so what authorised the session at HELLO is checked
+// again each time it is relied on, not once (SEC-23):
+//
+//   - a keyed session ends when its key would no longer validate — revoked,
+//     or expired;
+//   - a session with no key ends when the vault it was opened on is no longer
+//     public.
+//
+// Both are read from the auth store on each frame. That is the cost of being
+// right on every node: see auth.Store.APIKeyStillValid.
+func (s *Server) sessionEnded(ctx context.Context) string {
+	sc, _ := ctx.Value(vaultScopeKey).(*vaultScope)
+	if sc == nil || s.authStore == nil {
+		// No session to have ended. Such a frame gets nowhere anyway: scopeVault
+		// refuses it for the same reason, and admit refuses a connection with
+		// no mode.
+		return ""
+	}
+	if sc.key != nil {
+		if err := s.authStore.APIKeyStillValid(sc.key); err != nil {
+			return msgKeyNoLongerValid
+		}
+		return ""
+	}
+	cfg, err := s.authStore.GetVaultConfig(sc.openedOn)
+	if err != nil || !cfg.Public {
+		return fmt.Sprintf("vault %q requires an API key", sc.openedOn)
+	}
+	return ""
+}
+
+// endSession stops the connection reading, if ctx belongs to a connection.
+func endSession(ctx context.Context) {
+	if sc, _ := ctx.Value(vaultScopeKey).(*vaultScope); sc != nil && sc.end != nil {
+		sc.end()
+	}
 }

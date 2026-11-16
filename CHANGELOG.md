@@ -239,6 +239,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closes its outgoing queue. Requests received before the client left are still carried
   out; their answers are discarded (SEC-22).
 
+- Revoking an API key now ends the MBP connections that are open with it. The MBP
+  transport looked at a key once, when a connection opened. Revoking the key, or the key
+  passing its expiry, stopped NEW connections; a connection that was already open kept
+  working — reading, writing and deleting, to the limit of the key's mode — for as long
+  as its holder kept it open, which could be indefinitely.
+  **Who is affected:** anyone who has revoked a key, or issued one with an expiry, whose
+  holder could reach the MBP port (8474), in every release up to v0.11.0. Revocation on
+  those releases did not cut off a holder who was already connected.
+  **What to do:** upgrade. On an affected release, revoke the key and then restart the
+  server, which closes every connection; revoking alone is not enough. If you revoked a
+  key because it leaked, treat the vault as reachable by whoever held it until the
+  restart or upgrade.
+  **What changed:** from this release, every MBP request re-checks the key its connection
+  was opened with. After a key is revoked or expires, the next request on any connection
+  opened with it is refused with error `4010` ("api key is no longer valid") and the
+  server closes the connection; a request that was already being carried out when the
+  key was revoked completes. A connection with no key, on a public vault, is ended the
+  same way when the vault is made private. The check costs about two microseconds per
+  request. Not covered: the push streams — REST `GET /api/subscribe` and the gRPC
+  `Subscribe` stream — are still checked only when they open, so after revoking a key
+  whose holder may have one open, restart the server (SEC-23).
+
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
   v0.60.0, clearing all 23 reachable govulncheck findings. Notable ones:
