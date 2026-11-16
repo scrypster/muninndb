@@ -162,6 +162,14 @@ and remain the reviewer's job.
 
 15. **A path that rewrites an ALREADY-indexed engram's FTS entries** (`internal/index/fts/`) → call `fts.ReindexEngram`, never `DeleteEngram` followed by `IndexEngram`. The pair is not statistics-neutral — `IndexEngram` bumps `TotalEngrams`/`AvgDocLen` and increments `df_t` for every term of the document, `DeleteEngram` decrements neither — so it silently decays the engram's own BM25 score on every call (COG-24; measured −82.6% over 100 retags, #720). **One carve-out, named by mechanism:** a FULL-VAULT rebuild that first range-tombstones the 0x08 global-stats and 0x09 per-term-stats prefixes via `store.ClearFTSKeys` may call `IndexEngram` on already-indexed engrams — `Engine.ReindexFTSVault` does (`internal/engine/engine_reindex_fts.go:67` clears, `:80` re-indexes), and it is correct precisely because the stats it would otherwise inflate no longer exist. Do **not** read this as "unless the stats are handled": if a path has not range-tombstoned 0x08/0x09, it is in violation. There is no automated check: nothing stops a new call site from pairing them, and nothing distinguishes a legitimate post-`ClearFTSKeys` rebuild from an illegitimate in-place one. 🪝
 
+16. **A frame type the MBP client listener serves** (`internal/transport/mbp/`) → route it in
+    `frameRoutes` (`frame_modes.go`) WITH its class — control, read, mutate, or mutate-and-read,
+    the class the same operation has on REST, gRPC and MCP — and record the same decision in
+    `wantFrameClasses` plus a row in `matrixOps` (`mode_matrix_test.go`). A route without a
+    class is refused to every credential, and `TestEveryDispatchedFrameHasAModeClass` fails
+    until the two tables agree (SEC-20). A response that streams must still be opened by a
+    routed frame, so the mode check covers it.
+
 ## Live drift found during the guardian audit (worth fixing)
 
 - ~~**Windows CI tests the wrong embedding model.**~~ — fixed. `ci.yml`'s Windows job now

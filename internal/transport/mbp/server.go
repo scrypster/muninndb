@@ -197,6 +197,10 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	// (COG-11), because auth.ObserveFromContext returns false. Use the key's
 	// actual mode — a blanket ModeFull here would let an observe MBP key stamp
 	// verified, turning the over-block into a real SEC-14 under-block.
+	//
+	// The same value is what dispatchFrame checks every later frame against
+	// (SEC-20, frame_modes.go). It is set once, here: the handshake is not
+	// repeated on a connection, so the mode cannot change under it.
 	connMode := auth.ModeFull
 	if helloReq.AuthMethod == "token" {
 		key, err := s.authStore.ValidateAPIKey(helloReq.Token)
@@ -310,8 +314,22 @@ func (s *Server) writerLoop(conn net.Conn, writeCh chan *Frame, errCh chan error
 	errCh <- nil
 }
 
-// dispatchFrame routes a frame to the appropriate handler.
+// dispatchFrame routes a frame to its handler. It is the one place every frame
+// after HELLO passes, so it is where the credential's mode is enforced
+// (SEC-20): admit decides, and no handler is reached by a frame the
+// connection's mode may not send.
 func (s *Server) dispatchFrame(ctx context.Context, frame *Frame, writeCh chan *Frame, negotiatedCapabilities []string) {
+	// Before the payload is decompressed or decoded and before the engine is
+	// called: the answer depends on the frame type and the connection alone, so
+	// it is the same whether or not the request is well formed or its target
+	// exists.
+	mode, _ := ctx.Value(auth.ContextMode).(string)
+	handle, code, refusal := admit(frameRoutes, frame.Type, mode)
+	if handle == nil {
+		s.queueErrorFrame(writeCh, frame.CorrelationID, code, refusal)
+		return
+	}
+
 	// Check if payload should be decompressed
 	var payload []byte = frame.Payload
 	if (frame.Flags & FlagCompressed) != 0 {
@@ -323,29 +341,7 @@ func (s *Server) dispatchFrame(ctx context.Context, frame *Frame, writeCh chan *
 		payload = decompressed
 	}
 
-	// Dispatch by type
-	switch frame.Type {
-	case TypeWrite:
-		s.handleWrite(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeRead:
-		s.handleRead(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeActivate:
-		s.handleActivate(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeSubscribe:
-		s.handleSubscribe(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeUnsub:
-		s.handleUnsub(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeLink:
-		s.handleLink(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeForget:
-		s.handleForget(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeStat:
-		s.handleStat(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypePing:
-		s.handlePing(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	default:
-		s.queueErrorFrame(writeCh, frame.CorrelationID, ErrInternal, fmt.Sprintf("unknown message type: 0x%02X", frame.Type))
-	}
+	handle(s, ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
 }
 
 // Handler methods

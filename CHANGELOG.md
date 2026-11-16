@@ -156,6 +156,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is classified as a handshake, a read, a mutation or both, and a test checks every
   credential mode against every RPC, so a new RPC cannot be added without that decision.
 
+- MBP now enforces API-key modes. The native binary protocol (port 8474) authenticated a key
+  and recorded its mode, but nothing checked the mode before acting on a request. Over MBP an
+  `observe` (read-only) key could store memories, rewrite an existing one (an upsert under a
+  key that already had a memory), link two memories — including marking them as
+  contradicting each other — and soft- or hard-delete them. A `write` (ingest-only) key could
+  read a memory by id, run recall across the vault and read statistics. In both cases the
+  memories the key could reach were those of its own vault. REST, gRPC and MCP were not
+  affected, and `append` keys were already kept from changing or deleting existing memories
+  by the engine, on every transport.
+  **Who is affected:** anyone whose MBP port can be reached by the holder of an `observe` or
+  `write` key. If the only keys you have issued are `full` or `append`, nothing changes for
+  you.
+  **What to do:** upgrade. Until you have, do not let holders of `observe` or `write` keys
+  reach the MBP port. It listens on `127.0.0.1` by default; it is exposed if you set
+  `--listen-host`/`MUNINN_LISTEN_HOST` or `--mbp-addr` to a routable address, or publish 8474
+  from a container (the bundled `docker-compose.yml` does both). REST, gRPC and MCP enforce
+  the modes and can stay open to those keys. If an `observe` key was exposed that way, treat
+  the memories in its vault as writable by whoever held it, and the vault's contents as
+  readable by whoever held a `write` key.
+  **What changed:** a mutating request from an `observe` key and a reading request from a
+  `write` key are now refused with error `4010` ("read-only key cannot write" /
+  "write-only key cannot read") before the engine is called, with the same answer whether or
+  not the memory named in the request exists. An MBP client that used an `observe` key to
+  write, or a `write` key to read, will now get that error and needs a key of the right mode.
+  Every request type the MBP server handles is classified as a read, a mutation or neither,
+  a request type with no classification is refused to everyone, and a test checks every kind
+  of session against every request type, so one cannot be added without that decision
+  (SEC-20).
+
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
   v0.60.0, clearing all 23 reachable govulncheck findings. Notable ones:
