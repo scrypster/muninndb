@@ -336,8 +336,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **What a client will notice:** a client that keeps a stream open on a key that is then
   revoked, or that expires, now sees the stream end with that error. Reconnecting with
   the same key fails.
-  **Not covered:** a stream opened from an admin session in the web console is not ended
-  when the session's 24 hours run out (SEC-23).
+  **Not covered:** streams opened under an admin session are not ended when the session's
+  24 hours run out, or by logging out. These are the web console's live event stream,
+  which carries the concepts of newly added memories and the tail of the server log,
+  the cluster event stream, and `GET /api/subscribe` when it is opened with a session
+  cookie. Logging out clears the cookie in the browser. It does not close a stream that
+  is already open, and it does not end the session itself, which stays valid until its
+  24 hours are up. Closing the browser tab closes the console's streams (SEC-23).
 
 - An MBP connection now has 15 seconds to complete its handshake. Until now there was no
   limit. A client that connected and sent nothing, or part of a handshake, held a
