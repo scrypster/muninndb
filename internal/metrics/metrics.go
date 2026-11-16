@@ -258,13 +258,17 @@ var (
 
 	// WritesMissingFieldTotal counts engram writes that stored successfully
 	// without a value for a caller-supplied enrichment field at write time, per
-	// vault and field. Paired with muninndb_engine_writes_total this gives an
-	// operator a rate(missing)/rate(total) signal for how fast a vault
-	// accumulates such engrams. Whether a later stage fills the field depends on
-	// the deployment (on one with no summarize stage registered, nothing does),
-	// so the metric reports the write-time state only. Writes to a vault whose
-	// inline_enrichment is background_only are not observed: there the caller's
-	// fields are discarded by design and a background stage owns them.
+	// vault and field. The per-vault series show which vault such writes come
+	// from. muninndb_engine_writes_total has no vault label, so a ratio is
+	// server-wide only: sum(rate(missing)) / rate(total). Dividing the labelled
+	// series by the unlabelled total directly matches nothing in PromQL, and
+	// background_only vaults are in the total but never in the numerator, so
+	// the ratio reads low on a server that has them. Whether a later stage
+	// fills the field depends on the deployment (on one with no summarize stage
+	// registered, nothing does), so the metric reports the write-time state
+	// only. Writes to a vault whose inline_enrichment is background_only are
+	// not observed: there the caller's fields are discarded by design and a
+	// background stage owns them.
 	//
 	// Deliberately a CounterVec with a `field` label rather than one counter per
 	// field, so another field can be added later without minting and then
