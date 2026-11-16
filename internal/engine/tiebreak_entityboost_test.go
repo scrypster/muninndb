@@ -19,7 +19,7 @@ import (
 // (pass 2b), so repeated calls on the SAME input produced different orderings and
 // an arbitrary subset survived a MaxResults cutoff. This test runs applyEntityBoost
 // 40× on identical input and requires the tied-injection order to be identical every
-// run and equal to ascending-ULID. It is RED without the tie-break at
+// run and equal to descending-ULID (newest first). It is RED without the tie-break at
 // engine_entity_boost.go's final sort.
 func TestEntityBoost_TiedInjectionsDeterministic(t *testing.T) {
 	t.Parallel()
@@ -89,8 +89,9 @@ func TestEntityBoost_TiedInjectionsDeterministic(t *testing.T) {
 		}
 	}
 
-	// The deterministic order must be ascending ULID (the tie-break key).
+	// The deterministic order must be newest-first: descending ULID, recall's
+	// one tie rule (internal/rankorder; honest clock, increment 1).
 	want := append([]storage.ULID(nil), first...)
-	sort.Slice(want, func(i, j int) bool { return bytes.Compare(want[i][:], want[j][:]) < 0 })
-	require.Equal(t, want, first, "tied injections must be ordered by ascending ULID")
+	sort.Slice(want, func(i, j int) bool { return bytes.Compare(want[i][:], want[j][:]) > 0 })
+	require.Equal(t, want, first, "tied injections must be ordered newest-first (descending ULID)")
 }

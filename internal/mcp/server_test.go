@@ -66,7 +66,7 @@ func (f *fakeEngine) Evolve(ctx context.Context, vault, oldID, newContent, reaso
 func (f *fakeEngine) Consolidate(ctx context.Context, vault string, ids []string, merged string) (*ConsolidateResult, error) {
 	return &ConsolidateResult{ID: "merged-id"}, nil
 }
-func (f *fakeEngine) Session(ctx context.Context, vault string, since time.Time) (*SessionSummary, error) {
+func (f *fakeEngine) Session(ctx context.Context, vault string, req SessionRequest) (*SessionSummary, error) {
 	return &SessionSummary{}, nil
 }
 func (f *fakeEngine) Decide(ctx context.Context, vault, decision, rationale string, alternatives, evidenceIDs []string) (*WriteResult, error) {
@@ -172,6 +172,10 @@ func (f *fakeEngine) ReplayEnrichment(_ context.Context, _ string, _ []string, _
 
 func (f *fakeEngine) GetProvenance(_ context.Context, _, _ string) ([]ProvenanceEntry, error) {
 	return []ProvenanceEntry{}, nil
+}
+
+func (f *fakeEngine) RecordFeedbackLabels(_ context.Context, _ string, _ []FeedbackGroup, _ string, _ bool) ([]FeedbackOutcome, error) {
+	return nil, nil
 }
 
 func (f *fakeEngine) RecordFeedback(_ context.Context, _, _ string, _ bool) error {

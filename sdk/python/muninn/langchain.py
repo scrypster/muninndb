@@ -61,9 +61,9 @@ class MuninnDBMemory(_Base):  # type: ignore[misc]
     """LangChain memory backend powered by MuninnDB.
 
     Each conversation turn is stored as a single engram (human input + AI output).
-    On every load, MuninnDB activates the most relevant memories for the current
+    On every load, MuninnDB recalls the memories that best match the current
     input using semantic similarity, Hebbian association weights, and decay curves —
-    returning only what is genuinely relevant right now, not a raw chat buffer.
+    best matches to verify, not a raw chat buffer and not guaranteed answers.
 
     Args:
         base_url:       MuninnDB server URL (default: http://localhost:8475)

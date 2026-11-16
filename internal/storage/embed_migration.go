@@ -105,7 +105,7 @@ func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) 
 
 		// Flush in micro-batches to avoid unbounded memory use.
 		if cleared%1000 == 0 {
-			if err := batch.Commit(pebble.NoSync); err != nil {
+			if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 				return cleared, fmt.Errorf("clear embed flags: commit batch: %w", err)
 			}
 			batch.Close()
@@ -118,7 +118,7 @@ func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) 
 	}
 
 	// Final flush.
-	if err := batch.Commit(pebble.Sync); err != nil {
+	if err := ps.commitBatch(batch, pebble.Sync); err != nil {
 		return cleared, fmt.Errorf("clear embed flags: final commit: %w", err)
 	}
 

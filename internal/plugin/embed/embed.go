@@ -271,8 +271,12 @@ func (s *EmbedService) HardwareAccelerated() bool {
 
 // createRateLimiter creates a rate limiter appropriate for the provider.
 func (s *EmbedService) createRateLimiter(scheme plugin.ProviderScheme, options map[string]string) *TokenBucketLimiter {
-	// Ollama is local, no rate limiting
-	if scheme == plugin.SchemeOllama {
+	// Ollama and the bundled local model run on this machine: there is no
+	// remote quota to protect. Rate-limiting the in-process model would also
+	// couple its lanes — batch calls drawing down the bucket a recall's query
+	// embed then waits on. Consequence: the "rate_per_sec" plugin option below
+	// is IGNORED for the local provider (and, as before, for Ollama).
+	if scheme == plugin.SchemeOllama || scheme == plugin.SchemeLocal {
 		return nil
 	}
 

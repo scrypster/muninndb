@@ -21,7 +21,7 @@ func (ps *PebbleStore) WriteOrdinal(ctx context.Context, wsPrefix [8]byte, paren
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 	batch.Set(key, val[:], nil)
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("WriteOrdinal commit: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -60,7 +60,7 @@ func (ps *PebbleStore) DeleteOrdinal(ctx context.Context, wsPrefix [8]byte, pare
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 	batch.Delete(key, nil)
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("DeleteOrdinal commit: %w", err)
 	}
 	ps.replicateBatch(batch)

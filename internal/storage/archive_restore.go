@@ -212,7 +212,7 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 		restoredDsts = append(restoredDsts, c.dst)
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return nil, err
 	}
 	ps.replicateBatch(batch)
@@ -303,7 +303,7 @@ func (ps *PebbleStore) reapArchivedEdgesFrom(ws [8]byte, srcID [16]byte) error {
 	if n == 0 {
 		return nil
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return err
 	}
 	ps.replicateBatch(batch)

@@ -1,10 +1,10 @@
 package activation
 
 import (
-	"bytes"
 	"sort"
 	"time"
 
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -166,8 +166,9 @@ func collectShadowMatches(
 		if out[i].Final != out[j].Final {
 			return out[i].Final > out[j].Final
 		}
-		a, b := out[i].Engram.ID, out[j].Engram.ID
-		return bytes.Compare(a[:], b[:]) < 0
+		// Exact ties newest-first (rankorder): this list is cut at
+		// shadowMatchCap, the same rule as every other recall cut.
+		return rankorder.Before(out[i].Engram.ID, out[j].Engram.ID)
 	})
 	if len(out) > shadowMatchCap {
 		out = out[:shadowMatchCap]

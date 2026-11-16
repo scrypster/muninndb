@@ -9,7 +9,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- An opt-in write-time twin check. With `MUNINN_WRITE_RELATED=shadow` the server notices
+  when a new memory is very close to one written in the same vault within the last hour
+  (most such pairs are duplicates or undeclared updates) and logs and counts it — nothing
+  is shown. With `MUNINN_WRITE_RELATED=1`, in a vault whose operator has set
+  `write_twin_inline: true`, single `muninn_remember` responses for full-mode credentials
+  carry a `related` block: the earlier memory, how close it is against the threshold in
+  use, and the exact call that would retire it (update first; it never suggests the old
+  memory superseding the new one). Off by default. The check never adds an embed call, never
+  delays the commit, and waits at most 100 ms for the write's own vector before answering
+  `embedder_busy` or `embed_timeout`. `muninn twin-replay` checks a vault (read-only, on a
+  backup) before you enable it; `muninn twin-audit` measures unresolved near-twins
+  afterwards. Per-vault `write_twin_threshold` overrides the model hint (bge-small: 0.93).
+
+### Fixed
+
+- Relevance band descriptions corrected. A band reports how much evidence a memory has
+  against your query, measured against the embedding model's noise floor — not whether it answers
+  you. `moderate` is now documented as a candidate to verify, not an established answer, and
+  a recall that is not withheld is no longer described as proof the vault holds an answer: a
+  fluent question about something the vault does not hold often still returns `moderate`
+  rows. Changed in the `muninn_recall` tool description, the guide, the weak-only hint and
+  the REST `relevance_band`/`abstained_reason` descriptions. No wire value, ranking, score or
+  abstention change.
+- A restored memory is findable by keyword again. Forgetting a memory drops
+  its keyword-search postings and `muninn_restore` never put them back, so a
+  restored memory could only be found by meaning, never by its words. Restore
+  now rebuilds them from the memory's current text and tags without moving
+  the keyword statistics, and a memory retagged while deleted comes back
+  findable by its new tags. A memory restored before this release is still
+  missing its postings: the admin observability snapshot
+  (`/api/admin/observability`, and the web console's per-vault breakdown)
+  now reports `keyword_unindexed_live` per vault, and if it is non-zero
+  `muninn vault reindex-fts <name>` rebuilds that vault's keyword index. The
+  rebuild runs online under the vault's lock; keyword results for that vault
+  are partial until it finishes. It no longer makes forgotten memories
+  keyword-findable (it used to index them too).
+- `muninn_state` and `muninn_compare_and_set` refuse to move a forgotten
+  (soft-deleted) memory to another state and point at `muninn_restore`, the
+  one way back; a state change used to bring it back unfindable by keyword.
+- Concurrent writes to one memory no longer undo each other. Enrichment's
+  summary write, the decay worker's relevance update, trust and validity
+  stamps, embedding status, evolve's supersede and dream dedup each rewrote a
+  memory from a copy read without a lock, so a forget landing at the same
+  moment could be reverted (the memory came back active) and other fields
+  could silently roll back. Every such write now holds the memory's lock and
+  writes only its own fields over the stored record.
+- Clearing a vault while it is being written can no longer crash the server
+  ("sync: WaitGroup is reused before previous Wait has returned").
+- Clearing one vault no longer empties every other vault's association
+  caches.
+- Retired versions no longer take recall's candidate slots. An evolved
+  memory's old versions keep their vector and keyword postings (so a query in
+  the old wording can still reach the current fact), but recall used to count
+  them toward each index's top-k before discarding them: in a 2,000-memory
+  vault a 50-version chain on a topic hid all 20 relevant live memories, and a
+  500-version chain made the recall return nothing at all. Retired (forgotten,
+  superseded or archived) memories are now routed through but never counted;
+  the nearest few are kept separately as evidence for version-head
+  substitution. `as_of` and `include_invalid` recalls are unchanged.
+- A query worded like an old version reaches the current version at any chain
+  length. The supersession walk stopped at 8 hops, so on chains of 10+ versions
+  that evidence was discarded (`abstained_reason: superseded_only`), and every
+  such recall logged depth-cap warnings. Declared chains are now walked to
+  their head; `chain_truncated` is reported only for hand-built chains of
+  active memories past the walk limit. Contract change: an 8-hop chain is no
+  longer flagged `chain_truncated`, and a 9-hop chain now substitutes its head
+  instead of abstaining. Chain warnings (fork, cycle, walk limit) log once per
+  memory per process instead of on every recall.
+
+- Recall no longer waits behind background embedding. The bundled local
+  embedder serialised every inference behind one lock that ignored deadlines:
+  a recall's query embed queued behind retroactive 64-text batches (p50 ~2.4 s
+  versus ~16 ms idle) and, with a caller deadline, recall then failed outright
+  with zero results. Inference now runs in a query lane (recall's query embed,
+  marked explicitly by the caller) and a batch lane (everything else, still one
+  batch at a time), and a queued call gives up when its deadline passes. A
+  recall whose query embed misses its budget answers keyword-only with
+  `semantic_degraded: true` and `semantic_degraded_reason: "embed_timeout"`
+  (other reasons: `embed_unavailable`, `embed_zero_vector`,
+  `stored_embedding_read`); `muninn_status` reports the reason. The local
+  embedder's batch size drops from 64 to 8 (same throughput, peak RSS ~0.8 GB
+  instead of ~2.5 GB) and it is no longer rate-limited — a `rate_per_sec`
+  plugin option is now ignored for the local provider. gRPC's
+  `ActivateResponse` gains `semantic_degraded` (7) and
+  `semantic_degraded_reason` (8); it previously served keyword-only results
+  unmarked. Only recall's query embed uses the query lane; a burst of
+  simultaneous recalls serialises on it. New metrics:
+  `muninndb_embed_lane_waits_total{lane}`,
+  `muninndb_embed_lane_timeouts_total{lane}`,
+  `muninndb_embed_lane_wait_seconds{lane}`,
+  `muninndb_recall_embed_timeout_total{vault}`.
+
+### Security
+
+- Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
+  v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
+  v0.60.0, clearing all 23 reachable govulncheck findings. Notable ones:
+  GO-2026-6865 (zstd, reached via the MBP transport compressor), GO-2026-6859
+  (`net/http`), GO-2026-6809 (`crypto/x509`), GO-2026-6443 and GO-2026-6348
+  (gRPC server), GO-2026-6603/6611/6612/6617 (`x/net`), plus standard-library
+  fixes in `net/http`, `crypto/tls`, `html/template`, `net/url` and
+  `encoding/asn1` between go1.26.6 and go1.26.11. The Docker builder image
+  moves from `golang:1.24` to `golang:1.26.11` to match.
 
 ---
 
@@ -419,7 +523,7 @@ the rollback note.
   not to how big the tag set is. A memory whose tag set grows in place is still
   length-normalized by BM25 like any longer document, and because the rebuild
   leaves the corpus *average* document length alone, that penalty is slightly
-  over-applied until the next `muninn reindex-fts` — the conservative direction,
+  over-applied until the next `muninn vault reindex-fts <name>` — the conservative direction,
   scores under-credited rather than inflated. There is no ratchet either way:
   returning to a previous tag set restores the previous score exactly. (#720)
 

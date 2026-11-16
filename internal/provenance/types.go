@@ -58,4 +58,11 @@ type Details struct {
 	// successor's ValidFrom and the predecessor's ValidUntil. Distinct from
 	// Timestamp, which is when the write happened.
 	EffectiveAt *time.Time `json:"effective_at,omitempty"`
+	// SessionHash and CredentialHash (label pipeline, slice 2a) are the keyed
+	// 16-hex-char hashes of the MCP session and credential that CREATED this
+	// engram (create and evolve entries only). They let a label record whether
+	// the labelled memory was written in the session that recalled it. Never
+	// the raw values; absent for writes from transports that carry no session.
+	SessionHash    string `json:"session_hash,omitempty"`
+	CredentialHash string `json:"credential_hash,omitempty"`
 }

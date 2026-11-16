@@ -18,11 +18,13 @@ func newDimTestRegistry(t *testing.T) (*Registry, *pebble.DB) {
 	return NewRegistry(db), db
 }
 
-// drainRegistry waits for async persistNode goroutines of the given vaults'
-// indexes so a subsequent db.Close() cannot race them (see hnsw_test.go).
+// drainRegistry waits for async persistNode goroutines — and any background
+// graph repair — of the given vaults' indexes so a subsequent db.Close()
+// cannot race them (see hnsw_test.go).
 func drainRegistry(reg *Registry, wss ...[8]byte) {
 	for _, ws := range wss {
 		if idx := reg.get(ws); idx != nil {
+			idx.waitRepair()
 			idx.Close()
 		}
 	}
