@@ -281,8 +281,13 @@ var censusKnownSites = map[string]string{
 		"a `.LastAccess` selector with no local copy, so it is one of the two sites a selector-only matcher still sees",
 	"internal/engine/activation/engine.go:computeComponents": "weighted_sum scoring: the recency term and the Ebbinghaus decay " +
 		"factor. This is the site #810's silently-empty recall came out of, and the site the original grep-based enumeration missed",
-	"internal/engine/activation/engine.go:computeACTR": "ACT-R base-level activation — the DEFAULT fusion mode, and the one that " +
-		"degrades SOONEST as LastAccess is rewound (measured: 7 days of source age vs weighted_sum's ~45)",
+	// Honest clock (increment 1): computeACTR no longer reads LastAccess at
+	// all — the ACT-R base level is the neutral constant bLevelCap — so it
+	// left this map. Its pre-honest-clock body survives, guard included, only
+	// as the cognitiontrial legacy control arm, which replaces it here.
+	"internal/engine/activation/legacy_clock_cognitiontrial.go:legacyComputeACTR": "the pre-honest-clock ACT-R base level, " +
+		"kept for the cognitiontrial A/B control arm only; it degraded SOONEST as LastAccess was rewound (measured: 7 days of " +
+		"source age vs weighted_sum's ~45)",
 	"internal/engine/engine.go:Engine.PruneVault": "the pruner's base-level scan — an unset LastAccess here means ~740,000 days " +
 		"idle, i.e. prune everything",
 	"internal/engine/trigger/system.go:TriggerScore": "the push path's recency term (wRecency = 0.10). Live, fed persisted " +

@@ -10,6 +10,9 @@ import (
 )
 
 func TestBulkInsertSelfQuery(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := pebble.Open(dir, &pebble.Options{})
 	if err != nil {
@@ -18,6 +21,9 @@ func TestBulkInsertSelfQuery(t *testing.T) {
 	defer db.Close()
 
 	reg := NewRegistry(db)
+	// Closed before the database (defers run last-in first-out), so no
+	// background work outlives the test and competes with the next one.
+	defer reg.Close()
 	var ws [8]byte
 	copy(ws[:], []byte("REPROTST"))
 
@@ -70,6 +76,9 @@ func TestBulkInsertSelfQuery(t *testing.T) {
 }
 
 func TestBulkInsertReloadSelfQuery(t *testing.T) {
+	// Hermetic (its own seeded corpus, store and index; no package state), so it
+	// runs in parallel and its -race cost overlaps the package's other heavy tests.
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := pebble.Open(dir, &pebble.Options{})
 	if err != nil {
@@ -107,6 +116,9 @@ func TestBulkInsertReloadSelfQuery(t *testing.T) {
 	reg.mu.RUnlock()
 
 	reg2 := NewRegistry(db)
+	// Closed before the database: loading may start a background repair,
+	// which must not outlive the test.
+	defer reg2.Close()
 	if got := reg2.VaultVectors(ws); got != N {
 		t.Fatalf("reloaded %d vectors, want %d", got, N)
 	}

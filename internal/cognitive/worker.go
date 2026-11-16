@@ -45,15 +45,23 @@ const (
 
 // WorkerStats holds telemetry counters.
 type WorkerStats struct {
-	Processed     uint64        `json:"processed"`
-	Batches       uint64        `json:"batches"`
-	Errors        uint64        `json:"errors"`
-	Dropped       uint64        `json:"dropped"`
-	LastRun       int64         `json:"lastRun"` // Unix nanoseconds
-	State         WorkerState   `json:"state"`
-	Status        string        `json:"status"`
-	Enabled       bool          `json:"enabled"`
-	EffectiveWait time.Duration `json:"effectiveWait"` // current actual tick interval
+	Processed uint64 `json:"processed"`
+	Batches   uint64 `json:"batches"`
+	Errors    uint64 `json:"errors"`
+	Dropped   uint64 `json:"dropped"`
+	LastRun   int64  `json:"lastRun"` // Unix nanoseconds
+	// LastError is when the most recent FAILED flush finished (Unix
+	// nanoseconds; 0 = never failed).
+	LastError int64 `json:"lastError"`
+	// LastBatchFailed is true while the most recent flush is one that failed;
+	// the next successful flush clears it. Errors is cumulative and cannot say
+	// whether the worker is failing NOW — one transient failure would mark it
+	// broken forever.
+	LastBatchFailed bool          `json:"lastBatchFailed"`
+	State           WorkerState   `json:"state"`
+	Status          string        `json:"status"`
+	Enabled         bool          `json:"enabled"`
+	EffectiveWait   time.Duration `json:"effectiveWait"` // current actual tick interval
 }
 
 // DisabledWorkerStats describes a worker that is not configured on this node.
@@ -77,6 +85,8 @@ type Worker[T any] struct {
 	batches   atomic.Uint64
 	errors    atomic.Uint64
 	lastRun   atomic.Int64
+	lastErr   atomic.Int64
+	failing   atomic.Bool
 	dropped   atomic.Uint64
 
 	state            atomic.Int32
@@ -188,7 +198,10 @@ func (w *Worker[T]) Run(ctx context.Context) error {
 		w.lastRun.Store(time.Now().UnixNano())
 		if err := w.process(flushCtx, batch); err != nil {
 			w.errors.Add(1)
+			w.lastErr.Store(time.Now().UnixNano())
+			w.failing.Store(true)
 		} else {
+			w.failing.Store(false)
 			w.processed.Add(uint64(len(batch)))
 			w.batches.Add(1)
 		}
@@ -318,15 +331,17 @@ func (w *Worker[T]) Run(ctx context.Context) error {
 func (w *Worker[T]) Stats() WorkerStats {
 	state := WorkerState(w.state.Load())
 	return WorkerStats{
-		Processed:     w.processed.Load(),
-		Batches:       w.batches.Load(),
-		Errors:        w.errors.Load(),
-		Dropped:       w.dropped.Load(),
-		LastRun:       w.lastRun.Load(),
-		State:         state,
-		Status:        state.String(),
-		Enabled:       true,
-		EffectiveWait: time.Duration(w.maxWait.Load()),
+		Processed:       w.processed.Load(),
+		Batches:         w.batches.Load(),
+		Errors:          w.errors.Load(),
+		Dropped:         w.dropped.Load(),
+		LastRun:         w.lastRun.Load(),
+		LastError:       w.lastErr.Load(),
+		LastBatchFailed: w.failing.Load(),
+		State:           state,
+		Status:          state.String(),
+		Enabled:         true,
+		EffectiveWait:   time.Duration(w.maxWait.Load()),
 	}
 }
 

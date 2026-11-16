@@ -153,6 +153,16 @@ type PebbleStore struct {
 	// the unix-nano stamp of the last WARN, used to rate-limit it.
 	guardReadFaults        atomic.Uint64
 	guardReadFaultLoggedAt atomic.Int64
+
+	// retired is the per-vault in-memory retired-engram set ([8]byte →
+	// *retiredSet), derived from the store and driven by every committed
+	// batch through replicateBatch. See retired.go.
+	retired sync.Map
+	// retiredDisagreements counts engrams whose 0x02 metadata disagreed with
+	// their 0x01 record on liveness at a retired-set build (0x01 trusted);
+	// retiredDisagreeWarned holds the vaults already WARNed about. STO-23.
+	retiredDisagreements  atomic.Int64
+	retiredDisagreeWarned sync.Map
 }
 
 // pointGet is the single-key read used by the metadata helpers that must tell
@@ -510,7 +520,7 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	if ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
-	if err := batch.Commit(syncOption); err != nil {
+	if err := ps.commitBatch(batch, syncOption); err != nil {
 		return ULID{}, fmt.Errorf("commit batch: %w", err)
 	}
 	if contradictsQueued {
@@ -552,6 +562,7 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 			Source:    provenance.SourceHuman,
 			AgentID:   eng.CreatedBy,
 			Operation: "create",
+			Details:   stampWriterIdentity(ctx, nil),
 		})
 	}
 
@@ -829,7 +840,7 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 	if ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
-	if commitErr := batch.Commit(syncOption); commitErr != nil {
+	if commitErr := ps.commitBatch(batch, syncOption); commitErr != nil {
 		for i := range errs {
 			if errs[i] == nil {
 				errs[i] = fmt.Errorf("commit batch: %w", commitErr)
@@ -875,6 +886,7 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 				Source:    provenance.SourceHuman,
 				AgentID:   eng.CreatedBy,
 				Operation: "create",
+				Details:   stampWriterIdentity(ctx, nil),
 			})
 		}
 	}
@@ -990,7 +1002,7 @@ func (ps *PebbleStore) ClearFTSKeys(ws, wsPlus [8]byte) error {
 			return fmt.Errorf("storage: clear FTS keys 0x%02X: %w", p, err)
 		}
 	}
-	if err := batch.Commit(pebble.Sync); err != nil {
+	if err := ps.commitBatch(batch, pebble.Sync); err != nil {
 		batch.Close()
 		return fmt.Errorf("storage: commit FTS clear batch: %w", err)
 	}

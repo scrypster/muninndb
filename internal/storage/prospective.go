@@ -70,7 +70,7 @@ func (ps *PebbleStore) ArmIntention(ctx context.Context, ws [8]byte, intentionID
 			return fmt.Errorf("arm intention: set cue %q: %w", cue, err)
 		}
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("arm intention: commit: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -180,7 +180,7 @@ func (ps *PebbleStore) MarkIntentionFired(ctx context.Context, ws [8]byte, inten
 			}
 		}
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("mark intention fired: commit: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -276,7 +276,7 @@ func (ps *PebbleStore) RelinkProspectiveIntent(ctx context.Context, ws [8]byte, 
 			}
 		}
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("relink prospective intent: commit: %w", err)
 	}
 	ps.replicateBatch(batch)

@@ -265,6 +265,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/admin/vaults/{name}/export-markdown", s.withAdminMiddleware(s.handleExportVaultMarkdown))
 	mux.HandleFunc("POST /api/admin/vaults/import", s.withAdminMiddlewareNoSizeLimit(s.withLargeBody(s.withCortexWrite(s.handleImportVault))))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-fts", s.withAdminMiddleware(s.withCortexWrite(s.handleReindexFTSVault)))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-hnsw", s.withAdminMiddleware(s.withCortexWrite(s.handleRebuildVectorIndex)))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/repair-watermark/reset", s.withAdminMiddleware(s.handleResetRepairWatermark))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed", s.withAdminMiddleware(s.withCortexWrite(s.handleReembedVault)))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/rename", s.withAdminMiddleware(s.withCortexWrite(s.handleRenameVault)))
@@ -382,6 +383,10 @@ func (s *Server) ActiveCoordinator() *replication.ClusterCoordinator {
 
 // SetDataDir sets the data directory used for persisting cluster configuration.
 func (s *Server) SetDataDir(dir string) { s.dataDir = dir }
+
+// DBWritable reports the cached data-directory writability probe (the
+// db_writable of /api/health). Cheap: an atomic load.
+func (s *Server) DBWritable() bool { return s.dbWritable.Load() }
 
 // SetVersion sets the version string reported by the health endpoint.
 func (s *Server) SetVersion(v string) { s.version = v }
@@ -872,7 +877,10 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	// to the outer WriteTimeout so we never wait longer than the HTTP server allows.
 	ctx, cancel := context.WithTimeout(r.Context(), activateTimeout)
 	defer cancel()
-	resp, err := s.engine.Activate(ctx, &req)
+	// The response is mbp.ActivateResponse verbatim (sendJSON), so it carries
+	// the COG-35 associated block: the engine may build it and record its
+	// ids as served.
+	resp, err := s.engine.Activate(mbp.WithAssociatedRendered(ctx), &req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			s.sendError(r, w, http.StatusGatewayTimeout, ErrIndexError, "activation timeout: query took too long")

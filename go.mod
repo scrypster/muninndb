@@ -1,6 +1,6 @@
 module github.com/scrypster/muninndb
 
-go 1.26.5
+go 1.26.11
 
 require (
 	github.com/bits-and-blooms/bloom/v3 v3.7.1
@@ -8,7 +8,7 @@ require (
 	github.com/dchest/siphash v1.2.3
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/klauspost/compress v1.16.0
+	github.com/klauspost/compress v1.20.2
 	github.com/kljensen/snowball v0.10.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pelletier/go-toml/v2 v2.2.4
@@ -17,13 +17,14 @@ require (
 	github.com/sugarme/tokenizer v0.3.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/yalue/onnxruntime_go v1.26.0
-	golang.org/x/crypto v0.52.0
-	golang.org/x/sync v0.21.0
-	golang.org/x/sys v0.45.0
-	golang.org/x/term v0.43.0
-	golang.org/x/text v0.39.0
+	golang.org/x/crypto v0.57.0
+	golang.org/x/sync v0.23.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/term v0.46.0
+	golang.org/x/text v0.42.0
 	golang.org/x/time v0.3.0
-	google.golang.org/grpc v1.82.1
+	google.golang.org/grpc v1.83.2
+	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -59,7 +60,6 @@ require (
 	github.com/sugarme/regexpset v0.0.0-20200920021344-4d4ec8eaf93c // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	golang.org/x/exp v0.0.0-20230626212559-97b1e661b5df // indirect
-	golang.org/x/net v0.55.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )

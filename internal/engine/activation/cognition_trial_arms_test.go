@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/engine/activation"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -39,7 +40,9 @@ import (
 // computing any arm — a run-time check on the actual data, which is strictly
 // stronger than a link to this synthetic one.
 //
-// THE ALGEBRA, and the reason a clean CONTENT-MATCH-ONLY arm exists at all:
+// THE ALGEBRA, and the reason a clean CONTENT-MATCH-ONLY arm exists at all.
+// (Since the honest clock, increment 1, the live B(M) is the constant
+// bLevelCap; the decaying form below is the trial's legacy control arm.)
 //
 //	B(M)      = min(ln n - d*ln(max(ageDays, ageFloor)/n), bLevelCap)
 //	prior     = softplus(B(M) + scale*(hebbian + transition)) / D
@@ -172,6 +175,10 @@ func TestCognitionTrial_ArmReconstructionFidelity(t *testing.T) {
 	t.Run("PAS on, populated transition store", func(t *testing.T) { ctRunFidelity(t, true) })
 }
 
+// ctWeights is the fidelity run's scoring config; shared with the order check
+// so it asks activation.ContentFirstOrder about the SAME weights.
+var ctWeights = &activation.Weights{SemanticSimilarity: 0.6, FullTextRelevance: 0.4, UseACTR: true}
+
 func ctRunFidelity(t *testing.T, pasEnabled bool) {
 	store := newStubStore()
 	now := time.Now()
@@ -253,11 +260,7 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 		// nothing about itself.
 		PASEnabled:       pasEnabled,
 		PASMaxInjections: 3,
-		Weights: &activation.Weights{
-			SemanticSimilarity: 0.6,
-			FullTextRelevance:  0.4,
-			UseACTR:            true,
-		},
+		Weights:          ctWeights,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -277,9 +280,14 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 			boosted++
 		}
 		cands = append(cands, ctCandidate{
-			id:               a.Engram.ID,
-			contentMatch:     c.ContentMatch,
-			baseLevel:        ctBaseLevel(a.Engram.AccessCount, a.Engram.LastAccess, now),
+			id:           a.Engram.ID,
+			contentMatch: c.ContentMatch,
+			// Honest clock (increment 1): the live pipeline's base level is
+			// bLevelCap for EVERY engram, so FULL and CONTENT-MATCH-ONLY now
+			// coincide on the base level and differ only by the boosts.
+			// ctBaseLevel survives as the pre-honest-clock formula (the
+			// cognitiontrial legacy control arm) for the age-floor proof below.
+			baseLevel:        ctBLevelCap,
 			hebbian:          c.HebbianBoost,
 			transition:       c.TransitionBoost,
 			gotRaw:           c.Raw,
@@ -411,6 +419,14 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 				"invalidates its model", c.id, c.gotConfidence, c.engramConfidence)
 		}
 		wantFinal := wantRaw * c.gotConfidence
+		if activation.ContentFirstOrder(ctWeights) {
+			// COG-35: the shipped ACT-R order is content-first — Final IS the
+			// absolute content score (the CONTENT-MATCH-ONLY arm, clamped,
+			// x Confidence). The FULL arm still reconstructs Raw above, so the
+			// trial's ablations of the prior stay trustworthy as measurements;
+			// they no longer describe the shipped ORDER.
+			wantFinal = wantAbs
+		}
 		if math.Abs(wantFinal-c.gotFinal) > tol {
 			t.Errorf("%s: reconstructed Final %.12f vs pipeline %.12f (raw %.12f x conf %.6f) "+
 				"— the harness ranks on arm(row) x Confidence, so this composition is the "+
@@ -432,11 +448,28 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 	// ORDER is exactly the claim an NDCG column needs, and a wrong hebScale, a
 	// wrong cap or a wrong softplus would each break it.
 	recon := append([]ctCandidate(nil), cands...)
-	sort.SliceStable(recon, func(i, j int) bool {
-		ri := ctArmFull.raw(recon[i].contentMatch, recon[i].baseLevel, recon[i].hebbian, recon[i].transition, hebScale) * recon[i].gotConfidence
-		rj := ctArmFull.raw(recon[j].contentMatch, recon[j].baseLevel, recon[j].hebbian, recon[j].transition, hebScale) * recon[j].gotConfidence
-		return ri > rj
-	})
+	if activation.ContentFirstOrder(ctWeights) {
+		// COG-35: the pipeline orders by the absolute content score; an exact
+		// tie goes to more association evidence, then newest-first.
+		sort.SliceStable(recon, func(i, j int) bool {
+			ai := math.Min(recon[i].contentMatch, 1) * recon[i].gotConfidence
+			aj := math.Min(recon[j].contentMatch, 1) * recon[j].gotConfidence
+			if ai != aj {
+				return ai > aj
+			}
+			ei, ej := recon[i].hebbian+recon[i].transition, recon[j].hebbian+recon[j].transition
+			if ei != ej {
+				return ei > ej
+			}
+			return rankorder.Before(recon[i].id, recon[j].id)
+		})
+	} else {
+		sort.SliceStable(recon, func(i, j int) bool {
+			ri := ctArmFull.raw(recon[i].contentMatch, recon[i].baseLevel, recon[i].hebbian, recon[i].transition, hebScale) * recon[i].gotConfidence
+			rj := ctArmFull.raw(recon[j].contentMatch, recon[j].baseLevel, recon[j].hebbian, recon[j].transition, hebScale) * recon[j].gotConfidence
+			return ri > rj
+		})
+	}
 	for i, c := range recon {
 		if c.rank != i {
 			t.Errorf("ranking disagreement at position %d: reconstruction puts %s "+
@@ -533,10 +566,15 @@ func ctRunFidelity(t *testing.T, pasEnabled bool) {
 			baseStrictlyBelowFull++
 		}
 	}
-	if baseBelow == 0 {
-		t.Error("BASE-LEVEL-ONLY equalled CONTENT-MATCH-ONLY on every candidate — the corpus sits " +
-			"at bLevelCap everywhere, so the arm cannot distinguish the base-level prior from " +
-			"nothing and this fixture proves nothing about it")
+	// Honest clock (increment 1): the live base level IS bLevelCap for every
+	// engram, so BASE-LEVEL-ONLY must equal CONTENT-MATCH-ONLY everywhere —
+	// the arm that used to measure the age prior now measures nothing, by
+	// construction. (Before, this guard demanded they DIFFER, as proof the
+	// corpus exercised decay.) Any difference means an age/access input has
+	// leaked back into the base level.
+	if baseBelow != 0 {
+		t.Errorf("BASE-LEVEL-ONLY scored below CONTENT-MATCH-ONLY on %d candidates — the base "+
+			"level is no longer neutral, so an age or access input reached ACT-R scoring", baseBelow)
 	}
 	if baseStrictlyBelowFull == 0 {
 		t.Error("BASE-LEVEL-ONLY never scored below FULL on a candidate carrying a boost — the " +

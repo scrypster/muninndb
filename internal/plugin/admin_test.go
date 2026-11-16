@@ -111,6 +111,7 @@ func (m *mockPluginStore) IncrementEntityCoOccurrence(_ context.Context, _ ULID,
 
 type mockIterator struct {
 	engrams []*Engram
+	ws      [8]byte
 	index   int
 	closed  bool
 }
@@ -129,6 +130,8 @@ func (m *mockIterator) Engram() *Engram {
 	}
 	return m.engrams[m.index-1]
 }
+
+func (m *mockIterator) CurrentWS() [8]byte { return m.ws }
 
 func (m *mockIterator) Close() error {
 	m.closed = true

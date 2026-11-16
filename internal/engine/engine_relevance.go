@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/scrypster/muninndb/internal/engine/activation"
+	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
 // #773 — score-presentation honesty.
@@ -158,22 +159,7 @@ func applyRelevanceBands(
 	// mixed response where some rows look confidently classified. A
 	// follow-up may flip tag rows specifically; do it deliberately, not as
 	// a drive-by.
-	responseBasis := activation.FusionBandBasis(cal.FusionMode)
-	if responseBasis == "" && semanticDegraded {
-		responseBasis = activation.BasisSemanticDegraded
-	}
-	if responseBasis == "" && cal.SemanticBaseline <= 0 {
-		// Same arithmetic (identity transform, raw-cosine noise floor ~0.45,
-		// no honest band), two OPPOSITE causes — name the right one. An
-		// operator who explicitly set `semantic_floor: 0` made a documented
-		// choice and must not be told their model is unregistered (G6 refute
-		// of #773, finding 3).
-		if cal.BaselineExplicitlyDisabled {
-			responseBasis = activation.BasisSemanticFloorDisabled
-		} else {
-			responseBasis = activation.BasisNoModelBaseline
-		}
-	}
+	responseBasis := responseBandBasis(cal, semanticDegraded)
 
 	for i, row := range rows {
 		switch {
@@ -206,4 +192,79 @@ func applyRelevanceBands(
 		}
 	}
 	return bands, bases
+}
+
+// responseBandBasis is the response-wide reason a run's rows cannot be banded
+// at all ("" when they can): a fusion mode with no absolute scale, a degraded
+// semantic channel, or no calibrated (or a deliberately disabled) noise
+// baseline. Shared by applyRelevanceBands and the entity-boost seed rule so the
+// two cannot disagree about whether a response is calibrated.
+func responseBandBasis(cal activation.RelevanceCalibration, semanticDegraded bool) string {
+	basis := activation.FusionBandBasis(cal.FusionMode)
+	if basis == "" && semanticDegraded {
+		basis = activation.BasisSemanticDegraded
+	}
+	if basis == "" && cal.SemanticBaseline <= 0 {
+		// Same arithmetic (identity transform, raw-cosine noise floor ~0.45,
+		// no honest band), two OPPOSITE causes — name the right one. An
+		// operator who explicitly set `semantic_floor: 0` made a documented
+		// choice and must not be told their model is unregistered (G6 refute
+		// of #773, finding 3).
+		if cal.BaselineExplicitlyDisabled {
+			basis = activation.BasisSemanticFloorDisabled
+		} else {
+			basis = activation.BasisNoModelBaseline
+		}
+	}
+	return basis
+}
+
+// weakOnlyAbstains reports whether a recall response must be withheld as
+// weak_only: every row it would return is band `weak` on a CALIBRATED
+// response, and the caller did not ask for those rows.
+//
+// Calibrated means responseBandBasis is "" — rrf, weighted_sum, CGDN, a
+// degraded semantic channel or an embed model with no measured noise floor
+// have no bar to call a row weak against, and are unchanged.
+//
+// All-or-nothing on the response: a single moderate, strong, filter_match or
+// injected (not_scored) row keeps every row, weak neighbours included —
+// nothing is trimmed next to real evidence. (Injection only happens from a
+// moderate/strong seed on a calibrated response, and a substituted version
+// head is banded from its predecessor's measured evidence.)
+//
+// Judgement calls, deliberate:
+//   - an EXPLICIT threshold keeps its meaning: the caller chose the bar, so the
+//     rows that clear it are returned (the wire cannot tell an explicit 0 from
+//     unset; MCP sets IncludeWeak when the threshold argument is present);
+//   - ANY explicit filter (tags, tag_prefix, created_after/before, a structured
+//     MQL filter) means the caller defined the set and asked for its members;
+//   - mode "deep" — wire or vault default — is an explicit "be exhaustive"
+//     request and implies include_weak;
+//   - historical recall (as_of, include_invalid) follows the same rule: the
+//     bands are computed identically for it, and a weak row is no more an
+//     answer in the past than now.
+func weakOnlyAbstains(req *mbp.ActivateRequest, structuredFilter activation.EngramFilter, vaultDefaultMode string,
+	cal activation.RelevanceCalibration, semanticDegraded bool, bands []string) bool {
+	if len(bands) == 0 || req.IncludeWeak || req.Threshold != 0 || len(req.Filters) > 0 || structuredFilter != nil {
+		return false
+	}
+	mode := req.Mode
+	if mode == "" {
+		mode = vaultDefaultMode
+	}
+	if mode == "deep" {
+		return false
+	}
+	// CGDN is banded by #773 but its AbsoluteScore is structurally 0 (#768,
+	// inert): there is no measured evidence for "weak" to describe there.
+	if responseBandBasis(cal, semanticDegraded) != "" || cal.FusionMode == activation.FusionCGDN {
+		return false
+	}
+	for _, b := range bands {
+		if b != activation.RelevanceWeak {
+			return false
+		}
+	}
+	return true
 }

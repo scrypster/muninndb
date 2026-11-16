@@ -78,6 +78,20 @@ func recallFor(t *testing.T, h *realEmbedHarness, query string) *mbp.ActivateRes
 	return resp
 }
 
+// recallForWeak is recallFor with include_weak: an all-weak response is
+// withheld by default (weak_only abstention), and these tests examine how the
+// weak rows themselves are presented.
+func recallForWeak(t *testing.T, h *realEmbedHarness, query string) *mbp.ActivateResponse {
+	t.Helper()
+	resp, err := h.eng.Activate(h.ctx, &mbp.ActivateRequest{
+		Vault: "default", Context: []string{query}, MaxResults: 5, IncludeWeak: true,
+	})
+	if err != nil {
+		t.Fatalf("activate(%q): %v", query, err)
+	}
+	return resp
+}
+
 func dumpRows(t *testing.T, resp *mbp.ActivateResponse) {
 	t.Helper()
 	for i, it := range resp.Activations {
@@ -123,7 +137,7 @@ func TestRelevanceBand_WeakNeighborIsNotDressedAsCertain(t *testing.T) {
 	makeHebbianHot(t, h, ids["lighting"], ids["tokens"],
 		"Design tokens are defined in tokens.json and compiled to CSS custom properties at build time.")
 
-	resp := recallFor(t, h, "what does the team use to take pictures")
+	resp := recallForWeak(t, h, "what does the team use to take pictures")
 	if len(resp.Activations) == 0 {
 		t.Fatal("fixture returned nothing; the band cannot be exercised")
 	}
@@ -136,12 +150,15 @@ func TestRelevanceBand_WeakNeighborIsNotDressedAsCertain(t *testing.T) {
 		t.Fatalf("premise not reproduced: absolute score %.4f >= 0.2, so this row is "+
 			"not weak and the test proves nothing", abs)
 	}
-	// Premise 2: the displayed score materially overstates that evidence — the
-	// ACT-R prior inflating Final away from the absolute quantity, which is the
-	// mechanism #773 names.
-	if float64(top.Score) < 3.0*abs {
-		t.Fatalf("premise not reproduced: score %.4f is not >= 3x the absolute "+
-			"evidence %.4f, so nothing is being overstated", top.Score, abs)
+	// Premise 2 used to be that the displayed score materially overstated that
+	// evidence (>= 3x) — the ACT-R prior inflating Final away from the absolute
+	// quantity, the mechanism #773 names. Under content-first order (COG-35)
+	// that shape is unrepresentable on ACT-R: the score IS the absolute
+	// evidence and the Hebbian prior is reported beside it. Asserted, so a
+	// regression back to an inflated score fails here.
+	if top.Score != top.ScoreComponents.AbsoluteScore {
+		t.Errorf("score %.4f is not the absolute evidence %.4f on a Hebbian-hot row — "+
+			"the prior is inflating the displayed score again (COG-35)", top.Score, abs)
 	}
 	if top.ScoreComponents.HebbianBoost < 0.99 {
 		t.Fatalf("premise not reproduced: hebbian boost %.3f — the fixture failed to "+
@@ -198,7 +215,15 @@ func TestRelevanceBand_AbsentFactQuery_AllWeakHint(t *testing.T) {
 	defer cleanup()
 	relevanceFixture(h)
 
-	resp := recallFor(t, h, "what is the escalation path when the canary fails overnight?")
+	// The DEFAULT recall now withholds this all-weak response (weak_only) —
+	// the response-level "these are only neighbours" signal this test once
+	// recorded as deferred. The rows are still reachable with include_weak.
+	if def := recallFor(t, h, "what is the escalation path when the canary fails overnight?"); len(def.Activations) != 0 ||
+		def.AbstainedReason != activation.AbstainWeakOnly || def.WeakAvailable == 0 {
+		t.Errorf("default recall of an all-weak adjacent query: rows=%d reason=%q weak_available=%d, want weak_only abstention",
+			len(def.Activations), def.AbstainedReason, def.WeakAvailable)
+	}
+	resp := recallForWeak(t, h, "what is the escalation path when the canary fails overnight?")
 	if len(resp.Activations) == 0 {
 		t.Fatal("the fixture abstained on the topically-adjacent unanswerable query; " +
 			"it can no longer reach the shape #773 reported")

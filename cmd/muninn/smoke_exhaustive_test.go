@@ -351,6 +351,11 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		if id, _ := result["id"].(string); id == "" {
 			t.Errorf("expected id in result, got: %v", result)
 		}
+		// COG-36: the write-time twin block is off by default — a default
+		// server's remember response carries no `related` key at all.
+		if _, has := result["related"]; has {
+			t.Errorf("write-time twin block must be absent with MUNINN_WRITE_RELATED unset, got: %v", result)
+		}
 	})
 
 	t.Run("muninn_remember_batch", func(t *testing.T) {
@@ -377,6 +382,37 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		// memories may be empty if FTS not yet indexed; just verify no error key.
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_recall returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_recall/query", func(t *testing.T) {
+		// `query` (one plain string) is the schema's first, easiest-to-emit
+		// alternative to the `context` array; neither is schema-required.
+		result := mcpTool(t, tok, "muninn_recall", map[string]any{
+			"vault": vault,
+			"query": "explorer ruins Alice",
+			"limit": 5,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_recall with query returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_recall/include_weak", func(t *testing.T) {
+		// include_weak is a declared muninn_recall argument (weak_only
+		// abstention opt-out); it must be accepted, and a recall that opted in
+		// can never come back withheld as weak_only.
+		result := mcpTool(t, tok, "muninn_recall", map[string]any{
+			"vault":        vault,
+			"query":        "explorer ruins Alice",
+			"limit":        5,
+			"include_weak": true,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_recall with include_weak returned error field: %v", errVal)
+		}
+		if result["abstained_reason"] == "weak_only" {
+			t.Errorf("include_weak:true must never be withheld as weak_only: %v", result)
 		}
 	})
 
@@ -440,6 +476,22 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_status returned error field: %v", errVal)
 		}
+		// health is derived (good | degraded | unknown), never a bare constant,
+		// and always comes with its reasons list and the worker/embedder blocks.
+		switch h := result["health"]; h {
+		case "good", "degraded":
+		default:
+			t.Errorf("muninn_status health = %v, want good or degraded from a real engine", h)
+		}
+		if _, ok := result["health_reasons"].([]any); !ok {
+			t.Errorf("muninn_status missing health_reasons list: %v", result)
+		}
+		if _, ok := result["workers"].(map[string]any); !ok {
+			t.Errorf("muninn_status missing workers block: %v", result)
+		}
+		if _, ok := result["embedder"].(map[string]any); !ok {
+			t.Errorf("muninn_status missing embedder block: %v", result)
+		}
 	})
 
 	t.Run("muninn_evolve", func(t *testing.T) {
@@ -490,6 +542,11 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		})
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_session returned error field: %v", errVal)
+		}
+		for _, k := range []string{"total", "returned", "truncated", "activations"} {
+			if _, ok := result[k]; !ok {
+				t.Errorf("muninn_session missing %q: %v", k, result)
+			}
 		}
 	})
 
@@ -924,6 +981,28 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 		})
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_feedback returned error field: %v", errVal)
+		}
+	})
+
+	t.Run("muninn_feedback_label", func(t *testing.T) {
+		// Label pipeline: recall carries query_id + a feedback block; the
+		// query_id+engram_ids form is accepted with the uniform response.
+		rec := mcpTool(t, tok, "muninn_recall", map[string]any{"vault": vault, "query": "Alice", "threshold": 0.001})
+		qid, _ := rec["query_id"].(string)
+		if qid == "" {
+			t.Fatalf("muninn_recall carries no query_id: %v", rec)
+		}
+		result := mcpTool(t, tok, "muninn_feedback", map[string]any{
+			"vault":      vault,
+			"query_id":   qid,
+			"engram_ids": []any{idA},
+			"useful":     true,
+		})
+		if errVal, hasErr := result["error"]; hasErr {
+			t.Errorf("muninn_feedback (label form) returned error field: %v", errVal)
+		}
+		if result["ok"] != true {
+			t.Errorf("muninn_feedback (label form) = %v, want ok:true", result)
 		}
 	})
 

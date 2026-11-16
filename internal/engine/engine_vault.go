@@ -73,7 +73,8 @@ var ErrAppendForbidden = errors.New("append-mode credential cannot modify or del
 //   - additive remember on a content-hash duplicate → TouchAccess (#682).
 //   - the read path (Read/Activate/recall) under an append credential is NOT
 //     forced read-only (resolveReadOnly forces it only for observe), so it drives
-//     RecordFeedback (per-vault adaptive scoring weights), TouchAccess (access
+//     RecordFeedback (an inert per-vault weight update — see
+//     internal/scoring/deadloop_characterization_test.go), TouchAccess (access
 //     count / last-access), and Hebbian LTP + PAS on existing associations.
 //
 // None overwrite content/confidence/state/tags/lifecycle or delete — they only
@@ -137,6 +138,36 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 	// ClearVault on a renamed vault would silently range-delete an empty
 	// prefix and leave the real engrams orphaned.
 	ws := e.store.ResolveVaultPrefix(vaultName)
+	// The vault's in-memory label bookkeeping (feedback_labels.go) goes with
+	// its data; DeleteVault reaches here too.
+	e.dropLabelPartition(ws)
+
+	// Establish the clear boundary before deleting storage. Each processor
+	// invalidates its current scan, closes admission for this vault, and waits
+	// for already-admitted calls to finish persistence. Admission and waiting
+	// are scoped per vault.
+	finishProcessorClears := make([]func(), 0, len(e.retroProcessors))
+	finishClears := func() {
+		for i := len(finishProcessorClears) - 1; i >= 0; i-- {
+			finishProcessorClears[i]()
+		}
+	}
+	for _, processor := range e.retroProcessors {
+		if processor != nil {
+			finish, err := processor.BeginVaultClear(ctx, ws)
+			if err != nil {
+				// Abort the whole clear. Any boundary already established on an
+				// earlier processor must be released before returning.
+				finishClears()
+				return fmt.Errorf("clear vault %q: wait for retroactive processor: %w", vaultName, err)
+			}
+			finishProcessorClears = append(finishProcessorClears, finish)
+		}
+	}
+	// Keep this defer registered before the FTS clearing defer below. Defers run
+	// in LIFO order, so FTS accepts writes again before processors are released
+	// and notified to discover post-clear records.
+	defer finishClears()
 
 	// NOTE: Jobs already mid-flush may write ghost FTS entries after the range
 	// tombstones land. This is harmless — activation filtering skips engrams
@@ -148,6 +179,15 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 	if e.ftsWorker != nil {
 		e.ftsWorker.SetClearing(ws, true)
 		defer e.ftsWorker.SetClearing(ws, false)
+	}
+
+	// Stop the vault's vector-graph repair and drain its list writes BEFORE
+	// the keys are deleted, and keep the index uncached until we return: a
+	// repair that committed after the delete would write the old graph back
+	// as vector-less keys (STO-8).
+	if e.hnswRegistry != nil {
+		e.hnswRegistry.BeginClear(ws)
+		defer e.hnswRegistry.EndClear(ws)
 	}
 
 	vaultCount, err := e.store.ClearVault(ctx, ws)
@@ -168,9 +208,10 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 		}
 	}
 
-	if e.hnswRegistry != nil {
-		e.hnswRegistry.ResetVault(ws)
-	}
+	// The vault's recent-write vectors and guard go with its data (COG-36).
+	// Runs inside the processors' clear boundary, so no embed hook can
+	// re-insert a pre-clear vector after this.
+	e.resetTwinVault(ws)
 	if e.fts != nil {
 		e.fts.InvalidateIDFCache()
 	}

@@ -38,7 +38,7 @@ const (
 	//                          destruction: (a) remember on a content-hash duplicate reinforces an
 	//                          existing engram's access metadata (TouchAccess, #682); (b) the read
 	//                          path is NOT forced read-only for append (only for observe), so Read/
-	//                          recall drive RecordFeedback (adaptive scoring weights), TouchAccess,
+	//                          recall drive RecordFeedback (an inert per-vault weight update), TouchAccess,
 	//                          and Hebbian/PAS on existing state. None overwrite content/confidence/
 	//                          state/tags/lifecycle or delete. See engine.refuseAppend for the full note.
 )

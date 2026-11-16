@@ -16,6 +16,10 @@ import (
 // fills out limit with real memories. A nil or empty excludeTypeLabels is a
 // no-op — the default, pre-S5 behavior — so existing callers see no change.
 func (e *Engine) WhereLeftOff(ctx context.Context, vault string, limit int, excludeTypeLabels []string) ([]*storage.Engram, error) {
+	// Orientation is not an access: loading these engrams must not stamp the
+	// L1 cache's access time (a recency scoring input), or every call would
+	// freshen exactly the memories it lists and re-rank later recalls.
+	ctx = storage.ContextWithNoAccessCacheStamp(ctx)
 	if limit <= 0 {
 		limit = 10
 	}

@@ -77,6 +77,10 @@ type EngramIterator interface {
 	// Engram returns the current engram. Only valid after Next() returns true.
 	Engram() *Engram
 
+	// CurrentWS returns the vault workspace prefix of the current engram.
+	// Only valid after Next() returns true.
+	CurrentWS() [8]byte
+
 	// Close releases the underlying Pebble iterator.
 	Close() error
 }

@@ -50,6 +50,7 @@ import (
 	"github.com/scrypster/muninndb/internal/transport/rest"
 	"github.com/scrypster/muninndb/internal/ui"
 	"github.com/scrypster/muninndb/internal/wal"
+	"github.com/scrypster/muninndb/internal/writetwin"
 	webui "github.com/scrypster/muninndb/web"
 )
 
@@ -1251,9 +1252,10 @@ func runServer() {
 	// Wire ClusterCoordinator when cluster mode is enabled.
 	var coordinator *replication.ClusterCoordinator
 	var repLog *replication.ReplicationLog
+	var applier *replication.Applier
 	if clusterCfg.Enabled {
 		repLog = replication.NewReplicationLog(db)
-		applier := replication.NewApplier(db)
+		applier = replication.NewApplier(db)
 		epochStore, err := replication.NewEpochStore(db)
 		if err != nil {
 			slog.Error("create epoch store", "err", err)
@@ -1269,6 +1271,13 @@ func runServer() {
 	sessionSecret, err := auth.Bootstrap(authStore, secretPath)
 	if err != nil {
 		slog.Error("auth bootstrap failed", "err", err)
+		os.Exit(1)
+	}
+	if len(sessionSecret) == 0 {
+		// Bootstrap guarantees a non-empty secret. This is the second lock on the
+		// same door: the REST and UI servers serve admin routes without auth when
+		// handed an empty secret, so the server must not start with one.
+		slog.Error("auth bootstrap returned an empty session secret; refusing to start", "path", secretPath)
 		os.Exit(1)
 	}
 
@@ -1328,6 +1337,24 @@ func runServer() {
 		storeCfg.RepLogAppend = replication.LocalAppendFunc(coordinator, repLog)
 	}
 	store := storage.NewPebbleStore(db, storeCfg)
+	if applier != nil {
+		// A follower applies the leader's batches straight into Pebble, past the
+		// store's write path. Both consumers run on every attempted commit
+		// (success or error) and on a resnapshot, in this order: the read-
+		// through caches are invalidated first (cache_guard.go), then the
+		// retired set re-derives each touched entry from the stored record
+		// (retired.go) — that re-derive reads Pebble directly, never a cache.
+		applier.SetCommitHooks(
+			func(repr []byte) {
+				store.InvalidateCommittedRepr(repr)
+				store.NoteCommittedRepr(repr)
+			},
+			func() {
+				store.InvalidateAllCaches()
+				store.ResetAllRetired()
+			},
+		)
+	}
 
 	// Run startup migrations before the engine is built.
 	runStartupMigrations(context.Background(), store)
@@ -1440,6 +1467,19 @@ func runServer() {
 	transitionWorkerImpl := cognitive.NewTransitionWorker(ctx, store.TransitionCache())
 	actEngine.SetTransitionStore(store.TransitionCache())
 
+	// Write-time twin check (COG-36): off | shadow | 1, default off. An
+	// unrecognised value runs OFF, loudly — a switch that adds to write
+	// responses must never turn on by accident.
+	writeTwinMode, writeTwinOK := writetwin.ParseMode(os.Getenv("MUNINN_WRITE_RELATED"))
+	if !writeTwinOK {
+		slog.Warn("MUNINN_WRITE_RELATED has an unrecognised value; the write-time twin check stays off (use off, shadow or 1)",
+			"value", os.Getenv("MUNINN_WRITE_RELATED"))
+	} else if writeTwinMode != writetwin.Off {
+		// The audit (muninn twin-audit) reads this line back as a ring
+		// warm-up start: keep the message equal to writetwin.StartLogMsg.
+		slog.Info(writetwin.StartLogMsg, "mode", writeTwinMode.String())
+	}
+
 	// Build engine API - pass the full worker implementations
 	eng := engine.NewEngine(engine.EngineConfig{
 		Store:            store,
@@ -1453,6 +1493,10 @@ func runServer() {
 		Embedder:         embedder,
 		HNSWRegistry:     hnswRegistry,
 		EmbedModelName:   embedModelName,
+		// The persisted auth secret keys read-only query ids (ro2./ro1.) and the
+		// label pipeline's credential/session hashes, so ids survive restarts.
+		QueryIDSecret: sessionSecret,
+		WriteTwinMode: writeTwinMode,
 	})
 
 	eng.SetTransitionWorker(transitionWorkerImpl)
@@ -1581,6 +1625,9 @@ func runServer() {
 	// authenticate on every transport and muninn_create_workflow_vault (opt-in
 	// via MUNINN_AGENT_VAULT_CREATE) can mint workflow capabilities (RFC #597).
 	mcpServer := mcp.New(*mcpAddr, mcpAdapter, *mcpToken, authStore, authStore, clientTLS)
+	// muninn_status health folds in the same storage-writability probe that
+	// REST /api/health reports as db_writable.
+	mcpServer.SetStorageWritableProbe(restServer.DBWritable)
 
 	// Build gRPC server
 	grpcAdapter := grpcpkg.NewEngineAdapter(eng)
@@ -1744,6 +1791,12 @@ func runServer() {
 		// Re-evaluate push subscriptions once each engram's embedding lands (#512),
 		// so vector-scored matches on freshly-written engrams are not missed.
 		retroProcessor.SetOnEmbed(eng.ReevaluatePushOnEmbed)
+		// Feed the write-time twin ring (COG-36) the exact vector each write
+		// was stored and indexed with. A no-op when the check is off.
+		if writeTwinMode != writetwin.Off {
+			retroProcessor.SetOnEmbedded(eng.WriteTwinOnEmbedded)
+			eng.SetWriteTwinFeed(retroProcessor)
+		}
 		retroProcessor.Start(ctx)
 		slog.Info("retroactive embed processor started")
 	}
@@ -1769,15 +1822,17 @@ func runServer() {
 		eng.SetOnWrite(enrichProcessor.Notify)
 	}
 
-	// Wire processors into engine for observability stats.
-	var obsProcs []*plugin.RetroactiveProcessor
+	// Register every active processor with the engine. ClearVault uses this
+	// list as a correctness-critical admission fence; observability also reads
+	// processor stats from it.
+	var activeRetroProcs []*plugin.RetroactiveProcessor
 	if retroProcessor != nil {
-		obsProcs = append(obsProcs, retroProcessor)
+		activeRetroProcs = append(activeRetroProcs, retroProcessor)
 	}
 	if enrichProcessor != nil {
-		obsProcs = append(obsProcs, enrichProcessor)
+		activeRetroProcs = append(activeRetroProcs, enrichProcessor)
 	}
-	eng.SetRetroactiveProcessors(obsProcs...)
+	eng.SetRetroactiveProcessors(activeRetroProcs...)
 
 	// Start servers
 	errCh := make(chan error, 3)

@@ -1,12 +1,15 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -54,16 +57,65 @@ type RetroactiveProcessor struct {
 	wg       sync.WaitGroup
 	notifyCh chan struct{} // buffered(1); non-blocking send from Notify()
 
+	// vaultGuards establish a clear boundary. Plugin calls hold a per-vault
+	// admission through persistence; ClearVault invalidates the generation,
+	// closes admission, and waits for admitted calls to drain. Scope note: an
+	// invalidation aborts the whole cross-vault pass (ScanWithoutFlag is
+	// global), so unrelated vaults' pending work waits until the next pass —
+	// their admissions are untouched, but the sweep serving them is not.
+	// Sizing: the map holds one entry per vault EVER SCANNED, not ever
+	// cleared — lockCurrentVault creates entries on the scan path.
+	vaultGuards sync.Map // map[[8]byte]*retroactiveVaultGuard
+
 	// onEmbed, when set, is called after an engram's embedding is computed and
 	// inserted into HNSW. The engine uses it to re-evaluate push subscriptions
 	// with the now-available vector (#512). Only set on the embed processor.
 	onEmbed func(eng *Engram, vec []float32)
+
+	// onEmbedded, when set, is called after an engram's embedding is stored
+	// and inserted into HNSW, with the vault prefix the processor already
+	// holds (a store lookup of an id's vault is a full scan). It is called
+	// synchronously inside the vault's clear admission, so a vault clear
+	// cannot interleave with it; it must be cheap and must not block. The
+	// write-time twin check (COG-36) feeds its ring from it. Only set on the
+	// embed processor.
+	onEmbedded func(ws [8]byte, eng *Engram, vec []float32)
+
+	// passStartNs is the wall-clock start (UnixNano) of the pass currently
+	// processing work, or 0 when idle. The write-time twin check (COG-36)
+	// reads it to tell "my write is queued behind earlier work"
+	// (embedder_busy) from "the embed itself ran long" (embed_timeout).
+	passStartNs atomic.Int64
+}
+
+// PassStartedAt reports when the pass now processing work began; ok=false
+// when the processor is idle (or found nothing to do).
+func (rp *RetroactiveProcessor) PassStartedAt() (time.Time, bool) {
+	ns := rp.passStartNs.Load()
+	if ns == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(0, ns), true
+}
+
+type retroactiveVaultGuard struct {
+	mu         sync.Mutex
+	generation atomic.Uint64
+	readers    int
+	clearing   bool
+	changed    chan struct{}
 }
 
 // SetOnEmbed registers a callback invoked after each engram's embedding is
 // computed and inserted into the index. Must be called before Start.
 func (rp *RetroactiveProcessor) SetOnEmbed(fn func(eng *Engram, vec []float32)) {
 	rp.onEmbed = fn
+}
+
+// SetOnEmbedded registers the vault-aware post-store hook (see onEmbedded).
+// Must be called before Start.
+func (rp *RetroactiveProcessor) SetOnEmbedded(fn func(ws [8]byte, eng *Engram, vec []float32)) {
+	rp.onEmbedded = fn
 }
 
 // NewRetroactiveProcessor creates a new processor for a plugin.
@@ -84,6 +136,134 @@ func (rp *RetroactiveProcessor) Notify() {
 	case rp.notifyCh <- struct{}{}:
 	default:
 	}
+}
+
+// BeginVaultClear invalidates scans that started before a destructive clear,
+// closes per-vault admission, and waits for already-admitted plugin calls to
+// finish persisting. If ctx is cancelled while waiting, the boundary is
+// abandoned and no clear may proceed. The returned function releases a
+// successfully established boundary and wakes the processor.
+//
+// The wait is bounded ONLY by the caller's context: an admitted enrich call
+// can hold admission for the provider's full HTTP timeout, so a clear against
+// a slow provider blocks for that long unless the caller's ctx carries its
+// own deadline. Callers that must not stall should pass one.
+func (rp *RetroactiveProcessor) BeginVaultClear(ctx context.Context, ws [8]byte) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	guard := rp.vaultGuard(ws)
+
+	guard.mu.Lock()
+	for guard.clearing {
+		changed := guard.changed
+		guard.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-changed:
+		}
+		guard.mu.Lock()
+	}
+	if err := ctx.Err(); err != nil {
+		guard.mu.Unlock()
+		return nil, err
+	}
+
+	// The first increment invalidates scans that predate the clear request.
+	guard.clearing = true
+	guard.generation.Add(1)
+	guard.signalLocked()
+
+	for guard.readers > 0 {
+		changed := guard.changed
+		guard.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			guard.mu.Lock()
+			guard.clearing = false
+			guard.generation.Add(1)
+			guard.signalLocked()
+			guard.mu.Unlock()
+			rp.Notify()
+			return nil, ctx.Err()
+		case <-changed:
+		}
+		guard.mu.Lock()
+	}
+	if err := ctx.Err(); err != nil {
+		guard.clearing = false
+		guard.generation.Add(1)
+		guard.signalLocked()
+		guard.mu.Unlock()
+		rp.Notify()
+		return nil, err
+	}
+	guard.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			guard.mu.Lock()
+			// The second increment invalidates scans opened while the clear held
+			// admission. Only scans starting after this release observe the final
+			// generation and may admit work from the rebuilt Pebble view.
+			guard.generation.Add(1)
+			guard.clearing = false
+			guard.signalLocked()
+			guard.mu.Unlock()
+		})
+		rp.Notify()
+	}, nil
+}
+
+func (rp *RetroactiveProcessor) vaultGuard(ws [8]byte) *retroactiveVaultGuard {
+	guard, _ := rp.vaultGuards.LoadOrStore(ws, &retroactiveVaultGuard{
+		changed: make(chan struct{}),
+	})
+	return guard.(*retroactiveVaultGuard)
+}
+
+func (guard *retroactiveVaultGuard) signalLocked() {
+	close(guard.changed)
+	guard.changed = make(chan struct{})
+}
+
+func (guard *retroactiveVaultGuard) release() {
+	guard.mu.Lock()
+	guard.readers--
+	if guard.readers == 0 {
+		guard.signalLocked()
+	}
+	guard.mu.Unlock()
+}
+
+func (rp *RetroactiveProcessor) vaultGeneration(ws [8]byte) uint64 {
+	guard, ok := rp.vaultGuards.Load(ws)
+	if !ok {
+		return 0
+	}
+	return guard.(*retroactiveVaultGuard).generation.Load()
+}
+
+func (rp *RetroactiveProcessor) snapshotVaultGenerations() map[[8]byte]uint64 {
+	snapshot := make(map[[8]byte]uint64)
+	rp.vaultGuards.Range(func(key, value any) bool {
+		snapshot[key.([8]byte)] = value.(*retroactiveVaultGuard).generation.Load()
+		return true
+	})
+	return snapshot
+}
+
+func (rp *RetroactiveProcessor) lockCurrentVault(ws [8]byte, snapshot map[[8]byte]uint64) (*retroactiveVaultGuard, bool) {
+	guard := rp.vaultGuard(ws)
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	if guard.clearing || guard.generation.Load() != snapshot[ws] {
+		return nil, false
+	}
+	guard.readers++
+	return guard, true
 }
 
 // Start launches the background processing goroutine.
@@ -248,6 +428,11 @@ func (rp *RetroactiveProcessor) backoff(ctx context.Context, consecutiveErrors i
 // inference call per micro-batch, then scatters vectors back individually.
 // For EnrichPlugin: processes one engram at a time (LLM call per engram).
 func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
+	// Capture generations before opening the Pebble snapshot. A vault clear
+	// increments its generation before waiting for an in-flight call, so an old
+	// iterator can never gain admission after the clear boundary advances.
+	scanGenerations := rp.snapshotVaultGenerations()
+
 	// Reset rate/ETA at the start of every pass so stale values from a prior
 	// pass don't leak into the embed-status API response while the processor is idle.
 	rp.statsMu.Lock()
@@ -264,6 +449,12 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 
 	if total == 0 {
 		return true
+	}
+	// Only the write-time twin check reads the pass start; with no hook
+	// wired (the check off) the processor does exactly what it did before.
+	if rp.onEmbedded != nil {
+		rp.passStartNs.Store(time.Now().UnixNano())
+		defer rp.passStartNs.Store(0)
 	}
 
 	// Snapshot cumulative processed count so we can detect per-pass work.
@@ -298,11 +489,63 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 	}
 	microEngrams := make([]*Engram, 0, microBatchSize)
 	microTexts := make([]string, 0, microBatchSize)
+	microVaults := make([][8]byte, 0, microBatchSize)
+	passInvalidated := false
 
 	flushMicroBatch := func() {
 		if !isEmbedPlugin || len(microEngrams) == 0 {
 			return
 		}
+
+		vaultSet := make(map[[8]byte]struct{}, len(microVaults))
+		for _, ws := range microVaults {
+			vaultSet[ws] = struct{}{}
+		}
+		vaults := make([][8]byte, 0, len(vaultSet))
+		for ws := range vaultSet {
+			vaults = append(vaults, ws)
+		}
+		sort.Slice(vaults, func(i, j int) bool {
+			return bytes.Compare(vaults[i][:], vaults[j][:]) < 0
+		})
+
+		locked := make(map[[8]byte]*retroactiveVaultGuard, len(vaults))
+		stale := make(map[[8]byte]bool)
+		for _, ws := range vaults {
+			guard, current := rp.lockCurrentVault(ws, scanGenerations)
+			if !current {
+				stale[ws] = true
+				passInvalidated = true
+				continue
+			}
+			locked[ws] = guard
+		}
+		defer func() {
+			for _, guard := range locked {
+				guard.release()
+			}
+		}()
+
+		if len(stale) > 0 {
+			liveEngrams := microEngrams[:0]
+			liveTexts := microTexts[:0]
+			liveVaults := microVaults[:0]
+			for i, ws := range microVaults {
+				if stale[ws] {
+					continue
+				}
+				liveEngrams = append(liveEngrams, microEngrams[i])
+				liveTexts = append(liveTexts, microTexts[i])
+				liveVaults = append(liveVaults, ws)
+			}
+			microEngrams = liveEngrams
+			microTexts = liveTexts
+			microVaults = liveVaults
+			if len(microEngrams) == 0 {
+				return
+			}
+		}
+
 		vecs, embedErr := embedPlugin.Embed(ctx, microTexts)
 		if embedErr != nil {
 			ids := make([]string, len(microEngrams))
@@ -328,6 +571,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 			rp.statsMu.Unlock()
 			microEngrams = microEngrams[:0]
 			microTexts = microTexts[:0]
+			microVaults = microVaults[:0]
 			return
 		}
 		dim := len(vecs) / len(microEngrams)
@@ -373,11 +617,19 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 				}
 				slog.Warn("retroactive processor: HNSWInsert failed",
 					"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", storeErr)
-			} else if rp.onEmbed != nil {
-				// The vector is now searchable — let the engine re-evaluate push
-				// subscriptions with it (#512). Copy first: vec is a sub-slice of
-				// the batch result and the callback hands it to an async consumer.
-				rp.onEmbed(eng, append([]float32(nil), vec...))
+			} else {
+				if rp.onEmbed != nil {
+					// The vector is now searchable — let the engine re-evaluate push
+					// subscriptions with it (#512). Copy first: vec is a sub-slice of
+					// the batch result and the callback hands it to an async consumer.
+					rp.onEmbed(eng, append([]float32(nil), vec...))
+				}
+				if rp.onEmbedded != nil {
+					// The exact vector just stored and indexed — same text
+					// (Concept+" "+Content), same batch composition. Copied for
+					// the same reason as above.
+					rp.onEmbedded(microVaults[i], eng, append([]float32(nil), vec...))
+				}
 			}
 			if storeErr := rp.store.AutoLinkByEmbedding(ctx, eng.ID, vec); storeErr != nil {
 				slog.Warn("retroactive processor: AutoLinkByEmbedding failed",
@@ -397,6 +649,7 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 		}
 		microEngrams = microEngrams[:0]
 		microTexts = microTexts[:0]
+		microVaults = microVaults[:0]
 
 		// Rate/ETA fires after every micro-batch (not gated on %100 — always update).
 		// Use pass-local count (flushedProcessed - passStart) so rate reflects this
@@ -428,6 +681,14 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 		}
 	}
 
+	type enrichAction uint8
+	const (
+		enrichContinue enrichAction = iota
+		enrichStopPass
+		enrichReturnSuccess
+		enrichInvalidatePass
+	)
+
 engramLoop:
 	for iter.Next() {
 		select {
@@ -449,6 +710,7 @@ engramLoop:
 		if eng == nil {
 			continue
 		}
+		ws := iter.CurrentWS()
 
 		if isEmbedPlugin {
 			// Skip engrams of a vault whose established dimension does not
@@ -467,9 +729,20 @@ engramLoop:
 			// Accumulate into micro-batch; flush when full.
 			microEngrams = append(microEngrams, eng)
 			microTexts = append(microTexts, eng.Concept+" "+eng.Content)
+			microVaults = append(microVaults, ws)
 			batchCount++
 			if len(microEngrams) >= microBatchSize {
 				flushMicroBatch()
+				if passInvalidated {
+					// No self-notify: the clear that invalidated this pass owns
+					// the wake-up (its finish closure and cancellation arm both
+					// call rp.Notify at exactly the right moment). A notify here
+					// spins — the reawakened pass is rejected by the same held
+					// boundary and re-notifies itself, measured at ~175k
+					// passes/sec for the clear's whole duration, starving
+					// unrelated vaults' scans.
+					break
+				}
 			}
 			if batchCount%100 == 0 {
 				runtime.Gosched()
@@ -477,79 +750,103 @@ engramLoop:
 			continue
 		}
 
-		// Non-embed (enrich) path: one-at-a-time as before.
-		if err := rp.processEnrichEngram(ctx, eng); err != nil {
-			if errors.Is(err, ErrNothingToEnrich) {
-				// Nothing to enrich is not a failure — mark the engram as
-				// enrichment-complete so it is not retried on the next scan.
-				slog.Debug("retroactive processor: nothing to enrich, marking complete",
-					"plugin", rp.plugin.Name(),
-					"engram_id", eng.ID.String())
-				if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, rp.flagBit); flagErr != nil {
-					slog.Warn("retroactive processor: failed to set digest flag after nothing-to-enrich",
+		// Non-embed (enrich) path: one-at-a-time as before. Keep the admission
+		// and its deferred release in this per-engram closure so every return
+		// path—including provider failures and cancellation—releases it.
+		action, processed := func() (enrichAction, int64) {
+			guard, current := rp.lockCurrentVault(ws, scanGenerations)
+			if !current {
+				return enrichInvalidatePass, 0
+			}
+			defer guard.release()
+
+			if err := rp.processEnrichEngram(ctx, eng); err != nil {
+				if errors.Is(err, ErrNothingToEnrich) {
+					// Nothing to enrich is not a failure — mark the engram as
+					// enrichment-complete so it is not retried on the next scan.
+					slog.Debug("retroactive processor: nothing to enrich, marking complete",
 						"plugin", rp.plugin.Name(),
-						"engram_id", eng.ID.String(),
-						"error", flagErr)
+						"engram_id", eng.ID.String())
+					if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, rp.flagBit); flagErr != nil {
+						slog.Warn("retroactive processor: failed to set digest flag after nothing-to-enrich",
+							"plugin", rp.plugin.Name(),
+							"engram_id", eng.ID.String(),
+							"error", flagErr)
+					}
+					rp.statsMu.Lock()
+					rp.stats.Processed++
+					rp.statsMu.Unlock()
+					batchCount++
+					return enrichContinue, 0
 				}
+				slog.Warn("retroactive processor: failed to process engram",
+					"plugin", rp.plugin.Name(),
+					"engram_id", eng.ID.String(),
+					"error", err)
 				rp.statsMu.Lock()
-				rp.stats.Processed++
+				rp.stats.Errors++
 				rp.statsMu.Unlock()
-				batchCount++
-				continue
-			}
-			slog.Warn("retroactive processor: failed to process engram",
-				"plugin", rp.plugin.Name(),
-				"engram_id", eng.ID.String(),
-				"error", err)
-			rp.statsMu.Lock()
-			rp.stats.Errors++
-			rp.statsMu.Unlock()
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return true
-			}
-			// Permanent per-engram failures — LLM-originated (bad output, parse
-			// error) or content-caused provider 4xx (400/413/422/404). Mark
-			// DigestEnrichFailed so the processor does not retry indefinitely
-			// (which would trip the circuit breaker) and, crucially, so
-			// ScanWithoutFlag excludes this engram on the next pass. A content 4xx
-			// that sorts first would otherwise re-break every pass and wedge every
-			// follower forever (#587). Continue so the rest of the batch drains.
-			// Storage/persistence errors are NOT latched — they are transient and
-			// retried once storage recovers.
-			if errors.Is(err, errLLMFailed) {
-				if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, DigestEnrichFailed); flagErr != nil {
-					slog.Warn("retroactive processor: failed to set DigestEnrichFailed",
-						"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", flagErr)
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return enrichReturnSuccess, 0
 				}
-				continue
+				// Permanent per-engram failures — LLM-originated (bad output, parse
+				// error) or content-caused provider 4xx (400/413/422/404). Mark
+				// DigestEnrichFailed so the processor does not retry indefinitely
+				// (which would trip the circuit breaker) and, crucially, so
+				// ScanWithoutFlag excludes this engram on the next pass. A content 4xx
+				// that sorts first would otherwise re-break every pass and wedge every
+				// follower forever (#587). Continue so the rest of the batch drains.
+				// Storage/persistence errors are NOT latched — they are transient and
+				// retried once storage recovers.
+				if errors.Is(err, errLLMFailed) {
+					if flagErr := rp.store.SetDigestFlag(ctx, eng.ID, DigestEnrichFailed); flagErr != nil {
+						slog.Warn("retroactive processor: failed to set DigestEnrichFailed",
+							"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", flagErr)
+					}
+					return enrichContinue, 0
+				}
+				if errors.Is(err, circuit.ErrOpen) || IsProviderError(err) {
+					// Systemic provider condition (throttle, auth/config outage,
+					// transport): stop this pass so the processor cannot fan the
+					// failure across the pending queue. The engram stays pending and
+					// retries once the provider recovers.
+					return enrichStopPass, 0
+				}
+				return enrichContinue, 0
 			}
-			if errors.Is(err, circuit.ErrOpen) || IsProviderError(err) {
-				// Systemic provider condition (throttle, auth/config outage,
-				// transport): stop this pass so the processor cannot fan the
-				// failure across the pending queue. The engram stays pending and
-				// retries once the provider recovers.
-				break engramLoop
-			}
-			continue
-		}
 
-		if err := rp.store.SetDigestFlag(ctx, eng.ID, rp.flagBit); err != nil {
-			slog.Warn("retroactive processor: failed to set digest flag",
-				"plugin", rp.plugin.Name(),
-				"engram_id", eng.ID.String(),
-				"error", err)
+			if err := rp.store.SetDigestFlag(ctx, eng.ID, rp.flagBit); err != nil {
+				slog.Warn("retroactive processor: failed to set digest flag",
+					"plugin", rp.plugin.Name(),
+					"engram_id", eng.ID.String(),
+					"error", err)
+				rp.statsMu.Lock()
+				rp.stats.Errors++
+				rp.statsMu.Unlock()
+				return enrichContinue, 0
+			}
+
 			rp.statsMu.Lock()
-			rp.stats.Errors++
+			rp.stats.Processed++
+			processed := rp.stats.Processed
 			rp.statsMu.Unlock()
+			batchCount++
+			return enrichContinue, processed
+		}()
+
+		switch action {
+		case enrichStopPass:
+			break engramLoop
+		case enrichReturnSuccess:
+			return true
+		case enrichInvalidatePass:
+			// No self-notify — see the micro-batch invalidation branch above.
+			passInvalidated = true
+			break engramLoop
+		}
+		if processed == 0 {
 			continue
 		}
-
-		rp.statsMu.Lock()
-		rp.stats.Processed++
-		processed := rp.stats.Processed
-		rp.statsMu.Unlock()
-
-		batchCount++
 
 		if batchCount%100 == 0 {
 			runtime.Gosched()
@@ -578,7 +875,8 @@ engramLoop:
 		}
 	}
 
-	// Flush any remaining micro-batch at end of iterator.
+	// Flush any remaining micro-batch at end of iterator. An invalidated pass
+	// does NOT re-notify here — see the micro-batch invalidation branch.
 	flushMicroBatch()
 
 	// One summary line per pass instead of one per engram — a mismatched

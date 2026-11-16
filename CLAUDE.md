@@ -109,9 +109,11 @@ Distilled from real decisions across the project's history (each traced to its P
     medical vault is different again) where it is wrong or a silent no-op. A sample vault
     (e.g. a maintainer's own) is for FINDING bugs and VALIDATING generalization on messy real
     data — never for tuning a constant into the product. Everyone calibrates their own vault;
-    we ship mechanisms and hints, not their answers. (The semantic-abstention floor self-
-    measures each vault's embedding-anisotropy baseline instead of shipping bge-small's; #712
-    currency was held partly because its version-marker vocabulary was one-vault-specific.)
+    we ship mechanisms and hints, not their answers. (The semantic-abstention floor is the
+    hint-plus-override form, not the self-derived one: it is looked up per embed MODEL and a
+    vault can override it with `semantic_floor`; measuring each vault's own anisotropy baseline
+    is not built. #712 currency was held partly because its version-marker vocabulary was
+    one-vault-specific.)
 
 ---
 

@@ -108,7 +108,7 @@ func (ps *PebbleStore) PurgeExpiredIdempotency(ctx context.Context, maxAge time.
 				return deleted, fmt.Errorf("purge idempotency: batch delete: %w", err)
 			}
 		}
-		if err := batch.Commit(pebble.NoSync); err != nil {
+		if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 			batch.Close()
 			return deleted, fmt.Errorf("purge idempotency: batch commit: %w", err)
 		}

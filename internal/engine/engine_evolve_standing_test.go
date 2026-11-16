@@ -491,7 +491,7 @@ var evolveFieldBuckets = map[string]map[string]string{
 // appear in exactly one bucket, and the "inherited" bucket is then asserted
 // BEHAVIORALLY against a predecessor written with distinctive values.
 //
-// COG-34: a content-replacing verb carries every non-content-derived field of
+// COG-37: a content-replacing verb carries every non-content-derived field of
 // the record it replaces, and the split is an explicit exhaustive classification
 // pinned here.
 func TestEvolve_FieldCensus(t *testing.T) {
@@ -525,7 +525,7 @@ func TestEvolve_FieldCensus(t *testing.T) {
 		sort.Strings(unclassified)
 		t.Fatalf("storage.Engram field(s) %v are not classified in evolveFieldBuckets. "+
 			"A content-replacing verb must decide EXPLICITLY whether each field is carried, "+
-			"reset, content-derived or structural (COG-34) — add each one to a bucket with a "+
+			"reset, content-derived or structural (COG-37) — add each one to a bucket with a "+
 			"reason, and make evolveAtInternal do what the bucket says.", unclassified)
 	}
 

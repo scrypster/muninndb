@@ -18,7 +18,14 @@ const (
 	// engine.go's measured note says is unreachable without near-verbatim
 	// wording (cos >= 0.9200).
 	RelevanceStrong = "strong"
-	// RelevanceModerate: real absolute evidence, clear of the noise band.
+	// RelevanceModerate: absolute evidence at or above twice the default gate
+	// (0.2 on ACT-R vaults) and below the strong edge. Evidence, not whether
+	// the row answers the query: on production vaults most moderate rows were
+	// not directly useful, and fluent questions a vault cannot answer land
+	// here because a moderate score can come almost entirely from semantic
+	// similarity to the vault's general subject matter, with little or none of
+	// the query's own wording matched (decision record, "Honest relevance
+	// labels").
 	RelevanceModerate = "moderate"
 	// RelevanceWeak: within one doubling of this vault's calibration gate —
 	// which COG-26 deliberately placed just above the model's MEASURED

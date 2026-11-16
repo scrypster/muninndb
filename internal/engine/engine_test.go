@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
@@ -17,22 +19,33 @@ import (
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
+// openMemPebble opens Pebble with the production options (storage.DefaultOptions)
+// on a fresh in-memory filesystem. Every code path is the one a server runs —
+// pebble.Sync writes, the WAL, flushes, compactions — but the fsyncs those
+// paths issue cost nothing. On a real disk the open alone paid ~50-70ms of
+// directory/MANIFEST fsyncs and every synced write a few ms more; across the
+// ~500 tests built on testEnv that was the largest single cost in this
+// package's wall time. A test that needs the bytes to survive a process
+// restart, or that inspects files on disk, opens its own store instead (see
+// openRCEnv, which shares one vfs.FS across a close and reopen).
+func openMemPebble(t testing.TB) *pebble.DB {
+	t.Helper()
+	opts := storage.DefaultOptions()
+	opts.FS = vfs.NewMem()
+	db, err := storage.OpenPebble("engine-test-db", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
 // testEnv wires up a fully functional Engine with real storage and FTS,
-// using a temporary directory that is cleaned up after the test.
+// on an in-memory filesystem (openMemPebble).
 // testEnv takes testing.TB so benchmarks (BenchmarkRecallContradictionGate)
 // can build the same environment tests do.
 func testEnv(t testing.TB) (*Engine, func()) {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "muninndb-engine-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	db, err := storage.OpenPebble(dir, storage.DefaultOptions())
-	if err != nil {
-		os.RemoveAll(dir)
-		t.Fatal(err)
-	}
+	db := openMemPebble(t)
 
 	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 1000})
 	ftsIdx := fts.New(db)
@@ -46,7 +59,6 @@ func testEnv(t testing.TB) (*Engine, func()) {
 	return eng, func() {
 		eng.Stop()    // stop FTS worker, novelty worker, coherence flush, autoAssoc
 		store.Close() // stop PebbleStore background workers and close db
-		os.RemoveAll(dir)
 	}
 }
 
@@ -56,16 +68,7 @@ func testEnv(t testing.TB) (*Engine, func()) {
 // is drained before the DB is closed — preventing flaky panics in adjacent tests.
 func testEnvWithStore(t *testing.T) (*Engine, *storage.PebbleStore, func()) {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "muninndb-engine-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	db, err := storage.OpenPebble(dir, storage.DefaultOptions())
-	if err != nil {
-		os.RemoveAll(dir)
-		t.Fatal(err)
-	}
+	db := openMemPebble(t)
 
 	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 1000})
 	ftsIdx := fts.New(db)
@@ -78,12 +81,11 @@ func testEnvWithStore(t *testing.T) (*Engine, *storage.PebbleStore, func()) {
 	return eng, store, func() {
 		eng.Stop()
 		// store.Close() may panic or error if db was already closed by the test;
-		// recover gracefully so cleanup always removes the temp dir.
+		// recover gracefully so cleanup always completes.
 		func() {
 			defer func() { recover() }()
 			store.Close()
 		}()
-		os.RemoveAll(dir)
 	}
 }
 
@@ -125,6 +127,27 @@ func (a *ftsAdapter) Search(ctx context.Context, ws [8]byte, query string, topK 
 		out[i] = activation.ScoredID{ID: storage.ULID(r.ID), Score: r.Score}
 	}
 	return out, nil
+}
+
+// SearchLive mirrors the production adapter (activation.NewFTSAdapter), so
+// every engine test built on testEnv recalls through the same retired-aware
+// keyword path a server does.
+func (a *ftsAdapter) SearchLive(ctx context.Context, ws [8]byte, query string, topK int, retired func([16]byte) bool, shadowBudget int) ([]activation.ScoredID, []activation.ScoredID, error) {
+	live, shadows, err := a.idx.SearchLive(ctx, ws, query, topK, retired, shadowBudget)
+	if err != nil {
+		return nil, nil, err
+	}
+	conv := func(in []fts.ScoredID) []activation.ScoredID {
+		if in == nil {
+			return nil
+		}
+		out := make([]activation.ScoredID, len(in))
+		for i, r := range in {
+			out[i] = activation.ScoredID{ID: storage.ULID(r.ID), Score: r.Score}
+		}
+		return out
+	}
+	return conv(live), conv(shadows), nil
 }
 
 // ftsTrigAdapter converts fts.ScoredID to trigger.ScoredID.

@@ -286,6 +286,24 @@ func (w *RESTEngineWrapper) ReindexFTSVault(ctx context.Context, vaultName strin
 	return w.engine.ReindexFTSVault(ctx, vaultName)
 }
 
+func (w *RESTEngineWrapper) RebuildVectorIndex(ctx context.Context, vaultName string) error {
+	if w.hnswReg == nil {
+		return fmt.Errorf("no vector index configured")
+	}
+	names, err := w.engine.Store().ListVaultNames()
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, n := range names {
+		found = found || n == vaultName
+	}
+	if !found {
+		return engine.ErrVaultNotFound
+	}
+	return w.hnswReg.RebuildVault(w.engine.Store().ResolveVaultPrefix(vaultName))
+}
+
 func (w *RESTEngineWrapper) ResetRepairWatermark(ctx context.Context, vaultName string, which engine.RepairWatermarkKind) error {
 	return w.engine.ResetRepairWatermark(ctx, vaultName, which)
 }
@@ -345,7 +363,10 @@ func (w *RESTEngineWrapper) Decide(ctx context.Context, vault, decision, rationa
 	if err != nil {
 		return nil, err
 	}
-	return &DecideResponse{ID: res.ID.String(), Warnings: res.Warnings}, nil
+	// DecideResponse has no notes field; an engine note (e.g. a concept
+	// derived from an over-cap decision) is carried in warnings rather than
+	// dropped, so the REST caller is told too without a wire-type change.
+	return &DecideResponse{ID: res.ID.String(), Warnings: append(res.Warnings, res.Notes...)}, nil
 }
 
 func (w *RESTEngineWrapper) Restore(ctx context.Context, vault, engramID string) (*RestoreResponse, error) {
@@ -399,12 +420,28 @@ func (w *RESTEngineWrapper) Explain(ctx context.Context, vault string, req *Expl
 	if err != nil {
 		return nil, err
 	}
+	// Components were never mapped here, so the web console's score panel
+	// (which reads this endpoint) showed 0 for every factor of every memory.
+	c := data.Components
 	return &ExplainResponse{
-		EngramID:    data.EngramID,
-		Concept:     data.Concept,
-		FinalScore:  data.FinalScore,
-		WouldReturn: data.WouldReturn,
-		Threshold:   data.Threshold,
+		EngramID:   data.EngramID,
+		Concept:    data.Concept,
+		FinalScore: data.FinalScore,
+		Components: ExplainComponents{
+			FullTextRelevance:     float64(c.FullTextRelevance),
+			SemanticSimilarity:    float64(c.SemanticSimilarity),
+			SemanticSimilarityRaw: float64(c.SemanticSimilarityRaw),
+			DecayFactor:           float64(c.DecayFactor),
+			HebbianBoost:          float64(c.HebbianBoost),
+			TransitionBoost:       float64(c.TransitionBoost),
+			EntityBoost:           float64(c.EntityBoost),
+			AccessFrequency:       float64(c.AccessFrequency),
+			Confidence:            data.Confidence,
+		},
+		WouldReturn:    data.WouldReturn,
+		Threshold:      data.Threshold,
+		WithheldReason: data.WithheldReason,
+		Note:           data.Note,
 	}, nil
 }
 

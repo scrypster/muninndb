@@ -50,6 +50,13 @@ components:
           type: integer
           format: int64
           description: "Unix timestamp in nanoseconds; zero means never."
+        lastError:
+          type: integer
+          format: int64
+          description: "Unix timestamp in nanoseconds of the most recent FAILED batch; zero means never failed."
+        lastBatchFailed:
+          type: boolean
+          description: "True while the most recent batch is one that failed; the next successful batch clears it. errors is cumulative and cannot say whether the worker is failing now."
         state:
           type: integer
           format: int32
@@ -288,6 +295,9 @@ components:
         actr_decay:
           type: number
           format: float
+          description: >-
+            Currently inert under ACT-R scoring (the base level is neutral for
+            every memory); a request that sets it is accepted and logged once.
         actr_heb_scale:
           type: number
           format: float
@@ -319,6 +329,14 @@ components:
         max_results:
           type: integer
           default: 10
+          description: >-
+            Maximum rows returned. The first N rows do not depend on it on
+            default (ACT-R) vaults. The response can exceed it in exactly one
+            case: a returned memory with an unresolved declared contradiction
+            whose disputing partner did not make the cut brings that partner
+            along — only the partner, at most one per returned memory, never
+            chained, at most min(max_results, 3) extra rows, reported as
+            conflict.adjacency_overflow.
         max_hops:
           type: integer
           default: 0
@@ -327,6 +345,17 @@ components:
         read_only:
           type: boolean
           description: "When true, suppress reinforcement side effects (TouchAccess and implicit feedback) for this recall. Always effectively true for observe-mode credentials."
+        exclude_associated:
+          type: boolean
+          description: >-
+            Omit the response's associated block (default false: included).
+        include_weak:
+          type: boolean
+          description: >-
+            Return the rows even when every one is relevance band weak. By
+            default a calibrated weak-only response is withheld (abstained,
+            abstained_reason weak_only, weak_available). Implied by a non-zero
+            threshold, any filter, and mode deep.
         weights:
           $ref: "#/components/schemas/Weights"
         filters:
@@ -348,6 +377,15 @@ components:
         mode:
           type: string
           enum: ["", "semantic", "recent", "balanced", "deep"]
+          description: >-
+            Recall-mode preset. semantic — high-precision vector match
+            (threshold 0.3); balanced — engine defaults; deep — 4 hops,
+            threshold 0.1; recent — ALIAS of balanced: engine-default scoring
+            and threshold. Any mode sent here replaces (ignores) the vault's
+            default recall_mode. recent declares session-orientation intent
+            only; it does NOT list recent memories or favour recency beyond
+            the default ranking. For topic-free orientation use the session
+            timeline or a tag filter scoped to your own memories.
 
     ScoreComponents:
       type: object
@@ -379,29 +417,69 @@ components:
           type: number
           format: float
           description: >-
-            Raw BEFORE the per-query 1/maxRaw rescale, clamped to [0,1] and
-            multiplied by confidence. Unlike `score` it is not relative to this
-            query's candidate set, so 0.9 means the same thing on a good query
-            and a garbage one. This is the quantity the abstention gate compares
-            and the quantity relevance_band is derived from.
+            min(content_match, 1) multiplied by confidence — not relative to
+            this query's candidate set, so 0.9 means the same thing on a good
+            query and a garbage one. This is the quantity the abstention gate
+            compares and relevance_band is derived from, and on default (ACT-R)
+            vaults it is also `score`, the quantity that orders the results
+            (COG-35).
         decay_factor:
           type: number
           format: float
+          description: >-
+            The decay factor scoring APPLIED. 1.0 (no attenuation) under ACT-R
+            (the default) and rrf, which have no age input. Under weighted_sum
+            and CGDN it is the Ebbinghaus factor exp(-days since last access /
+            stability), floored at 0.05.
         hebbian_boost:
           type: number
           format: float
+          description: >-
+            Learned co-activation with a recently recalled memory.
+            ASSOCIATION evidence, not match strength (COG-35). On default
+            (ACT-R) vaults it does not change the order of results except to
+            break an exact content tie (with a real embedder matched rows
+            practically never tie; ties occur on keyword-only vaults); a row whose score is 0 was injected
+            by association evidence and follows every matched row. On rrf and
+            weighted_sum vaults it still contributes to score.
         transition_boost:
           type: number
           format: float
+          description: >-
+            Predictive activation: how often this memory followed the
+            previous recall's results.
+            ASSOCIATION evidence, not match strength (COG-35). On default
+            (ACT-R) vaults it does not change the order of results except to
+            break an exact content tie (with a real embedder matched rows
+            practically never tie; ties occur on keyword-only vaults); a row whose score is 0 was injected
+            by association evidence and follows every matched row. On rrf and
+            weighted_sum vaults it still contributes to score.
         entity_boost:
           type: number
           format: float
+          description: >-
+            Rarity-weighted named entities shared with the top matches
+            (capped at 0.30).
+            ASSOCIATION evidence, not match strength (COG-35). On default
+            (ACT-R) vaults it does not change the order of results except to
+            break an exact content tie (with a real embedder matched rows
+            practically never tie; ties occur on keyword-only vaults); a row whose score is 0 was injected
+            by association evidence and follows every matched row. On rrf and
+            weighted_sum vaults it still contributes to score.
         access_frequency:
           type: number
           format: float
+          description: >-
+            The access-frequency signal scoring APPLIED. 0 under ACT-R (the
+            default), rrf and CGDN, which do not use access history. Under
+            weighted_sum it is log1p(access_count)/log1p(100).
         recency:
           type: number
           format: float
+          description: >-
+            The recency factor scoring APPLIED. 1.0 (no attenuation) under
+            ACT-R (the default), rrf and CGDN, which apply none. Under
+            weighted_sum it halves every 7 days since last access.
         raw:
           type: number
           format: float
@@ -424,11 +502,22 @@ components:
           type: number
           format: float
           description: >-
-            RELATIVE to this query's own best candidate: the 1/maxRaw rescale
-            pins the argmax of ANY query near the top of the range, including a
-            query this vault cannot answer. It ORDERS results. Judge relevance
-            by relevance_band (or score_components.absolute_score), never by
-            this.
+            What ORDERS the results. On default (ACT-R) vaults it is the
+            absolute content score (content match x confidence), equal to
+            score_components.absolute_score except where a DECLARED
+            relationship moved it: an unresolved declared contradiction
+            demotes a row to 0.9x; a declared-supersession head takes its
+            chain's best score and the superseded row sits 0.01 below it; a
+            substituted version head carries its predecessor's score.
+            Association evidence is reported in hebbian_boost /
+            transition_boost / entity_boost and only breaks EXACT ties — with
+            a real embedder matched rows practically never tie (0 exact ties
+            in 27,000 adjacent top-10 pairs measured), so on embedder vaults it
+            does not change their order; ties occur on keyword-only vaults. A row injected by association has score 0 and follows
+            every matched row; the first N rows do not depend on max_results
+            (COG-35). On rrf and weighted_sum vaults it is RELATIVE to this
+            query's best candidate. Judge each row by relevance_band, which
+            reports evidence, not whether the row answers the query.
         confidence:
           type: number
           format: float
@@ -442,14 +531,25 @@ components:
           enum: [strong, moderate, weak, filter_match, uncalibrated]
           description: >-
             #773 score-presentation honesty. The ABSOLUTE relevance band for
-            this row, derived from score_components.absolute_score against THIS
-            VAULT's own calibration — its resolved default gate (which COG-26
-            deliberately placed just above the embed model's measured
-            out-of-domain noise ceiling) and its resolved content-channel
-            ceiling. strong = at or above half the ceiling (near-verbatim
-            evidence); moderate = clear of the noise band; weak = within one
-            doubling of the noise floor, i.e. a NEIGHBOUR rather than
-            necessarily an ANSWER; filter_match = admitted below the relevance
+            this row, derived from score_components.absolute_score against fixed
+            band edges — twice the default gate (0.2 on ACT-R vaults; the gate
+            sits just above the embedding model's measured out-of-domain noise
+            ceiling, COG-26, and the semantic floor is a per-model value an
+            operator can override) and half the vault's content-channel
+            ceiling. Nothing is measured per vault. The band measures evidence, not answerability: it does not
+            report whether the memory answers the query, and nothing in
+            MuninnDB computes that. strong = at or above half the ceiling —
+            a close match, the band most likely to answer
+            directly; moderate = at or above the weak edge — evidence above the
+            noise floor, a candidate to verify, not an established answer: often on topic
+            without answering, and a fluent question the vault cannot answer
+            often produces moderate rows, because a moderate score can come
+            almost entirely from semantic similarity to the vault's general
+            subject matter with little of the query's wording matched; weak =
+            within one doubling of the noise floor — hard to tell from noise
+            and usually not the answer, though a real match can band this low
+            (for example while its embedding is still pending);
+            filter_match = admitted below the relevance
             bar by an explicit tag filter (COG-5 S1) — the filter defined the
             set, not relevance; uncalibrated = this row's absolute score is not
             on a bandable scale, with relevance_band_basis naming why.
@@ -506,6 +606,10 @@ components:
         relevance:
           type: number
           format: float
+          description: >-
+            The memory's stored Ebbinghaus relevance. Omitted on ACT-R recalls
+            (the default), where it is not a scoring input; reported when the
+            vault scores with weighted_sum or rrf.
         source_type:
           type: string
         state:
@@ -644,8 +748,11 @@ components:
         adjacency_overflow:
           type: integer
           description: >-
-            How many rows beyond max_results this response carries in order to
-            keep a conflict cluster whole. Never applied silently.
+            How many rows beyond max_results this response carries: each is the
+            disputing partner of a returned memory that did not make the cut —
+            at most one per returned memory, never chained, at most
+            min(max_results, 3). A partner the cap kept out is still named on
+            the row (unresolved_contradiction.with, partner_in_results=false).
 
     ConflictPairInfo:
       type: object
@@ -712,6 +819,17 @@ components:
       properties:
         query_id:
           type: string
+          description: >-
+            Identifies this recall. A normal recall's id is the 26-character
+            ULID of its persisted recall event — on every path, including an
+            empty result. A read-only recall (read_only, or an observe-mode
+            key) persists nothing and returns a self-verifying id beginning
+            "ro2." (or "ro0." when the server has no auth secret; "ro1." ids
+            from earlier builds are still accepted). Ids stay
+            valid across restarts. Labelling a recall's results
+            (muninn_feedback, and the ready-to-copy `feedback` block) is
+            MCP-only; this REST surface carries the id but no feedback block
+            and has no feedback endpoint.
         total_found:
           type: integer
         activations:
@@ -737,6 +855,17 @@ components:
             or a post-load embedding fetch failed — so semantic_similarity may be
             understated. Query-granular and coarse (set on any such failure even if
             the primary vector search produced real scores). Omitted when false.
+        semantic_degraded_reason:
+          type: string
+          enum: [embed_timeout, embed_unavailable, embed_zero_vector, stored_embedding_read]
+          description: >-
+            Why semantic_degraded is set. embed_timeout: the query embed did not
+            arrive within recall's embed budget (the embedder was busy — e.g. a
+            backfill batch — or slow), so recall ran keyword-only; the backend is
+            up. embed_unavailable: the embed call failed. embed_zero_vector: the
+            embedder returned an empty/all-zero vector. stored_embedding_read: a
+            post-load stored-embedding read failed. Omitted when semantic_degraded
+            is false.
         abstained:
           type: boolean
           description: >-
@@ -745,7 +874,59 @@ components:
             relevance bar or was filtered. Empty iff abstained is false.
         abstained_reason:
           type: string
-          enum: [no_candidates, below_threshold, filtered, superseded_only, ambiguous_version]
+          enum: [no_candidates, below_threshold, filtered, superseded_only, ambiguous_version, weak_only]
+          description: >-
+            weak_only: the response was calibrated (the embedding model in use
+            has a noise floor on record, or the operator set one) and every row it would have returned was band weak, so
+            the rows were withheld; weak_available says how many, and
+            include_weak returns them. abstained false does not mean the vault
+            holds an answer: an unanswerable but fluent question often returns
+            moderate rows.
+        weak_available:
+          type: integer
+          description: >-
+            Set only with abstained_reason weak_only: how many weak rows were
+            withheld. Repeat the request with include_weak true to receive them.
+        associated:
+          type: array
+          description: >-
+            Default (ACT-R) vaults only (COG-35): memories that did NOT match
+            the query but are associated with a returned one (they share a
+            rare named entity with it) and did not make the cut. At most 3;
+            the array, as JSON with <, > and & escaped to \u003c etc. and
+            the "associated" key not counted, is at most 600 bytes — an item
+            too long on its own is shortened (truncated true), never dropped.
+            Not counted in total_found or against max_results, never
+            abstention-relevant. Absent when empty or when exclude_associated
+            is set. Its ids are recorded as served with this query_id (a
+            label on one is stored as an associated item, rank 0).
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              concept:
+                type: string
+              why:
+                type: string
+                description: The evidence, e.g. shares entity "X" with returned <id>.
+              strength:
+                type: number
+                format: float
+                description: Association evidence (0..0.30), not a match score.
+              basis:
+                type: string
+                enum: [associated_not_matched]
+              truncated:
+                type: boolean
+                description: >-
+                  concept and/or the entity name in why were shortened (on a
+                  character boundary, ending in "…") to fit. Absent when not.
+        associated_omitted:
+          type: integer
+          description: >-
+            How many association-only memories qualified for associated but
+            were left out by its 3-item or 600-byte cap. Absent when 0.
         conflict:
           $ref: "#/components/schemas/ConflictBlock"
 
@@ -927,10 +1108,12 @@ components:
       properties:
         entries:
           type: array
+          description: "Live engrams (soft-deleted excluded) created since `since`, newest first."
           items:
             $ref: "#/components/schemas/SessionItem"
         total:
           type: integer
+          description: "Live engrams in the whole `since` window, not just this page."
         offset:
           type: integer
         limit:
@@ -1123,12 +1306,33 @@ components:
         decay_factor:
           type: number
           format: double
+          description: >-
+            The decay factor scoring APPLIED. 1.0 (no attenuation) under ACT-R
+            (the default) and rrf, which have no age input. Under weighted_sum
+            and CGDN it is the Ebbinghaus factor exp(-days since last access /
+            stability), floored at 0.05.
         hebbian_boost:
           type: number
           format: double
+        transition_boost:
+          type: number
+          format: double
+        entity_boost:
+          type: number
+          format: double
+          description: >-
+            With hebbian_boost and transition_boost, the row's association
+            evidence. On default (ACT-R) vaults none of the three changes the
+            order of results except to break an exact content tie (COG-35) —
+            which, with a real embedder, practically never occurs between
+            matched rows; ties occur on keyword-only vaults.
         access_frequency:
           type: number
           format: double
+          description: >-
+            The access-frequency signal scoring APPLIED. 0 under ACT-R (the
+            default), rrf and CGDN, which do not use access history. Under
+            weighted_sum it is log1p(access_count)/log1p(100).
         confidence:
           type: number
           format: double
@@ -1143,6 +1347,11 @@ components:
         final_score:
           type: number
           format: double
+          description: >-
+            The row's recall score for this query. On default (ACT-R) vaults
+            it is the absolute content score that orders recall (as declared
+            contradiction/supersession adjust it), and it equals the `score`
+            the same memory carries in a recall row (COG-35).
         components:
           $ref: "#/components/schemas/ExplainComponents"
         fts_matches:
@@ -1158,6 +1367,14 @@ components:
         threshold:
           type: number
           format: double
+        withheld_reason:
+          type: string
+          enum: [weak_only]
+          description: >-
+            Set when the memory clears the bar but a default recall withholds
+            the whole weak-only response; would_return is then false.
+        note:
+          type: string
 
     SetStateRequest:
       type: object
@@ -1435,6 +1652,10 @@ components:
           type: string
           nullable: true
           enum: ["", semantic, recent, balanced, deep]
+          description: >-
+            Default recall-mode preset for this vault. recent is an alias of
+            balanced (identical scoring and threshold); it is not a recency
+            filter.
 
     VaultConfig:
       type: object
@@ -2621,6 +2842,12 @@ paths:
     get:
       tags: [vault]
       summary: "Retrieve recent write activity (session timeline) for a vault."
+      description: >
+        Live engrams created at or after `since`, NEWEST first, paged by
+        `offset`/`limit` over that order (limit is clamped to 500).
+        Soft-deleted engrams — forgotten, or superseded by an evolve — are
+        excluded. `total` is the exact count of live engrams in the window, so
+        `offset + len(entries) < total` means more remain.
       security:
         - BearerAuth: []
       parameters:
@@ -3427,6 +3654,42 @@ paths:
           $ref: "#/components/responses/NotCortex"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/admin/vaults/{name}/reindex-hnsw:
+    post:
+      tags: [admin-vaults]
+      summary: "Rebuild a vault's vector (HNSW) graph in the background."
+      description: "Returns 202 at once. The vault keeps serving vector search from its current graph until the rebuilt graph replaces it in one step. Progress is the hnsw_rebuild field of /api/admin/observability. Node-local: the graph is per node."
+      security:
+        - AdminSession: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "202":
+          description: "Rebuild queued."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  vault:
+                    type: string
+                  state:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "A rebuild of this vault is already in progress."
+        "421":
+          $ref: "#/components/responses/NotCortex"
         "500":
           $ref: "#/components/responses/InternalServerError"
 

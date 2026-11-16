@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/scrypster/muninndb/internal/embedlane"
 	"github.com/sugarme/tokenizer"
 	"github.com/sugarme/tokenizer/pretrained"
 	ort "github.com/yalue/onnxruntime_go"
@@ -23,8 +24,22 @@ import (
 const (
 	localModelDim   = 384 // bge-small-en-v1.5 output dimension
 	localMaxTokens  = 256 // model max sequence length
-	localMaxBatch   = 64  // texts per ORT inference call (DynamicAdvancedSession)
 	ortSentinelFile = ".ort_extracted"
+	// localMaxBatch is the most texts one ORT inference call carries. Every
+	// text is padded to localMaxTokens, so inference cost and its transient
+	// memory scale linearly with the batch while throughput does not improve:
+	// measured with the bundled model (512 texts, chunk 8/16/32/64) throughput
+	// was flat at ~48-57 items/s while peak RSS rose ~670-790 MB / ~1.1 GB /
+	// ~1.4 GB / ~2.2-2.6 GB. 8 keeps the batch lane's peak under 1 GB on a
+	// 2 GB host and bounds how long one call holds the batch lane (~0.2 s).
+	// BatchEmbedder and the retroactive processor both chunk by MaxBatchSize.
+	localMaxBatch = 8
+	// localQueryLaneMaxTexts caps what may take the query lane. The query lane
+	// runs CONCURRENTLY with the batch lane on the shared session, so whatever
+	// it admits adds to peak memory; a marked call larger than this (an
+	// unusually long multi-phrase recall context) takes the batch lane instead
+	// — slower, never unbounded.
+	localQueryLaneMaxTexts = 4
 )
 
 // ortInitOnce guards the global ORT environment — there can only be one.
@@ -41,10 +56,49 @@ var (
 //
 // Uses DynamicAdvancedSession so tensors are allocated per-call at the actual
 // batch size, supporting variable-sized batches up to localMaxBatch.
+//
+// Concurrency: inference runs in two lanes, each admitting one call at a time
+// (see embedLane). The QUERY lane serves calls the caller marked with
+// embedlane.WithQuery — recall's query embed, a short text someone is waiting
+// on. Everything else (write-path and retroactive embeds) takes the BATCH lane.
+// A batch in progress therefore never delays a query embed, while there is
+// still never more than one batch in flight — the batch lane is the memory cap
+// that the old single mutex provided (one 64-text call took RSS from ~0.4 GB to
+// ~1.4 GB; two concurrent ones to ~2.8 GB). Both lanes share one ORT session:
+// OrtApi::Run is documented safe for concurrent calls on one session, the Go
+// wrapper's DynamicAdvancedSession.Run keeps no per-call state on the session,
+// and the tokenizer is read-only after load. A second session would cost
+// ~85 MB for no measured latency gain.
+//
+// Bit-exactness is a property of the CONCURRENCY LEVEL, not of the design.
+// At the 2-way concurrency these lanes permit, vectors are bit-identical to a
+// serial run (pinned by TestLocalProvider_LanesProduceIdenticalVectors;
+// review stress: 0 mismatches in 12,000 raw runs at 2-way, 16,000 at 8-way).
+// It is NOT guaranteed under heavier concurrency: at 16-way, 3 of 136,000 runs
+// on a shared session and 1 of 72,000 on separate sessions differed in every
+// component (max diff ~0.005, cosine ~0.9995, never NaN) — ORT's CPU kernels
+// under oversubscription, not session sharing. Do not raise a lane's capacity
+// or add lanes without re-running that bit-equality stress.
+//
+// Independently of scheduling, the bundled model is dynamically quantized, so
+// a text's vector depends on its batch-mates: alone vs inside a batch, cosine
+// p50 0.9994 (min 0.9989); batch of 8 vs 64, min 0.9985. An exact own-text
+// match therefore scores ~0.998, never 1.0 — nothing may assume self-cosine
+// 1.0 — and re-embedding after the 64 -> 8 batch change moves a stored vector
+// by at most that much.
 type LocalProvider struct {
-	// mu serialises ORT session calls; DynamicAdvancedSession is not
-	// guaranteed thread-safe from the Go wrapper's perspective.
+	// mu serialises Init and Close. Both also hold BOTH lanes while they run,
+	// so the session is never created, probed or destroyed under an inference.
 	mu sync.Mutex
+
+	lanesOnce sync.Once
+	queryLane *embedLane
+	batchLane *embedLane
+	// onLaneAcquired / onLaneReleased, when non-nil, are called with the lane
+	// name as a call enters / leaves its lane. Test-only instrumentation: it is
+	// how tests observe ordering and in-flight counts without sleeping.
+	onLaneAcquired func(lane string)
+	onLaneReleased func(lane string)
 
 	session *ort.DynamicAdvancedSession
 	tok     *tokenizer.Tokenizer
@@ -70,6 +124,11 @@ func (p *LocalProvider) MaxBatchSize() int { return localMaxBatch }
 func (p *LocalProvider) Init(ctx context.Context, cfg ProviderHTTPConfig) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	release, err := p.holdAllLanes(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 
 	dataDir := cfg.DataDir
 	if dataDir == "" {
@@ -465,6 +524,14 @@ func (p *LocalProvider) packBatchLocked(texts []string) ([]ort.Value, []int64, f
 // call for the whole batch, and returns the concatenated embeddings
 // (len(texts) * dim floats). The caller (BatchEmbedder) ensures
 // len(texts) <= localMaxBatch.
+//
+// The call first waits for its lane (query or batch — see LocalProvider) and
+// gives up with ctx's error the moment ctx ends while it is queued, so a
+// caller's deadline is honoured while waiting. An inference that has STARTED
+// cannot be interrupted (ORT offers no cancellation here), so a deadline
+// shorter than one inference — roughly 20-40 ms for a short query on the
+// bundled model, ~0.2 s for a full batch — can still be overrun by up to that
+// much.
 func (p *LocalProvider) EmbedBatch(ctx context.Context, texts []string) ([]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -473,8 +540,19 @@ func (p *LocalProvider) EmbedBatch(ctx context.Context, texts []string) ([]float
 		return nil, err
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	lane := p.laneFor(ctx, len(texts))
+	if err := lane.acquire(ctx); err != nil {
+		return nil, err
+	}
+	if p.onLaneAcquired != nil {
+		p.onLaneAcquired(lane.name)
+	}
+	defer func() {
+		if p.onLaneReleased != nil {
+			p.onLaneReleased(lane.name)
+		}
+		lane.release()
+	}()
 
 	if p.session == nil {
 		return nil, fmt.Errorf("local provider not initialized")
@@ -524,12 +602,72 @@ func (p *LocalProvider) EmbedBatch(ctx context.Context, texts []string) ([]float
 func (p *LocalProvider) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Wait for any in-flight inference: destroying the session under a Run
+	// would be a use-after-free in ORT.
+	release, err := p.holdAllLanes(context.Background())
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	if p.session != nil {
 		_ = p.session.Destroy()
 		p.session = nil
 	}
 	return nil
+}
+
+// lanes returns the provider's two lanes, creating them on first use so the
+// zero-value LocalProvider{} (how NewEmbedService and tests construct it)
+// works.
+func (p *LocalProvider) lanes() (query, batch *embedLane) {
+	p.lanesOnce.Do(func() {
+		p.queryLane = newEmbedLane("query")
+		p.batchLane = newEmbedLane("batch")
+	})
+	return p.queryLane, p.batchLane
+}
+
+// HoldLaneForTest occupies the query lane (query=true) or the batch lane
+// exactly as an in-flight inference would, and returns its release. It is a
+// test seam for packages that cannot reach the lanes directly — recall's
+// degrade path models "the embedder is busy" with it deterministically instead
+// of racing a real multi-second batch. Production code never calls it.
+func (p *LocalProvider) HoldLaneForTest(query bool) (release func()) {
+	q, b := p.lanes()
+	l := b
+	if query {
+		l = q
+	}
+	_ = l.acquire(context.Background()) // Background never ends: cannot fail
+	return l.release
+}
+
+// laneFor picks the lane from the caller's explicit signal — never from the
+// call's shape: a single-text write embed is still background work.
+func (p *LocalProvider) laneFor(ctx context.Context, n int) *embedLane {
+	query, batch := p.lanes()
+	if embedlane.IsQuery(ctx) && n <= localQueryLaneMaxTexts {
+		return query
+	}
+	return batch
+}
+
+// holdAllLanes acquires both lanes (batch first, then query — the only code
+// path that takes two, so the order cannot deadlock) for Init and Close.
+func (p *LocalProvider) holdAllLanes(ctx context.Context) (func(), error) {
+	query, batch := p.lanes()
+	if err := batch.acquire(ctx); err != nil {
+		return nil, err
+	}
+	if err := query.acquire(ctx); err != nil {
+		batch.release()
+		return nil, err
+	}
+	return func() {
+		query.release()
+		batch.release()
+	}, nil
 }
 
 // ensureExtracted writes embedded assets to modelDir if not already present.
