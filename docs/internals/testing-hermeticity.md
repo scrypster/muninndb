@@ -33,8 +33,9 @@ the table as it shipped in #722 — verified against `develop`, not the draft as
 | 1 | Association workers (autoAssoc, neighborWorker, goalLinkWorker) — fire-and-forget off `Write()`; create RelSupports/associations | `phase5Traverse` BFS candidate pool | `WaitIdle()` on each (`jobWG`-tracked) — folded into `Engine.waitWriteTimeIdle()` (`internal/engine/engine.go`) |
 | 2 | Fire-and-forget goroutines (`RecordFeedback` TouchAccess/scoring, `Read` reinforcement, #682), tracked by `Engine.fireAndForgetWG` | AccessCount, reinforcement signal | `Engine.waitFireAndForgetIdle()` (`fireAndForgetWG.Wait()`) — separate from `waitWriteTimeIdle` because it drains a different WaitGroup |
 | 3 | Async FTS indexer (`ftsWorker`, decoupled from write hot path) | FTS candidate search — the ONLY recall path when embeddings are noop/zero | `ftsWorker.Flush(timeout)` — folded into `waitWriteTimeIdle()` |
-| 4 | Counter-coalescer (100ms flush ticker, `internal/storage/counter_coalescer.go`) | AccessCount/vault-count persistence → ACT-R base-level | white-box `counterCoalescer.flush()` called directly in `internal/storage` package tests; at the engine layer, `store.Close()` (not `db.Close()`) drains it before the store closes |
+| 4 | Counter-coalescer (100ms flush ticker, `internal/storage/counter_coalescer.go`) | AccessCount/vault-count persistence → ACT-R base-level | white-box `counterCoalescer.flush()` called directly in `internal/storage` package tests; at the engine layer, `store.Close()` (not `db.Close()`) drains it before the store closes, and `PebbleStore.FlushCounters()` flushes it in place. **Trap:** it is NOT covered by `WaitWriteTimeIdle`, so a "store unchanged" before/after snapshot flakes when a seed write's coalesced 0x15 count lands between the two snapshots and looks like a write by the operation under test (label pipeline, `TestLabels_ReadOnlyRecallWritesNothing` — call `FlushCounters` and `DrainProvenance` before each snapshot) |
 | 5 | Activation/Hebbian log drain (`ActivationEngine.logCh` → `drainLog` → `assocLog`, read by `phase4HebbianBoost` on the NEXT call) | Hebbian co-activation boost applied to candidates associated with something recently activated | `ActivationEngine.WaitLogIdle()` (`internal/engine/activation/engine.go`) — folded into `Engine.waitWriteTimeIdle()`. To reset the log between independent scripted calls (not just drain it), call `Engine.resetActivationLogForVault` (`internal/engine/engine.go`), which calls `ActivationEngine.ResetLog` → `activation.ActivationLog.ResetVault`, **after** `waitWriteTimeIdle`, never before — a reset issued while a drain is still in flight is silently undone by the late-arriving entry. |
+| 6 | Write-time twin check (COG-36, only when `MUNINN_WRITE_RELATED` is not off): the shadow worker fed by the embed processor's `OnEmbedded` hook (`Engine.runWriteTwinWorker`) and the asynchronous homogeneity-guard computation | the `write twin flagged` shadow log, `muninn_write_twin_*` counters, and the per-vault guard the inline path reads | `writeTwin.waitIdle()` (an in-flight counter + cond covering queued jobs AND guard computations) — folded into `Engine.waitWriteTimeIdle()`. A test that needs a write's vector in the ring waits on the event itself (`awaitVector` with a large budget as a hang detector), never on a sleep; a test of the inline wait injects `writeTwin.after` instead of racing a real timer. |
 
 The Push/prospective-acceptance harness needed 1+3+5; the reinforcement tests needed 2+4.
 A test that touches recall ranking of freshly-written data plausibly needs all five —
@@ -98,3 +99,10 @@ See `drift-and-obligations.md` obligation 12: any new async worker or fire-and-f
 on the write or scoring path needs a `WaitIdle`/`Flush` seam, folded into
 `waitWriteTimeIdle()` (or documented here as its own drain), and any test asserting on its
 output must drain it deterministically — never `time.Sleep`.
+
+## No default addresses, no real home
+
+No test may use a daemon's default address (ports 8474, 8475, 8476, 8477, 8750), the network,
+or the real home directory, and in `cmd/muninn` the package's `TestMain` (`hermetic_test.go`)
+enforces this by pointing every CLI address at a refusing port and `HOME` at a temp directory,
+and fails the run if any test dials a default port or a non-loopback host.

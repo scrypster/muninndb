@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
@@ -80,7 +81,7 @@ func (ps *PebbleStore) IncrTransitionBatch(ctx context.Context, updates []Transi
 		}
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit transition batch: %w", err)
 	}
 	return nil
@@ -107,7 +108,7 @@ func (ps *PebbleStore) SetTransitionBatch(ctx context.Context, sets []Transition
 		}
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit transition set batch: %w", err)
 	}
 	return nil
@@ -155,8 +156,13 @@ func (ps *PebbleStore) GetTopTransitions(ctx context.Context, ws [8]byte, srcID 
 		return nil, fmt.Errorf("transition iter: %w", err)
 	}
 
+	// Equal counts break newest-first (rankorder): this list is cut at topK
+	// and feeds PAS candidate injection, which precedes recall's final sort.
 	sort.Slice(targets, func(i, j int) bool {
-		return targets[i].Count > targets[j].Count
+		if targets[i].Count != targets[j].Count {
+			return targets[i].Count > targets[j].Count
+		}
+		return rankorder.Before(targets[i].ID, targets[j].ID)
 	})
 
 	if len(targets) > topK {

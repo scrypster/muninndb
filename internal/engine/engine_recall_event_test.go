@@ -82,8 +82,8 @@ func TestRecall_ObserveModeDoesNotPersist(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.Activations)
-	require.True(t, strings.HasPrefix(resp.QueryID, "q-"),
-		"observe-mode query_id must stay the ephemeral counter, got %q", resp.QueryID)
+	require.True(t, strings.HasPrefix(resp.QueryID, "ro"),
+		"observe-mode query_id must be the read-only (ro2./ro0.) form, never an event id, got %q", resp.QueryID)
 
 	ws := eng.store.ResolveVaultPrefix(vault)
 	count := 0
@@ -111,8 +111,8 @@ func TestRecall_NoResultsNoEvent(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Empty(t, resp.Activations)
-	require.True(t, strings.HasPrefix(resp.QueryID, "q-"),
-		"empty recalls keep the ephemeral query_id, got %q", resp.QueryID)
+	_, perr := storage.ParseULID(resp.QueryID)
+	require.NoError(t, perr, "an empty recall still gets a real ULID query id (it joins to no event), got %q", resp.QueryID)
 
 	ws := eng.store.ResolveVaultPrefix(vault)
 	count := 0

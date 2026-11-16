@@ -991,6 +991,12 @@ func TestRecallQuerySet_ReconstructionFidelity(t *testing.T) {
 		for _, p := range probe {
 			cm := current.cm(p.cos, p.fts)
 			reconstructed[p.id] = cm * p.prior * p.conf
+			if activation.ContentFirstOrder(&activation.Weights{UseACTR: true}) {
+				// COG-35: the shipped ACT-R order is the absolute content
+				// score; the prior (still reconstructed in Raw, and still
+				// what this file's arms ablate) no longer orders the rows.
+				reconstructed[p.id] = rqGateValue(p, current)
+			}
 			r, ok := byID[p.id]
 			if !ok {
 				// (2) pool independence.

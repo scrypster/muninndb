@@ -92,7 +92,7 @@ func TestRecallEvent_Prune(t *testing.T) {
 		}))
 	}
 
-	deleted, err := store.PruneRecallEvents(ctx, ws, now.AddDate(0, 0, -2))
+	deleted, err := store.PruneRecallEvents(ctx, ws, now.AddDate(0, 0, -2), now.AddDate(0, 0, -2))
 	require.NoError(t, err)
 	require.Equal(t, 2, deleted, "both events older than the cutoff must be pruned")
 

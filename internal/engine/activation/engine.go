@@ -1,7 +1,6 @@
 package activation
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,7 +15,9 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/scrypster/muninndb/internal/embedlane"
 	hnswpkg "github.com/scrypster/muninndb/internal/index/hnsw"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/storage/keys"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
@@ -205,10 +206,13 @@ type ScoreComponents struct {
 	DecayFactor     float64
 	HebbianBoost    float64
 	TransitionBoost float64
-	// EntityBoost is the post-pipeline spread-activation adjustment added by
-	// the entity boost phase (rarity-weighted, capped). Zero when the result
-	// received no entity boost; for engrams injected by that phase it equals
-	// the full Score (issue #569).
+	// EntityBoost is the post-pipeline spread-activation evidence from the
+	// entity boost phase (rarity-weighted, capped). Zero when the result shares
+	// no rare entity with a seed. Under content-first order (COG-35) it is an
+	// ANNOTATION — evidence that the row is associated with the matches — and
+	// changes neither Score nor order except to break an exact content tie; an
+	// injected row's Score is 0. On rrf/weighted_sum/CGDN it is still added to
+	// Score, and an injected row's Score equals it (issue #569).
 	EntityBoost     float64
 	AccessFrequency float64
 	Recency         float64
@@ -217,8 +221,23 @@ type ScoreComponents struct {
 	Final           float64
 }
 
+// AssocEntity is one rare named entity an entity-boost INJECTED row shares
+// with injecting seeds — the evidence the COG-35 `associated` channel names.
+// Weight is that entity's rarity-weighted contribution; Seeds are the seeds
+// carrying it, in rank order.
+type AssocEntity struct {
+	Name   string
+	Weight float64
+	Seeds  []storage.ULID
+}
+
 // ScoredEngram is one activation result.
 type ScoredEngram struct {
+	// AssocEntities is set only on a row the entity boost INJECTED (it
+	// matched nothing itself): the shared entities and the seeds they came
+	// through, so the engine can say WHY the row is associated.
+	AssocEntities []AssocEntity
+
 	Engram      *storage.Engram
 	Score       float64
 	Components  ScoreComponents
@@ -270,9 +289,11 @@ type ScoredEngram struct {
 	// which is why the attribution is mandatory rather than optional (design
 	// §5.4). nil on non-substituted rows.
 	//
-	// ChainTruncated marks a walk that hit supersessionMaxDepth: the injected
-	// row is the deepest node WITHIN the cap and may not be the chain's true
-	// terminus. HeadNotIndexedYet marks an injected head with no stored
+	// ChainTruncated marks a walk that hit the chain walk limit (the vault's
+	// retired count + supersessionMaxDepth, engine_supersession.go): the
+	// injected row is the deepest node within the limit and may not be the
+	// chain's true terminus. A chain of retired (evolve/consolidate)
+	// intermediates cannot reach it; a chain through active nodes can. HeadNotIndexedYet marks an injected head with no stored
 	// embedding — "not indexed yet" rather than "not relevant", the
 	// loud-degradation doctrine applied to the fresh-evolve window.
 	SubstitutedFor    storage.ULID
@@ -350,6 +371,19 @@ type ActivateRequest struct {
 	// CandidatesPerIndex overrides the per-index candidate pool size for phase2.
 	// Zero means fall back to 30.
 	CandidatesPerIndex int
+	// DeferTruncation asks phase 6 to return EVERY row that cleared the gate
+	// instead of cutting at MaxResults, because the caller cuts once, after its
+	// own post-pipeline phases (internal/engine.activateCore). Honoured only on
+	// a content-first response (COG-35): there a row's rank is a function of
+	// its own content score, so the first N rows are the same whatever the cut
+	// — but only if nothing downstream ever sees a list that was cut at
+	// `limit` first. Before COG-35 phase 6 cut at `limit` and the entity boost
+	// then lifted rows from inside that cut only, so a row past the cut was
+	// re-entered as a content-less injection or not at all, and the first ten
+	// rows of limit=100 differed from limit=10. rrf / weighted_sum / CGDN keep
+	// the phase-6 cut (their boosted order is unchanged, deliberately). The
+	// activation log still records only the first MaxResults rows.
+	DeferTruncation bool
 	// HebbianEnabled gates the PHASE 4 read-side Hebbian boost, symmetrically
 	// with the way PASEnabled gates phase 4.5 (COG-32). Set by the engine from
 	// the vault's resolved PlasticityConfig, which already gates Hebbian
@@ -405,6 +439,23 @@ type ActivateRequest struct {
 	EmbedBudgetFraction float64
 }
 
+// Semantic-degradation reasons (ActivateResult.SemanticDegradedReason).
+const (
+	// DegradedEmbedTimeout: the query embed did not arrive within the embed
+	// budget — the embedder's lane was busy (e.g. a backfill batch) or the
+	// embedder was slow. A capacity condition, not a broken backend.
+	DegradedEmbedTimeout = "embed_timeout"
+	// DegradedEmbedUnavailable: the embed call failed outright (backend
+	// unreachable, provider error).
+	DegradedEmbedUnavailable = "embed_unavailable"
+	// DegradedEmbedZeroVector: the embed call succeeded but returned an
+	// empty/all-zero vector for a non-trivial query.
+	DegradedEmbedZeroVector = "embed_zero_vector"
+	// DegradedStoredEmbeddingRead: phase6's post-load read of stored
+	// embeddings failed, so some candidates scored with vectorScore=0.
+	DegradedStoredEmbeddingRead = "stored_embedding_read"
+)
+
 // defaultEmbedBudgetFraction is the fraction of a caller's REMAINING context
 // deadline that phase1 reserves for the embed call, leaving the rest for
 // phase2's BM25/FTS retrieval and phase6 scoring to complete the graceful
@@ -446,6 +497,10 @@ type ActivateResult struct {
 	// Hebbian survive), but callers should surface this to the user/agent
 	// rather than silently trusting a zeroed vectorScore (principle #2).
 	SemanticDegraded bool
+	// SemanticDegradedReason names which semantic failure set SemanticDegraded
+	// (the first one this activation hit): one of the Degraded* constants.
+	// Empty iff SemanticDegraded is false.
+	SemanticDegradedReason string
 
 	// Abstained is true when the pipeline ran to completion and deliberately
 	// returned nothing: candidates were retrieved and scored, and none cleared
@@ -502,6 +557,14 @@ const (
 	// to choose a branch rather than guessing which is current. COG-28's named
 	// exception — read the predecessor and resolve the fork.
 	AbstainAmbiguousVersion = "ambiguous_version"
+	// AbstainWeakOnly: the response was calibrated (a measured noise floor
+	// exists) and EVERY row it would have returned was band `weak`. On real
+	// agent traffic that shape is almost exclusively an unanswerable query
+	// (measured on a production install: 1 weak row in 1,096 rows over 150
+	// real queries, versus 141 weak rows over 60 made-up ones), so the rows
+	// are withheld by default and counted (weak_available); include_weak, an
+	// explicit threshold, explicit filters or mode "deep" return them.
+	AbstainWeakOnly = "weak_only"
 )
 
 // ActivateResponseFrame is one streaming frame of results.
@@ -549,8 +612,16 @@ type ActivationStore interface {
 	VaultPrefix(vault string) [8]byte
 	// EngramLastAccessNs returns the nanosecond timestamp of the last cache access for id.
 	// Returns 0 if not in cache; callers fall back to eng.LastAccess.
+	//
+	// PROCESS-LOCAL: any load resets it and a restart wipes it. Its only
+	// scoring consumer is the weighted_sum/CGDN path (computeComponents —
+	// honest-clock residual D2). ACT-R scoring cannot read it: computeACTR has
+	// no parameter through which it could arrive.
 	EngramLastAccessNs(wsPrefix [8]byte, id storage.ULID) int64
-	EngramIDsByCreatedRange(ctx context.Context, wsPrefix [8]byte, since, until time.Time, limit int) ([]storage.ULID, error)
+	// EngramIDsByCreatedRangeNewestFirst is the time-bounded candidate pool:
+	// ids created in [since, until], NEWEST first, capped at limit (recall's
+	// one tie rule at a cut — see internal/rankorder).
+	EngramIDsByCreatedRangeNewestFirst(ctx context.Context, wsPrefix [8]byte, since, until time.Time, limit int) ([]storage.ULID, error)
 	// ListByTagInRange returns engram IDs carrying tag, created within [since, until],
 	// newest-first (see storage.PebbleStore.ListByTagInRange). Used for tag-scoped
 	// candidate seeding so tag-filtered recall does not miss engrams absent from the
@@ -583,6 +654,27 @@ type FTSIndex interface {
 // HNSWIndex is the vector search interface.
 type HNSWIndex interface {
 	Search(ctx context.Context, ws [8]byte, vec []float32, topK int) ([]ScoredID, error)
+}
+
+// RetiredSource is implemented by a store that maintains the per-vault set of
+// RETIRED engrams (soft-deleted or archived — storage.PebbleStore, see
+// storage/retired.go). Optional: a store without it gets the pre-retired-set
+// behaviour, in which retired engrams compete for index slots until phase 6
+// drops them.
+type RetiredSource interface {
+	RetiredIDs(ctx context.Context, ws [8]byte) (storage.RetiredView, error)
+}
+
+// LiveHNSWIndex is an HNSWIndex that can route through retired nodes without
+// counting them as results, returning the nearest of them separately as
+// shadows (hnsw.Index.SearchLive).
+type LiveHNSWIndex interface {
+	SearchLive(ctx context.Context, ws [8]byte, vec []float32, topK int, retired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, err error)
+}
+
+// LiveFTSIndex is the FTSIndex counterpart (fts.Index.SearchLive).
+type LiveFTSIndex interface {
+	SearchLive(ctx context.Context, ws [8]byte, query string, topK int, retired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, err error)
 }
 
 // Embedder converts text to a vector embedding.
@@ -864,9 +956,24 @@ func (e *ActivationEngine) Run(ctx context.Context, req *ActivateRequest) (*Acti
 	// The drainer extracts ids/scores off the critical path.
 	// Non-blocking: drops if channel full (Hebbian recencyTau=3600s, 1ms lag is negligible).
 	if !req.ReadOnly && len(result.Activations) > 0 {
+		// The log records what phase 6 would have RETURNED: under
+		// DeferTruncation the result carries every gated row, and logging all
+		// of them would widen what the Hebbian and PAS read sides treat as
+		// "recently activated" by a factor of the pool size.
+		//
+		// A COPY, not a sub-slice: the engine's post-pipeline phases re-sort
+		// result.Activations IN PLACE (entity boost, currency) while the async
+		// drainer may still be reading what it was handed. Before deferral that
+		// sharing already existed for the entity boost's in-place sort; with
+		// the whole gated list in one array it would be every recall's shape.
+		n := len(result.Activations)
+		if n > req.MaxResults {
+			n = req.MaxResults
+		}
+		logged := append(make([]ScoredEngram, 0, n), result.Activations[:n]...)
 		e.logWG.Add(1) // Add FIRST — visible to WaitLogIdle() (test-only); undone below on drop
 		select {
-		case e.logCh <- logItem{vaultID: req.VaultID, activations: result.Activations}:
+		case e.logCh <- logItem{vaultID: req.VaultID, activations: logged}:
 			// Yield to allow the drainer goroutine to process immediately.
 			// Cost: ~1-5ns (no syscall). Ensures test consistency and reduces
 			// drainer queue depth in production under bursty load.
@@ -902,6 +1009,8 @@ type phase1Result struct {
 	// ActivateResult.SemanticDegraded so callers get a loud signal instead of a
 	// silently-zeroed vectorScore (principle #2, "degrade loudly-but-gracefully").
 	semanticDegraded bool
+	// semanticDegradedReason is the Degraded* constant for semanticDegraded.
+	semanticDegradedReason string
 }
 
 // isZeroVector reports whether vec is empty or every component is exactly
@@ -969,15 +1078,28 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 	if e.embedder != nil && e.hnsw != nil {
 		embedCtx, cancelEmbed := embedBudgetContext(ctx, req.EmbedBudgetFraction)
 		defer cancelEmbed()
-		vec, err := e.embedder.Embed(embedCtx, req.Context)
+		// Mark this — and only this — embed as a recall query, so an embedder
+		// with scheduling lanes (the bundled local one) serves it ahead of
+		// background batch embeds instead of queueing it behind them. The
+		// mark rides on embedCtx alone; nothing else in recall inherits it.
+		vec, err := e.embedder.Embed(embedlane.WithQuery(embedCtx), req.Context)
 		if err != nil {
-			// Embedding backend unreachable (e.g. connection refused on the
-			// embedding endpoint). Degrade to BM25+decay recall instead of
-			// aborting: FTS still returns useful results, and phase2 already
-			// takes the FTS-only path when len(embedding)==0.
-			slog.Warn("activation: embed backend unreachable, degrading to BM25-only recall",
-				"vault", req.VaultID, "error", err)
+			// Degrade to BM25+decay recall instead of aborting: FTS still
+			// returns useful results, and phase2 already takes the FTS-only
+			// path when len(embedding)==0. The embed budget exists precisely
+			// so this fallback still has time to run (#658).
 			result.semanticDegraded = true
+			if errors.Is(err, context.DeadlineExceeded) {
+				// The budget ran out first: the embedder's lane was busy or it
+				// was slow. Distinct from "unreachable" — the backend is up.
+				result.semanticDegradedReason = DegradedEmbedTimeout
+				slog.Warn("activation: query embed exceeded its budget (embedder busy or slow), degrading to BM25-only recall",
+					"vault", req.VaultID, "error", err)
+			} else {
+				result.semanticDegradedReason = DegradedEmbedUnavailable
+				slog.Warn("activation: embed backend unreachable, degrading to BM25-only recall",
+					"vault", req.VaultID, "error", err)
+			}
 			return result, nil
 		}
 		// Embed returns a flat len(texts)*dim slice — each phrase's vector
@@ -1001,6 +1123,7 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 			slog.Warn("activation: embed backend returned empty/zero vector for non-trivial query, degrading to BM25-only recall",
 				"vault", req.VaultID, "query_len", len(result.queryStr))
 			result.semanticDegraded = true
+			result.semanticDegradedReason = DegradedEmbedZeroVector
 		}
 	}
 	return result, nil
@@ -1034,12 +1157,18 @@ func meanPoolEmbeddings(flat []float32, n int) []float32 {
 
 // phase2 retrieves candidates from FTS, HNSW, and decay pool in parallel.
 type candidateSets struct {
-	fts        []ScoredID
-	vector     []ScoredID
-	decay      []storage.ULID
-	time       []storage.ULID // from time-bounded range scan when since/before filters present
-	tag        []storage.ULID // from tag-index scan when tags_all/tags_any filters present
-	transition []storage.ULID // PAS: transition-predicted candidates from previous activation
+	fts    []ScoredID
+	vector []ScoredID
+	// ftsShadow / vectorShadow are RETIRED hits, collected on a separate
+	// budget (retiredScope) so they never take a live slot. They enter fusion
+	// with their raw scores and NO rank contribution: evidence for COG-28's
+	// shadow pass, never a seed for phase 4/5 and never a live candidate.
+	ftsShadow    []ScoredID
+	vectorShadow []ScoredID
+	decay        []storage.ULID
+	time         []storage.ULID // from time-bounded range scan when since/before filters present
+	tag          []storage.ULID // from tag-index scan when tags_all/tags_any filters present
+	transition   []storage.ULID // PAS: transition-predicted candidates from previous activation
 }
 
 // extractTimeBounds extracts since/before time bounds from filter list.
@@ -1185,12 +1314,72 @@ func (e *ActivationEngine) seedTagCandidates(ctx context.Context, ws [8]byte, ta
 	return seed
 }
 
+// retiredScope decides, once per recall, whether retired engrams are skipped
+// at the index cut and how many of them may be kept as shadow evidence.
+//
+// Skipped only on a CURRENT-view recall: under as_of / include_invalid a
+// superseded predecessor can be the right answer, so those paths keep every
+// retired engram as an ordinary candidate (exactly the pre-retired-set
+// behaviour). A vault with an empty retired set returns nil and the indexes are
+// searched exactly as before — no new code path at all.
+//
+// The shadow budget is shadowMatchCap per index when the request can produce
+// shadows at all (shadowsEnabled), else 0: COG-28 emits at most shadowMatchCap
+// shadows per query, so keeping the nearest shadowMatchCap retired hits from
+// each index is enough to feed it, and it is a bound that does not grow with
+// the vault or the chain length.
+func (e *ActivationEngine) retiredScope(ctx context.Context, req *ActivateRequest, ws [8]byte) (isRetired func([16]byte) bool, shadowBudget int) {
+	if req.AsOf != nil || req.IncludeInvalid {
+		return nil, 0
+	}
+	src, ok := e.store.(RetiredSource)
+	if !ok {
+		return nil, 0
+	}
+	view, err := src.RetiredIDs(ctx, ws)
+	if err != nil {
+		slog.Warn("activation: retired set unavailable — retired versions compete for candidate slots this recall", "vault", req.VaultID, "err", err)
+		return nil, 0
+	}
+	if view.Len() == 0 {
+		return nil, 0
+	}
+	if shadowsEnabled(req, resolveWeights(req.Weights, e.weights)) {
+		shadowBudget = shadowMatchCap
+	}
+	return view.Contains, shadowBudget
+}
+
+// searchFTS / searchHNSW run the index search for phase 2, through the
+// retired-aware variant when this recall skips retired engrams and the index
+// supports it.
+func (e *ActivationEngine) searchFTS(ctx context.Context, ws [8]byte, query string, k int, isRetired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, err error) {
+	if isRetired != nil {
+		if lf, ok := e.fts.(LiveFTSIndex); ok {
+			return lf.SearchLive(ctx, ws, query, k, isRetired, shadowBudget)
+		}
+	}
+	live, err = e.fts.Search(ctx, ws, query, k)
+	return live, nil, err
+}
+
+func (e *ActivationEngine) searchHNSW(ctx context.Context, ws [8]byte, vec []float32, k int, isRetired func([16]byte) bool, shadowBudget int) (live, shadows []ScoredID, err error) {
+	if isRetired != nil {
+		if lh, ok := e.hnsw.(LiveHNSWIndex); ok {
+			return lh.SearchLive(ctx, ws, vec, k, isRetired, shadowBudget)
+		}
+	}
+	live, err = e.hnsw.Search(ctx, ws, vec, k)
+	return live, nil, err
+}
+
 func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 *phase1Result, ws [8]byte) (*candidateSets, error) {
 	var sets candidateSets
 	k := req.CandidatesPerIndex
 	if k <= 0 {
 		k = 30
 	}
+	isRetired, shadowBudget := e.retiredScope(ctx, req, ws)
 
 	// Extract time bounds from filters for Phase 3: time-bounded candidate injection.
 	since, before, hasTimeBounds := extractTimeBounds(req.Filters)
@@ -1215,11 +1404,12 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 	// (~3-5µs per activation at 12+ concurrent goroutines).
 	if e.hnsw == nil || len(p1.embedding) == 0 {
 		if e.fts != nil {
-			results, err := e.fts.Search(ctx, ws, p1.queryStr, k)
+			results, shadows, err := e.searchFTS(ctx, ws, p1.queryStr, k, isRetired, shadowBudget)
 			if err != nil {
 				slog.Warn("activation: fts search degraded", "vault", req.VaultID, "error", err)
 			}
 			sets.fts = results
+			sets.ftsShadow = shadows
 		}
 		ids, _ := e.store.RecentActive(ctx, ws, k)
 		sets.decay = ids
@@ -1229,7 +1419,7 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 			if before.IsZero() {
 				before = time.Now()
 			}
-			ids, _ := e.store.EngramIDsByCreatedRange(ctx, ws, since, before, k*3)
+			ids, _ := e.store.EngramIDsByCreatedRangeNewestFirst(ctx, ws, since, before, k*3)
 			sets.time = ids
 		}
 
@@ -1253,18 +1443,19 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 		if e.fts == nil {
 			return nil
 		}
-		results, err := e.fts.Search(gctx, ws, p1.queryStr, k)
+		results, shadows, err := e.searchFTS(gctx, ws, p1.queryStr, k, isRetired, shadowBudget)
 		if err != nil {
 			slog.Warn("activation: fts search degraded", "vault", req.VaultID, "error", err)
 			// continue with empty FTS results
 			return nil
 		}
 		sets.fts = results
+		sets.ftsShadow = shadows
 		return nil
 	})
 
 	g.Go(func() error {
-		results, err := e.hnsw.Search(gctx, ws, p1.embedding, k)
+		results, shadows, err := e.searchHNSW(gctx, ws, p1.embedding, k, isRetired, shadowBudget)
 		if err != nil {
 			var dimErr *hnswpkg.DimMismatchError
 			if errors.As(err, &dimErr) {
@@ -1279,6 +1470,7 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 			return nil
 		}
 		sets.vector = results
+		sets.vectorShadow = shadows
 		return nil
 	})
 
@@ -1299,7 +1491,7 @@ func (e *ActivationEngine) phase2(ctx context.Context, req *ActivateRequest, p1 
 			if before_ts.IsZero() {
 				before_ts = time.Now()
 			}
-			ids, err := e.store.EngramIDsByCreatedRange(gctx, ws, since, before_ts, k*3)
+			ids, err := e.store.EngramIDsByCreatedRangeNewestFirst(gctx, ws, since, before_ts, k*3)
 			if err != nil {
 				return nil
 			}
@@ -1354,7 +1546,7 @@ const (
 // phase3RRF merges candidate lists via Reciprocal Rank Fusion.
 // Uses index-into-slice instead of map-of-pointers to reduce heap allocations.
 func phase3RRF(sets *candidateSets) []fusedCandidate {
-	totalCap := len(sets.fts) + len(sets.vector) + len(sets.decay) + len(sets.time) + len(sets.tag) + len(sets.transition)
+	totalCap := len(sets.fts) + len(sets.vector) + len(sets.decay) + len(sets.time) + len(sets.tag) + len(sets.transition) + len(sets.ftsShadow) + len(sets.vectorShadow)
 	result := make([]fusedCandidate, 0, totalCap)
 	index := make(map[storage.ULID]int, totalCap)
 
@@ -1405,8 +1597,32 @@ func phase3RRF(sets *candidateSets) []fusedCandidate {
 		c.rrfScore += 1.0 / (rrfK_Transition + float64(rank+1))
 	}
 
+	// Retired hits (retiredScope): raw scores only, no rank contribution, so
+	// they reach phase 6's COG-28 shadow pass with the same evidence they
+	// carried before, but sort below every ranked candidate and never seed
+	// the phase 4 boost or phase 5 traversal.
+	for _, s := range sets.ftsShadow {
+		c := getOrCreate(s.ID)
+		if s.Score > c.ftsScore {
+			c.ftsScore = s.Score
+		}
+	}
+	for _, s := range sets.vectorShadow {
+		c := getOrCreate(s.ID)
+		if s.Score > c.vectorScore {
+			c.vectorScore = s.Score
+		}
+	}
+
+	// Exact rrf ties break newest-first (rankorder). This order is a cut:
+	// phase 4 boosts only the first 50 and traversal seeds from the head, so an
+	// arbitrary (map/insertion) order among equals would decide which tied
+	// memories are learned from — and differently on every call.
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].rrfScore > result[j].rrfScore
+		if result[i].rrfScore != result[j].rrfScore {
+			return result[i].rrfScore > result[j].rrfScore
+		}
+		return rankorder.Before(result[i].id, result[j].id)
 	})
 	return result
 }
@@ -1860,12 +2076,16 @@ func (e *ActivationEngine) phase6Score(
 ) (*ActivateResult, error) {
 
 	w := resolveWeights(req.Weights, e.weights)
+	// COG-35: on the ACT-R path rows are ordered by their absolute content
+	// score and association evidence only breaks exact ties (content_first.go).
+	contentFirst := ContentFirstOrder(req.Weights)
 
 	// semanticDegraded accumulates any semantic-signal failure discovered
 	// during scoring (post-load cosine fallback read errors), OR'd with
 	// whatever phase1 already found (embed backend unreachable / zero
 	// vector) so the final ActivateResult carries one loud, honest signal.
 	semanticDegraded := p1.semanticDegraded
+	semanticDegradedReason := p1.semanticDegradedReason
 
 	// Guard: RRF and CGDN are mutually exclusive scoring paths.
 	// If both are enabled, RRF takes precedence (checked first below).
@@ -1921,16 +2141,26 @@ func (e *ActivationEngine) phase6Score(
 		ids[i] = c.id
 	}
 
-	// Look up per-engram cache access time BEFORE GetEngrams to avoid
-	// contamination: GetEngrams populates/touches the L1 cache (setting
-	// lastAccess = now), which would make every engram appear "just accessed."
-	// By reading first, only engrams recalled in a *prior* activation carry
-	// a cache timestamp; cache-cold engrams return 0 so the scorer falls
-	// back to eng.LastAccess (the persisted write/CreatedAt time).
-	lastAccessNsByID := make(map[storage.ULID]int64, len(all))
-	for _, c := range all {
-		if ns := e.store.EngramLastAccessNs(ws, c.id); ns != 0 {
-			lastAccessNsByID[c.id] = ns
+	// The L1 cache access time is read ONLY for the paths that still score
+	// with it: weighted_sum and CGDN (computeComponents — honest-clock residual
+	// D2: their age terms are additive, so there is no neutral value to pin
+	// them to, and removing the clock alone would make their cliff permanent).
+	// ACT-R does not read it (computeACTR has no parameter for it) and rrf
+	// never did, so on those paths the map is never built: N fewer cache
+	// lookups per recall, and no way for a process-local timestamp to reach
+	// their scores. The trial-only legacy switch (cognitiontrial build) is the
+	// one exception, so its control arm is the pre-honest-clock engine.
+	//
+	// When it IS read, it is read BEFORE GetEngrams: that load stamps the L1
+	// cache (lastAccess = now), which would make every engram look "just
+	// accessed". Cache-cold engrams return 0 and fall back to eng.LastAccess.
+	var lastAccessNsByID map[storage.ULID]int64
+	if !w.UseRRFFusion && (w.UseCGDN || !w.UseACTR || legacyACTRClock()) {
+		lastAccessNsByID = make(map[storage.ULID]int64, len(all))
+		for _, c := range all {
+			if ns := e.store.EngramLastAccessNs(ws, c.id); ns != 0 {
+				lastAccessNsByID[c.id] = ns
+			}
 		}
 	}
 
@@ -1943,9 +2173,9 @@ func (e *ActivationEngine) phase6Score(
 	// A ReadOnly call (the single resolved decision) suppresses the L1
 	// cache recency stamp this load would otherwise apply to every
 	// candidate it SCORES, not just ones it emits — a scoring pass is not a
-	// user access, and EngramLastAccessNs (above) feeds real recency
-	// scoring in a LATER, unrelated call. See
-	// storage.ContextWithNoAccessCacheStamp's doc.
+	// user access. On ACT-R and rrf the stamp is now only an eviction hint;
+	// on weighted_sum/CGDN, EngramLastAccessNs (above) still feeds recency
+	// scoring in a LATER call. See storage.ContextWithNoAccessCacheStamp.
 	getEngramsCtx := ctx
 	if req.ReadOnly {
 		getEngramsCtx = storage.ContextWithNoAccessCacheStamp(ctx)
@@ -2138,6 +2368,9 @@ func (e *ActivationEngine) phase6Score(
 				slog.Warn("activation: phase6 post-load cosine fallback failed, candidates degraded to vectorScore=0",
 					"vault", req.VaultID, "candidates", len(fallbackIDs), "error", err)
 				semanticDegraded = true
+				if semanticDegradedReason == "" {
+					semanticDegradedReason = DegradedStoredEmbeddingRead
+				}
 			}
 		}
 		for i := range all {
@@ -2157,6 +2390,31 @@ func (e *ActivationEngine) phase6Score(
 		// only an explicit tag filter admitted it (COG-5 S1). Carried to
 		// ScoredEngram for the #773 band phase; never on the wire.
 		admission Admission
+	}
+
+	// sortScored is the final ranking on EVERY fusion path (rrf, CGDN, ACT-R,
+	// weighted_sum): score descending, exact ties newest-first (rankorder —
+	// the same rule the candidate cuts upstream used, so no layer can hide
+	// what a later one would have ranked first). A total order on distinct
+	// ids, so the result is independent of input order (#698).
+	//
+	// Under content-first order (COG-35, ACT-R only) `final` IS the absolute
+	// content score, and an exact tie is broken by association evidence
+	// before the newest-first rule — the same keys as ResultBefore, which the
+	// engine's post-pipeline re-sorts use.
+	sortScored := func(items []scoredItem) {
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].final != items[j].final {
+				return items[i].final > items[j].final
+			}
+			if contentFirst {
+				ei, ej := AssociationEvidence(items[i].components), AssociationEvidence(items[j].components)
+				if ei != ej {
+					return ei > ej
+				}
+			}
+			return rankorder.Before(items[i].id, items[j].id)
+		})
 	}
 
 	now := time.Now()
@@ -2218,11 +2476,16 @@ func (e *ActivationEngine) phase6Score(
 					SemanticSimilarity:    rescaleSemantic(c.vectorScore, w.SemanticBaseline),
 					SemanticSimilarityRaw: c.vectorScore,
 					FullTextRelevance:     normalizedFTS,
-					HebbianBoost:          c.hebbianBoost,
-					TransitionBoost:       c.transitionBoost,
-					Confidence:            float64(eng.Confidence),
-					Raw:                   c.rrfScore * (1.0 + c.hebbianBoost + c.transitionBoost),
-					Final:                 final,
+					// The factors rrf APPLIED: none. Neutral values (1, 1, 0 —
+					// AccessFrequency's zero value) say "no attenuation", where
+					// the old zero values read as "fully decayed".
+					DecayFactor:     1.0,
+					Recency:         1.0,
+					HebbianBoost:    c.hebbianBoost,
+					TransitionBoost: c.transitionBoost,
+					Confidence:      float64(eng.Confidence),
+					Raw:             c.rrfScore * (1.0 + c.hebbianBoost + c.transitionBoost),
+					Final:           final,
 				},
 				hopPath: c.hopPath,
 				// floored=false: the RRF components literal above carries no
@@ -2230,12 +2493,7 @@ func (e *ActivationEngine) phase6Score(
 				admission: admissionOf(final, req.Threshold, c.inTagPool, false),
 			})
 		}
-		sort.Slice(scored, func(i, j int) bool {
-			if scored[i].final != scored[j].final {
-				return scored[i].final > scored[j].final
-			}
-			return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
-		})
+		sortScored(scored)
 		goto cgdnDone
 	}
 
@@ -2304,6 +2562,7 @@ func (e *ActivationEngine) phase6Score(
 			comp := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)
 			// Gated activation: content relevance × cognitive gate
 			a := computeGatedActivation(comp.SemanticSimilarity, comp.FullTextRelevance, comp.DecayFactor, comp.HebbianBoost, w)
+			reportCGDNApplied(&comp)
 			cgdnCands = append(cgdnCands, cgdnCandidate{
 				id: c.id, activation: a, components: comp, hopPath: c.hopPath, inTagPool: c.inTagPool,
 			})
@@ -2373,6 +2632,7 @@ func (e *ActivationEngine) phase6Score(
 		shadowMatches = collectShadowMatches(all, shadowEngrams, req, func(c scoringCandidate, eng *storage.Engram) (float64, float64, ScoreComponents) {
 			comp := computeComponents(c.vectorScore, c.ftsScore, c.hebbianBoost, eng, lastAccessNsByID[c.id], now, w)
 			a := computeGatedActivation(comp.SemanticSimilarity, comp.FullTextRelevance, comp.DecayFactor, comp.HebbianBoost, w)
+			reportCGDNApplied(&comp)
 			absolute := math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
 			// Clamped to 1.0: with an EMPTY live pool the denominator
 			// degenerates to sigma^n over the 0.01 fallback, and an unclamped
@@ -2390,12 +2650,7 @@ func (e *ActivationEngine) phase6Score(
 			return final, absolute, comp
 		})
 
-		sort.Slice(scored, func(i, j int) bool {
-			if scored[i].final != scored[j].final {
-				return scored[i].final > scored[j].final
-			}
-			return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
-		})
+		sortScored(scored)
 		goto cgdnDone
 	}
 
@@ -2420,7 +2675,7 @@ func (e *ActivationEngine) phase6Score(
 			if eng == nil || !PassesMetaFilter(eng, req.Filters) || !PassesValidity(eng, req.AsOf, req.IncludeInvalid, now) {
 				continue
 			}
-			components := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, c.inTagPool)
+			components := scoreACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, c.inTagPool)
 			if components.Raw > maxRaw {
 				maxRaw = components.Raw
 			}
@@ -2464,9 +2719,13 @@ func (e *ActivationEngine) phase6Score(
 			// being the floor production actually enforces.
 			//
 			// The fix is to gate on the ABSOLUTE evidence instead — ContentMatch,
-			// attenuated by the prior only where the prior attenuates (decay must
-			// still retire a stale memory), never amplified by it, never rescaled
-			// by what else happened to be in this query's pool — times Confidence.
+			// attenuated by the prior only where the prior attenuates, never
+			// amplified by it, never rescaled by what else happened to be in this
+			// query's pool — times Confidence. (Since the honest clock, increment
+			// 1, the ACT-R prior never attenuates: the base level is pinned at
+			// bLevelCap, so for ACT-R this is exactly min(ContentMatch, 1) x
+			// Confidence. Age no longer retires a memory; supersession and a
+			// declared valid_until do.)
 			// Ranking would be untouched: `final` still orders the results, so
 			// Hebbian and PAS keep their full power to PROMOTE a relevant memory;
 			// they just could not promote an irrelevant one past the bar.
@@ -2523,6 +2782,15 @@ func (e *ActivationEngine) phase6Score(
 			if absolute < req.Threshold && !cc.inTagPool {
 				continue
 			}
+			// COG-35: under content-first order the score that orders the
+			// rows IS the absolute content score. Raw keeps the boosted,
+			// per-query-rescaled activation for the record (it is what the
+			// Hebbian/PAS prior did to this row), but it no longer orders
+			// anything: association evidence is reported in HebbianBoost /
+			// TransitionBoost and breaks only exact ties (sortScored).
+			if contentFirst {
+				final = absolute
+			}
 			cc.components.Raw = raw
 			cc.components.Final = final
 			scored = append(scored, scoredItem{id: cc.id, final: final, components: cc.components, hopPath: cc.hopPath,
@@ -2542,21 +2810,21 @@ func (e *ActivationEngine) phase6Score(
 			// shadow is evidence, not a returned row, so it must never be
 			// admitted on the tagMatchFloor alone — pass inTagPool=false,
 			// never c.inTagPool.
-			comp := computeACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, false)
+			comp := scoreACTR(c.vectorScore, c.ftsScore, c.hebbianBoost, c.transitionBoost, eng, lastAccessNsByID[c.id], now, w, false)
 			absolute := math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
 			raw := math.Min(comp.Raw*scale, 1.0)
 			final := raw * comp.Confidence
+			if contentFirst {
+				// COG-35: an injected head lands at its predecessor's
+				// CONTENT score, on the same scale as every other row.
+				final = absolute
+			}
 			comp.AbsoluteScore = absolute
 			comp.Raw = raw
 			comp.Final = final
 			return final, absolute, comp
 		})
-		sort.Slice(scored, func(i, j int) bool {
-			if scored[i].final != scored[j].final {
-				return scored[i].final > scored[j].final
-			}
-			return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
-		})
+		sortScored(scored)
 		goto cgdnDone
 	}
 
@@ -2596,16 +2864,13 @@ func (e *ActivationEngine) phase6Score(
 		comp.AbsoluteScore = math.Min(math.Min(comp.Raw, comp.ContentMatch), 1.0) * comp.Confidence
 		return comp.Final, comp.Final, comp
 	})
-	sort.Slice(scored, func(i, j int) bool {
-		if scored[i].final != scored[j].final {
-			return scored[i].final > scored[j].final
-		}
-		return bytes.Compare(scored[i].id[:], scored[j].id[:]) < 0
-	})
+	sortScored(scored)
 
 cgdnDone:
 	totalFound := len(scored)
-	if len(scored) > req.MaxResults {
+	// COG-35: a content-first caller that cuts after its own post-pipeline
+	// phases gets every gated row (see ActivateRequest.DeferTruncation).
+	if len(scored) > req.MaxResults && !(req.DeferTruncation && contentFirst) {
 		scored = scored[:req.MaxResults]
 	}
 
@@ -2649,7 +2914,7 @@ cgdnDone:
 		}
 		var why string
 		if req.IncludeWhy {
-			why = buildWhy(eng, s.components, s.hopPath, hopConcepts, p1.queryStr, w.UseACTR)
+			why = buildWhyOrdered(eng, s.components, s.hopPath, hopConcepts, p1.queryStr, w.UseACTR, contentFirst)
 		}
 		activations = append(activations, ScoredEngram{
 			Engram:      eng,
@@ -2682,14 +2947,15 @@ cgdnDone:
 	}
 
 	return &ActivateResult{
-		QueryID:          newQueryID(),
-		Activations:      activations,
-		TotalFound:       totalFound,
-		SemanticDegraded: semanticDegraded,
-		Abstained:        abstained,
-		AbstainedReason:  abstainReason,
-		ShadowMatches:    shadowMatches,
-		Calibration:      relevanceCalibration(w),
+		QueryID:                newQueryID(),
+		Activations:            activations,
+		TotalFound:             totalFound,
+		SemanticDegraded:       semanticDegraded,
+		SemanticDegradedReason: semanticDegradedReason,
+		Abstained:              abstained,
+		AbstainedReason:        abstainReason,
+		ShadowMatches:          shadowMatches,
+		Calibration:            relevanceCalibration(w),
 	}, nil
 }
 
@@ -2814,6 +3080,14 @@ func computeComponents(vectorScore, ftsScore, hebbianBoost float64, eng *storage
 	}
 }
 
+// reportCGDNApplied makes a CGDN score card report what CGDN APPLIED: its gate
+// multiplies in the decay factor (computeGatedActivation) but never recency or
+// access frequency, so those report the neutral 1 and 0.
+func reportCGDNApplied(c *ScoreComponents) {
+	c.Recency = 1.0
+	c.AccessFrequency = 0
+}
+
 // actrDenominator is the precomputed normalization denominator used in computeACTR.
 // It equals 1 + softplus(0) = 1 + ln(1 + exp(0)) = 1 + ln(2) ≈ 1.6931471805599453.
 // Precomputing this constant avoids recomputing softplus(0) on every engram scored.
@@ -2890,115 +3164,119 @@ func cosineSimilarity32(a, b []float32) float32 {
 	return dot / (float32(math.Sqrt(float64(na))) * float32(math.Sqrt(float64(nb))))
 }
 
-// computeACTR computes the ACT-R scoring components for a candidate engram.
-// Formula (Anderson 1993):
-//
-//	B(M) = min(ln(n+1) - d × ln(max(ageDays,ageFloor) / (n+1)), bLevelCap)  [base-level activation]
-//	where bLevelCap = ln(exp(actrDenominator)-1) ≈ 1.489 is the unique value at which
-//	softplus(B(M)) = actrDenominator, i.e. base-level alone would push raw = contentMatch.
-//	Capping here preserves score absoluteness and threshold semantics across queries.
-//	Score = ContentMatch × softplus(B(M) + scale×Hebbian) × Confidence
-//
-// ContentMatch gates the score: zero semantic relevance = zero score regardless of recency.
-// B(M) + scale×Hebbian are additive: Hebbian can rescue old but linked memories.
-// This resolves the decay-vs-Hebbian tension without two separate pathways.
-func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, eng *storage.Engram,
-	lastAccessNs int64, now time.Time, w resolvedWeights, inTagPool bool) ScoreComponents {
+// bLevelCap is the ACT-R base-level's saturation value: the unique B at which
+// softplus(B) = actrDenominator, i.e. where the base level alone leaves
+// raw = contentMatch (a prior of exactly 1). ln(e^1.693 - 1) ~= 1.489.
+var bLevelCap = math.Log(math.Exp(actrDenominator) - 1)
 
-	// Compute content relevance (same as standard path). ftsScore is already a
-	// calibrated, absolute [0,1] coverage score (see fts.Index.Search, COG-24) —
-	// no tanh normalization needed post-#711. semCal is COG-26's baseline-
-	// rescaled cosine (rescaleSemantic): near-baseline cosine (anisotropy
-	// noise, bge-small ≈0.45-0.60) contributes ~0 to contentMatch instead of
-	// clearing the ACT-R gate below (engine.go:2308, threshold 0.1) on noise
-	// alone.
-	normalizedFTS := ftsScore
-	semCal := rescaleSemantic(vectorScore, w.SemanticBaseline)
-	contentMatch := w.SemanticSimilarity*semCal + w.FullTextRelevance*normalizedFTS
+// computeACTR computes the ACT-R scoring components for a candidate engram.
+//
+//	Score = ContentMatch x softplus(B + scale x (Hebbian + transition)) / actrDenominator x Confidence
+//	B     = bLevelCap, for every engram (honest clock, increment 1)
+//
+// THE BASE LEVEL IS NEUTRAL AND CONSTANT. softplus(bLevelCap)/actrDenominator
+// = 1 exactly, so with no association boost Raw = ContentMatch and the gate's
+// absolute score is min(ContentMatch, 1) x Confidence. Age, access count, the
+// persisted LastAccess and the L1 cache clock are NOT inputs: this function has
+// no parameter through which the cache timestamp could arrive (principle #3 —
+// the hidden clock is unrepresentable here, not merely ignored). Before this,
+// B decayed with time since the last L1-cache stamp — which any load reset and
+// a restart wiped — so the same persisted memory was rank 1 in a warm process
+// and gated out in a cold one (a 400-day exact match came back empty).
+//
+// What is given up, stated plainly: when two undeclared versions of a fact
+// both match a query, the one phrased closer to the query ranks first even if
+// it is older. Exact ties go to the newer (rankorder). A bounded per-vault
+// salience term (age + earned use) is increment 2; it may raise the prior
+// above neutral for RANKING only — the gate's min(Raw, ContentMatch) already
+// keeps it from admitting a weaker match — and may never lower it.
+//
+// ContentMatch gates the score: zero relevance = zero score. Hebbian and PAS
+// boosts still multiply the prior above 1 (up to ~3.24x at full boost) and so
+// still promote a relevant memory in RANKING; they cannot lift it past the gate.
+//
+// Reported components carry the values scoring APPLIED: DecayFactor and
+// Recency are the neutral 1.0 (no attenuation was applied), AccessFrequency is
+// 0 (access history contributes nothing). A computed-but-unapplied factor —
+// e.g. a 0.05 decay on a row whose applied multiplier was 1 — would tell
+// muninn_explain's reader the opposite of what happened.
+func computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, eng *storage.Engram,
+	now time.Time, w resolvedWeights, inTagPool bool) ScoreComponents {
+	contentMatch, semCal, contentMatchFloored := actrContentMatch(vectorScore, ftsScore, w, inTagPool)
+	raw := actrRaw(contentMatch, bLevelCap, hebbianBoost, transitionBoost, w)
+	conf := float64(eng.Confidence)
+	return ScoreComponents{
+		SemanticSimilarity:    semCal,
+		SemanticSimilarityRaw: vectorScore,
+		FullTextRelevance:     ftsScore,
+		ContentMatch:          contentMatch,
+		ContentMatchFloored:   contentMatchFloored,
+		DecayFactor:           1.0, // applied: no age attenuation
+		HebbianBoost:          hebbianBoost,
+		TransitionBoost:       transitionBoost,
+		AccessFrequency:       0,   // applied: access history is not an ACT-R input
+		Recency:               1.0, // applied: no recency attenuation
+		Confidence:            conf,
+		Raw:                   raw,
+		Final:                 raw * conf,
+	}
+}
+
+// actrContentMatch is the ACT-R aboutness term, shared by computeACTR and the
+// trial-only legacy scorer so the two arms differ ONLY in the base level.
+func actrContentMatch(vectorScore, ftsScore float64, w resolvedWeights, inTagPool bool) (contentMatch, semCal float64, floored bool) {
+	// ftsScore is already a calibrated, absolute [0,1] coverage score (see
+	// fts.Index.Search, COG-24) — no tanh normalization needed post-#711.
+	// semCal is COG-26's baseline-rescaled cosine (rescaleSemantic):
+	// near-baseline cosine (anisotropy noise, bge-small ~0.45-0.60)
+	// contributes ~0 to contentMatch instead of clearing the gate on noise.
+	semCal = rescaleSemantic(vectorScore, w.SemanticBaseline)
+	contentMatch = w.SemanticSimilarity*semCal + w.FullTextRelevance*ftsScore
 
 	// COG-5 amendment (S1): candidates that matched an explicit tag filter
 	// (inTagPool) receive a content-match floor so an explicit filter match
 	// surfaces regardless of semantic/lexical overlap with the query. Without
 	// this, a content-unrelated tag hit scores contentMatch=0 and is dropped
-	// by the gate below even though the user explicitly asked for it via
-	// tags_all/tags_any/tag_prefix (S1 seeds these into the pool, but under
-	// default ACT-R scoring the gate silently discarded them). tagMatchFloor
-	// (0.1) is well below typical genuine content-match scores (0.5-0.9), so
-	// a real semantic/lexical match always outranks a floored tag-only hit —
-	// the floor only rescues candidates that would otherwise score exactly
-	// zero. RRF scoring already honors inTagPool via its own pool boost and
-	// is unaffected by this change. See docs/internals/invariants.md COG-5.
-	contentMatchFloored := false
+	// by the gate even though the user explicitly asked for it via
+	// tags_all/tags_any/tag_prefix. tagMatchFloor (0.1) is well below typical
+	// genuine content-match scores (0.5-0.9), so a real semantic/lexical match
+	// always outranks a floored tag-only hit — the floor only rescues
+	// candidates that would otherwise score exactly zero. RRF scoring already
+	// honors inTagPool via its own pool boost. See invariants.md COG-5.
 	if inTagPool && contentMatch < tagMatchFloor {
 		contentMatch = tagMatchFloor
-		contentMatchFloored = true
+		floored = true
 	}
+	return contentMatch, semCal, floored
+}
 
-	// Compute ACT-R base-level activation B(M).
-	// B(M) = ln(n+1) - d × ln(max(ageDays, ageFloor) / (n+1))
-	// High n + low ageDays → high B (fresh, frequently accessed → strong base level)
-	// Low n + high ageDays → low B (old, rarely accessed → weak base level)
-	var lastAccess time.Time
-	if lastAccessNs > 0 {
-		lastAccess = time.Unix(0, lastAccessNs)
-	} else {
-		lastAccess = eng.LastAccess
-	}
-	// Treat an unset LastAccess as "just now" — these are newly written engrams
-	// that have never been accessed. A fresh write = maximum recency.
-	if storage.IsUnsetTimestamp(lastAccess) {
-		lastAccess = now
-	}
-	const ageFloorDays = 1.0 / (24.0 * 60.0) // 1 minute — sub-hour precision for intraday recall
-	ageDays := math.Max(now.Sub(lastAccess).Hours()/24.0, ageFloorDays)
-	n := float64(eng.AccessCount + 1) // +1 avoids ln(0) for never-accessed engrams
-	d := w.ACTRDecay                  // power-law forgetting exponent (default 0.5)
-	baseLevel := math.Log(n) - d*math.Log(math.Max(ageDays, ageFloorDays)/n)
-	// Cap baseLevel at the derived saturation threshold: the unique B(M) where
-	// softplus(B(M)) = actrDenominator, i.e. where raw = contentMatch (zero Hebbian).
-	// Above this, base-level alone exceeds the content-match gate — semantically wrong.
-	// Preserves score absoluteness: threshold=0.3 means the same in fresh and mature vaults.
-	// Hebbian boosts may still push totalActivation above the cap — that is intentional.
-	bLevelCap := math.Log(math.Exp(actrDenominator) - 1) // ≈ 1.489
-	if baseLevel > bLevelCap {
-		baseLevel = bLevelCap
-	}
-
-	// Total activation = base-level + scaled Hebbian boost + scaled transition boost.
-	// ACTRHebScale (default 4.0) amplifies both Hebbian and transition signals so
-	// they can meaningfully rescue old memories, matching Anderson's spreading activation.
-	// Transition boost uses the same scale as Hebbian — both represent contextual priors.
+// actrRaw applies the ACT-R contextual prior to a content match.
+//
+// Total activation = base level + scaled Hebbian + scaled transition boost.
+// ACTRHebScale (default 4.0) scales both contextual signals. softplus maps it
+// to (0, +inf); dividing by actrDenominator = 1 + softplus(0) makes a neutral
+// prior exactly 1. The upper bound is enforced after per-query normalization
+// in phase 6 — not here — so the caller sees true relative magnitudes.
+func actrRaw(contentMatch, baseLevel, hebbianBoost, transitionBoost float64, w resolvedWeights) float64 {
 	totalActivation := baseLevel + w.ACTRHebScale*hebbianBoost + w.ACTRHebScale*transitionBoost
-
-	// Contextual prior: softplus maps total activation to (0, +inf).
-	contextualPrior := softplus(totalActivation)
-
-	// Final raw score: ContentMatch gates contextual prior.
-	// Normalize by actrDenominator = 1 + softplus(0) ≈ 1.693 so that a median-activation
-	// memory with perfect content match produces raw ≈ 1.0. The upper bound is enforced
-	// after per-query normalization in the ACT-R scoring path (see caller) — not here —
-	// so the caller can see true relative magnitudes before rescaling.
-	raw := contentMatch * contextualPrior / actrDenominator
+	raw := contentMatch * softplus(totalActivation) / actrDenominator
 	if raw < 0.0 {
 		raw = 0.0
 	}
-	conf := float64(eng.Confidence)
+	return raw
+}
 
-	return ScoreComponents{
-		SemanticSimilarity:    semCal,
-		SemanticSimilarityRaw: vectorScore,
-		FullTextRelevance:     normalizedFTS,
-		ContentMatch:          contentMatch,
-		ContentMatchFloored:   contentMatchFloored,
-		DecayFactor:           math.Max(0.05, math.Exp(-ageDays/math.Max(float64(eng.Stability), 1.0))), // kept for reporting; guard against Stability=0
-		HebbianBoost:          hebbianBoost,
-		TransitionBoost:       transitionBoost,
-		AccessFrequency:       math.Log1p(float64(eng.AccessCount)) / math.Log1p(100),
-		Recency:               math.Exp(-ageDays * math.Log(2) / 7.0),
-		Confidence:            conf,
-		Raw:                   raw,
-		Final:                 raw * conf,
+// scoreACTR is phase 6's ACT-R entry point. In every shipped build
+// legacyACTRClock() is the constant false and this is computeACTR, with the
+// cache timestamp discarded HERE, before scoring is reached. Only the
+// cognitiontrial build can route to the pre-honest-clock scorer (the A/B
+// control arm).
+func scoreACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost float64, eng *storage.Engram,
+	lastAccessNs int64, now time.Time, w resolvedWeights, inTagPool bool) ScoreComponents {
+	if legacyACTRClock() {
+		return legacyComputeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost, eng, lastAccessNs, now, w, inTagPool)
 	}
+	return computeACTR(vectorScore, ftsScore, hebbianBoost, transitionBoost, eng, now, w, inTagPool)
 }
 
 // computeRRFScore computes the final score for a candidate using the Phase 3
@@ -3297,20 +3575,38 @@ func resolveWeights(req *Weights, def DefaultWeights) resolvedWeights {
 }
 
 func buildWhy(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, hopConcepts []string, queryStr string, useACTR bool) string {
+	return buildWhyOrdered(eng, c, hopPath, hopConcepts, queryStr, useACTR, false)
+}
+
+// buildWhyOrdered is buildWhy aware of COG-35. Under content-first order an
+// association signal is never named as the reason a row RANKED (it did not
+// move it); it is stated as what it is — evidence the row is associated with
+// recently activated memories.
+func buildWhyOrdered(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, hopConcepts []string, queryStr string, useACTR, contentFirst bool) string {
 	var parts []string
 
-	signals := map[string]float64{
-		"semantic": c.SemanticSimilarity,
-		"fts":      c.FullTextRelevance,
-		"decay":    c.DecayFactor,
-		"hebbian":  c.HebbianBoost,
+	// Candidate dominant signals, in a FIXED order so a tie resolves the
+	// same way every call (a map's random iteration order made the "why" of
+	// an identical recall vary). Decay is a candidate only off ACT-R: ACT-R
+	// applies no age term (computeACTR reports the neutral 1.0), so naming it
+	// as the reason a row ranked would be false.
+	type signal struct {
+		name string
+		val  float64
+	}
+	signals := []signal{{"semantic", c.SemanticSimilarity}, {"fts", c.FullTextRelevance}}
+	if !useACTR {
+		signals = append(signals, signal{"decay", c.DecayFactor})
+	}
+	if !contentFirst {
+		signals = append(signals, signal{"hebbian", c.HebbianBoost})
 	}
 	best := ""
 	bestVal := 0.0
-	for k, v := range signals {
-		if v > bestVal {
-			bestVal = v
-			best = k
+	for _, sg := range signals {
+		if sg.val > bestVal {
+			bestVal = sg.val
+			best = sg.name
 		}
 	}
 
@@ -3327,6 +3623,10 @@ func buildWhy(eng *storage.Engram, c ScoreComponents, hopPath []storage.ULID, ho
 		parts = append(parts, "frequently accessed recently, high decay relevance")
 	case "hebbian":
 		parts = append(parts, "strongly associated with recently activated engrams")
+	}
+
+	if contentFirst && (c.HebbianBoost > 0 || c.TransitionBoost > 0) {
+		parts = append(parts, "associated with recently activated memories (association evidence; does not change order)")
 	}
 
 	if len(hopPath) > 1 {

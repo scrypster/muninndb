@@ -246,7 +246,9 @@ func TestLink_SupersedesStampsTargetValidUntil(t *testing.T) {
 	}
 	firstStamp := old.ValidUntil
 
-	// A second supersedes link must not move the already-closed window.
+	// A second supersedes link onto the same target would fork it; it is
+	// refused (the evolve fork guard covers declared links too) and must not
+	// move the already-closed window either.
 	thirdResp, err := eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: "third fact", Content: "the third fact"})
 	if err != nil {
 		t.Fatalf("Write third: %v", err)
@@ -254,8 +256,15 @@ func TestLink_SupersedesStampsTargetValidUntil(t *testing.T) {
 	if _, err := eng.Link(ctx, &mbp.LinkRequest{
 		Vault: vault, SourceID: thirdResp.ID, TargetID: oldResp.ID,
 		RelType: uint16(storage.RelSupersedes), Weight: 1.0,
+	}); !errors.Is(err, ErrEvolveTargetSuperseded) {
+		t.Fatalf("Link (second): err = %v, want ErrEvolveTargetSuperseded", err)
+	}
+	// Re-declaring the SAME edge is idempotent and must not move it either.
+	if _, err := eng.Link(ctx, &mbp.LinkRequest{
+		Vault: vault, SourceID: newResp.ID, TargetID: oldResp.ID,
+		RelType: uint16(storage.RelSupersedes), Weight: 1.0,
 	}); err != nil {
-		t.Fatalf("Link (second): %v", err)
+		t.Fatalf("Link (same edge again): %v", err)
 	}
 	old, _ = eng.store.GetEngram(ctx, ws, oldULID)
 	if !old.ValidUntil.Equal(firstStamp) {

@@ -308,7 +308,7 @@ when the cost equation changes, don't let an old call block a index built for it
 Reliable-colleague work surfaced a recurring trap: tuning a threshold/baseline/vocabulary on the
 maintainer's own vault and shipping that constant as the universal default. #712 currency
 (version-cluster) failed this twice — v1's entity anchor didn't fire on the entity-sparse real
-vault, and v2's tag-marker vocabulary (`four-bucket`, `v2`, `final`) + document-frequency
+vault, and v2's tag-marker vocabulary (a pricing-scheme label, `v2`, `final`) + document-frequency
 thresholds were tuned to one vault's pricing history (and still false-positived on it, telling a
 shipped fact it was superseded by an aspirational "planned" one). The semantic-abstention floor's
 `b = μ+2σ` was derived from that vault's embedding anisotropy — a value that fits bge-small on that
@@ -322,6 +322,13 @@ vault's OWN data (self-calibrating — #711 weights IDF from the vault's own cor
 floor should self-measure each vault's anisotropy baseline over its own embeddings) or exposes a
 per-vault override; model/cold-start defaults are hints, never fixed law. Ship mechanisms and
 hints, not other people's answers.**
+
+*Status, 2026-11-15: the self-measuring floor is not built.* The floor in use is a per-model
+registry value (`noiseBaselineRegistry` in `internal/plugin/embed/baseline.go`) that a vault
+can override with `semantic_floor` — the hint-plus-override form of the principle.
+`AnisotropyBaseline` characterizes a MODEL on a fixed corpus and has no production caller.
+Product text that said a band is judged against "this vault's own noise floor" was corrected
+in the honest-relevance-labels change; nothing is measured per vault today.
 
 ### A config value must denominate a unit someone can reason about (assoc decay / #762, 2026-08-01)
 
@@ -1310,3 +1317,1049 @@ the shape; finding an instance of the shape is still per-subsystem work.
 one day is itself the evidence that "a claim that reads the same when false" is a species,
 not an incident — and the falsifier that catches most of a species does not catch all of
 it. State which half a general check reaches before treating it as coverage.**
+
+### Age stops deciding findability: the honest clock, increment 1 (2026-11-14)
+
+**What was wrong.** ACT-R's "last access" came from the in-memory L1 read-cache timestamp,
+falling back to the persisted field only on a cache miss. Any load reset it and a restart
+wiped it, so recall ran in two regimes. Cold (fresh process, eviction, read-only harnesses),
+a never-accessed memory stopped clearing the gate at ~29 days for an exact match and 2–7
+days for looser matches. Warm, every pooled candidate sat at the cap and there was no decay
+at all. On a production server about a quarter of live memories older than 35 days were not
+returned for a recall of their own exact text — and came back at rank 1 once anything had
+loaded them. A gated-out candidate was even rehearsed by the very recall that rejected it.
+
+**Decision: Shape A+ now.** The ACT-R base level is the neutral constant `bLevelCap` for
+every memory (prior exactly 1); `computeACTR` has no cache-timestamp parameter; exact score
+ties break newest-first at every cut and at the final sort (`internal/rankorder`); every
+surface reports the factor actually applied (decay/recency 1.0, access frequency 0 under
+ACT-R; the stored Ebbinghaus `relevance` is dropped from ACT-R recall rows). No constant is
+calibrated, nothing on disk changes, the gate formula is untouched (with a prior ≥ 1 it
+already reduces to `min(CM, 1) × confidence`). Invariants COG-7 (amended) and COG-34.
+
+**Why not Shape B (a calibrated age/use salience term) now.** B is A plus a bounded salience
+term `rank = CM·(1+λ·s)` whose λ needs a per-vault census of near-verbatim twins — new
+machinery that reorders every pair within the factor (1+λ), not just twins, and should be
+designed once together with earned use. It is increment 2, gated by a pre-build measurement
+of whether agents actually prefer the newer twin.
+
+**The honest negative: "persisted clock, no floor" was rejected on arithmetic.** Reading the
+persisted `LastAccess` without flooring the prior at neutral makes one access make a memory
+LESS findable than none after 9.8 h (d=0.5), 0.9 h (d=0.2), 3.4 h (d=0.3), 17.7 h (d=0.8) —
+it penalises exactly the memories known to be used. The floor is required; with the COG-7
+cap, floored means equal to neutral, so in increment 1 access history has no ACT-R effect.
+
+**What the newest-first tie rule had to fix, and why it is one function.** The FTS top-k cut
+(made deterministic earlier, ascending ID) runs BEFORE the final sort, so with 300 identical
+memories the newest 200 never became candidates whatever the final comparator said; the
+RecentActive bucket walk, the time-bounded pool, PAS transition targets and phase-3 fusion
+all cut oldest-first or in map order too. One `rankorder.Before` used by every layer makes
+the layers unable to disagree, and lets the trial-only kill switch flip all of them together.
+
+**Accepted cost.** With age out of scoring, when two undeclared versions of a fact both
+match, the one phrased closer to the query ranks first even if older. The old cold engine
+returned only the newer one (age beat content 5:1 — it also ranked a 120-day exact match
+below a 3-day weak one, which was the defect); the old fully-warm engine already ranked the
+closer-phrased one first. Stale copies should retire through supersession (`muninn_evolve`)
+or a declared `valid_until`, not age. Abstention is unchanged against the warm engine: the
+gate expression did not move, nonsense returns only `weak` rows, and a localassets test
+shows the new cold engine returns exactly the rows (and absolute scores) the old warm one did.
+
+**Residuals named.** weighted_sum/CGDN keep the cache clock (D2: their age terms are additive,
+so there is no neutral; removing the clock alone would make their ~45-day cliff permanent).
+The PAS/Hebbian activation log is in memory and changes ranking across a restart, never the
+gate. The `actr_decay` field and the preset values are kept (WARNed as inert) because
+increment 2 gives them a job. No runtime toggle ships: the A/B control is a `cognitiontrial`
+build with `MUNINN_TRIAL_LEGACY_ACTR_CLOCK=1`, per the kill-switch refusal above.
+
+**What is and is not guaranteed.** Guaranteed: whether a memory is found, its absolute
+score and its relevance band are functions of persisted state — not of age, access history,
+cache state, uptime or a restart. NOT guaranteed: rank. The Hebbian and PAS boosts read an
+in-memory activation log that every read_only=false recall writes, that weights entries by a
+wall clock and that a restart wipes. Probe (now pinned, fails when fixed): after one
+unrelated normal recall an associated row went to rank 1 (score 1.000) over an exact match at
+0.82; in a fresh process the exact match was rank 1 again. This increment deliberately does
+not touch those mechanisms (`TestHonestClock_KnownResidual_InMemoryBoostsReorderAcrossARestart`).
+
+**Entity-boost seeds need real evidence (found in production on this branch).** On 60
+made-up-word queries the build returned 74 `weak` rows plus 111 `uncalibrated/not_scored`
+rows injected only because they shared a named entity with a weak row: once age stopped
+gating old weak seeds out cold, noise seeded noise. A seed may now INJECT only if its own
+band is moderate or strong — computed before the boost from phase 6's AbsoluteScore by the
+same `applyRelevanceBands` the response uses, so no new constant. A weak-only response
+injects nothing; boosting rows already present is unchanged; an uncalibrated response
+(weighted_sum, CGDN, degraded semantic channel, unregistered embed model) keeps the old rule
+because it has no noise-relative bar to judge by — a named residual.
+
+**A weak-only response is withheld by default (weak_only).** Measured on a production
+install with this build: 150 real agent queries returned 1,096 rows of which exactly one was
+`weak`, while made-up-word queries returned 141 weak rows. On a calibrated vault, an all-weak
+response is in practice a query the vault cannot answer, and it cost the agent up to `limit`
+rows of near-noise (recall payloads are the main token cost of memory). So it abstains,
+loudly: `abstained_reason: "weak_only"`, `weak_available`, a hint naming `include_weak`.
+Judgement calls: an explicit threshold keeps its meaning (the caller chose the bar; the wire
+cannot tell explicit 0 from unset, so MCP opts out whenever the argument is present); any
+explicit filter means the caller defined the set; `deep` is an explicit exhaustive request
+and implies include_weak; historical recall follows the same rule because its bands are the
+same. Uncalibrated responses (rrf, weighted_sum, CGDN, degraded, unregistered model) are
+unchanged. On a 300-memory synthetic fixture (real bge-small): 40 made-up queries abstained
+28 → 31 (102 → 90 rows; the rest carry at least one moderate row, which this rule
+deliberately does not trim); 40 topical queries: 0 responses changed.
+
+**Correction (2026-11-15, honest relevance labels): the converse does not hold.** An all-weak
+response is in practice a query the vault cannot answer; a query the vault cannot answer is
+NOT in practice an all-weak response. Made-up words mostly abstain: in the project's
+acceptance kit, 57 of 60 single-phrase random-word queries (about 95%) returned nothing. A
+fluent question about something the vault does not hold mostly does not: in a cross-vault
+replay (a real query from one product sent to an unrelated product's vault), the engine
+returned nothing 14 of 60 times at one phrase and 1–2 of 60 at two or more phrases; in the
+graded gate-open replay only 3 of 60 would have been withheld as weak-only, and of the 300
+top rows graded, 263 were banded `moderate` and none was on topic. Both are read-only
+measurements on production vaults, 2026-11-15. No product text may describe a response
+that was not withheld as evidence that the vault holds an answer (COG-30 (d)).
+
+**Invariant number collision.** COG-34 is the next number after the highest invariant on
+this branch (COG-33). Other unmerged designs (#872 among them) also claim COG-34; whichever
+merges second renumbers.
+
+**Product wording that is untrue while this is the last increment shipped** (owner's call;
+deliberately not edited here):
+- `README.md:3` — "fades when unused" (tagline): ACT-R recall has no age or disuse term.
+- `README.md:5` — "engine-native Ebbinghaus decay" (patent line): recall does not apply it
+  under ACT-R; only the pruner's base-level scan and weighted_sum still use age.
+- `README.md:260` — "Memories you ignore fade naturally. The database moves while you sleep."
+- `docs/plugins.md:33` — "memories you ignore fade naturally".
+- `docs/index.md:17` — lists "temporal decay" as a cognitive primitive.
+- `docs/cognitive-primitives.md:20` — "A fact you looked up once and never revisited fades."
+- `docs/cognitive-primitives.md:24` and `:28-36` — "MuninnDB implements this directly" and
+  the B(M) formula as the scoring base level.
+- `docs/cognitive-primitives.md:40-56` — the worked "~37x temporal advantage" example.
+- `docs/cognitive-primitives.md:62,66` — "Relevance tracks reality"; B(M) computed at query
+  time from access count and last access.
+- `docs/cognitive-primitives.md:327,329` — an unaccessed memory's activation "naturally
+  decreases"; each access "makes the memory more cognitively available".
+- `docs/how-memory-works.md:42` — "a memory used heavily but not recently still fades".
+- `docs/how-memory-works.md:44,46` — the 37x example and "MuninnDB implements this directly".
+- `docs/how-memory-works.md:120` — memories "resistant to fading"; burst memories "lose
+  relevance faster".
+- `docs/how-memory-works.md:140` — "Irrelevant things fade."
+- `sdk/python/muninn/langchain.py:5` — "relevance decays over time, frequently recalled
+  memories strengthen" (recall never counts as access, COG-12, and nothing decays in ranking).
+- `sdk/python/muninn/langchain.py:65` — "decay curves".
+- `sdk/python/muninn/langchain.py:152-154` — `clear()` relies on "natural decay"; "Memories
+  fade on their own as they stop being recalled" — they do not; use `valid_until`,
+  `retention_days`, forget, or a new vault.
+
+**Principle: a scoring input that a restart can change is not an input, it is noise with a
+schedule. Findability must be a function of persisted state; ranking may use learned,
+process-local signals only where they can promote and never gate — and a doc that says
+ranking is restart-invariant while such a signal exists is the same lie in prose.**
+
+### Embed lanes: recall's query embed stops queueing behind backfill (2026-11-15)
+
+The bundled local embedder serialised every inference behind one `sync.Mutex`, and a
+mutex cannot be abandoned: a 5 ms-deadline query embed returned `err=nil` 2.4 s later
+behind a batch, so #658's "reserve half the deadline for the BM25 fallback" never worked
+for this provider. Recall under a batch loop was p50 ~2.4 s (16 ms idle); with a 200 ms
+deadline it hard-failed with zero results and `semantic_degraded=false`. It now runs
+inference in two one-at-a-time lanes whose acquisition honours the caller's context, and
+a missed budget degrades to BM25 with `semantic_degraded_reason=embed_timeout`.
+
+**Who takes which lane.** Only recall's phase-1 query embed is marked
+(`embedlane.WithQuery`) and takes the QUERY lane. Everything else takes the BATCH lane:
+recall-brief sentence scoring, trigger and subscription embeds, the retroactive
+processor, write-path embeds, and the plugin health probe. The lane is chosen by the
+caller's explicit mark, never by text count (a single-text write is background work);
+a marked call over 4 texts also falls to the batch lane to bound memory.
+
+**Capacity is a measured limit, not a tuning knob.** One query lane means a burst of
+simultaneous recalls serialises on it: a 50-way fan-out measured p50/p99 635 ms / 1.25 s
+idle and 1.13 s / 2.11 s under a batch loop. Widening it is a capacity decision gated on
+re-running the bit-equality stress: lanes share one ORT session and are bit-identical
+to a serial run at the 2-way concurrency they permit (0 mismatches in 12,000 runs at
+2-way, 16,000 at 8-way), but at 16-way 3 of 136,000 shared-session runs and 1 of 72,000
+separate-session runs differed in every component (max diff ~0.005, cosine ~0.9995) —
+ORT's CPU kernels under oversubscription, not session sharing.
+
+**The model is not batch-invariant, and never was.** The bundled bge-small int8 model is
+dynamically quantized, so a vector depends on its batch-mates (alone vs in a batch:
+cosine p50 0.9994, min 0.9989; batch of 8 vs 64: min 0.9985). An exact own-text match
+scores ~0.998, never 1.0; nothing may assume self-cosine 1.0. The batch size dropped
+64 -> 8 because throughput was flat across chunk sizes 1-64 while peak RSS scaled with
+the batch (~0.8 GB at 8 vs ~2.2-2.8 GB at 64 on a 2 GB production host); re-embeds after
+that change move vectors by at most the amounts above.
+
+**Residuals, recorded.** The local provider is no longer rate-limited, so a user-set
+`rate_per_sec` plugin option is now ignored for it (as it always was for Ollama) — the
+smaller correct change than a batch-only bucket, since an in-process model has no quota
+to protect. An inference that has started cannot be cancelled, so a deadline can still
+be overrun by up to one inference (~20-40 ms query, ~0.2 s batch). gRPC now carries
+`semantic_degraded`/`semantic_degraded_reason` (fields 7/8); before, it served
+keyword-only rows unmarked — silent on that transport, and the lanes made that outcome
+the common one for a deadline behind a batch.
+
+### The label pipeline: labels are child rows of the recall they describe (slice 2a, 2026-11-15)
+
+**Context.** Explicit feedback taught the engine nothing: `muninn_feedback` sent an inert
+weight update plus a fire-and-forget access bump, an omitted or string `useful` was silently
+recorded as a NEGATIVE, a read-only recall's `query_id` was a process counter that restarted
+at 1 on every boot, and the MCP recall response did not even carry the id. Measured on a
+production deployment: 94.6% of live memories had never been accessed. Slice 2a makes it
+possible, cheap and safe for an agent to say which recalled memories it used, and records
+each label with what a later slice needs to correct for position and exposure bias. **Nothing
+in ranking reads labels in this slice.**
+
+**Decisions, and why.**
+
+- **Child rows, not a new prefix.** A label is `0x29|ws|E|'L'|memory|credential-hash`, a
+  child of the recall event it refers to. ClearVault's 0x29 range, the exclusion from
+  export/clone/merge, and retention all come for free from 0x29's existing deliberate
+  treatment, so the "a new prefix was missed by a list" class cannot happen. The price is
+  that every 0x29 value decoder must select 25-byte keys (STO-21) — which they already did.
+- **Labelled events live 180 days, unlabelled 90.** So the salience design's day-90 premise
+  re-run sits inside the window. Disclosed cost: a labelled event keeps its raw query text
+  for 180 days. A rollback binary prunes labelled groups at 90.
+- **The read-only id is self-verifying and NOT bound to the labelling credential.** A
+  harness drain labels later, from another session, possibly with another key; binding the
+  MAC to the labeller would reject exactly that path. The recall credential's hash is
+  authenticated inside the id instead, so every label records whether labeller = recaller.
+- **The read-only id binds its returned rows (security review).** Without them, a cheap
+  read-only recall minted an id that could label ANY memory. Each of the first 100 rows
+  (MCP's recall cap) gets a 4-byte keyed tag in served order, covered by the MAC; a label for
+  an untagged row 101+ (other transports) is rejected as `untagged_row`: membership and rank become checkable statelessly
+  (the spec's deferred D3, pulled forward). Exact verification would need the full 16-byte
+  ids (22 chars per row); 4 bytes keeps a 10-row id at 142 chars and a 50-row id at 355, and
+  a forgery is online-only (k_q is secret) with probability k/2^32 per minted id — and its
+  only effect is a label row.
+- **The access-bump cap is durable (three security reviews).** First an uncapped bump; then
+  an in-memory per-day table with one global cap (one tenant could starve all others); then a
+  partitioned table with no overall ceiling. The mistake in all three was letting an
+  in-memory table make an AUTHORISATION decision. The day marker
+  `0x29|ws|D|'B'|memory|credential-hash` decides it: at most one bump per (memory,
+  credential, UTC day), across restarts, and only for a LIVE memory (not soft-deleted,
+  superseded or expired). Markers are written for verified members of a recall and, on the
+  legacy form, for memories that exist. Memory now holds metrics only (a fixed-size,
+  per-existing-vault rejection tally).
+- **Uniform response for callers that cannot read; outcomes for callers that can
+  (adversarial review).** A write-mode key gets `{ok, received_groups, received_ids}` whatever
+  happened, so it cannot learn existence through feedback. A credential that can recall in the
+  vault gains nothing from uniformity and lost the ability to self-correct: the first build
+  silently lost every label posted without `vault` on an unpinned server (the copied call had
+  no vault, so it resolved to `default`). Readers now get one result per id — recorded,
+  repeat, or rejected with a reason (`not_in_recall`, `substituted` + the head id,
+  `unknown_query`, `wrong_vault`, `untagged_row`, `no_key`) and a hint — and a credential
+  that may read every vault is told which vault a misdirected id belongs to. The copyable
+  call carries the vault.
+- **"Nothing in ranking changes" is pinned under ACT-R only.** Labels feed no scoring
+  phase. The first positive label's access bump is the pre-existing `useful=true` channel,
+  now capped at one per memory/credential/day: under ACT-R access history does not reach
+  ranking (COG-7, `TestLabels_RecallOrderUnchanged`), but on a weighted_sum vault access
+  counts still feed the access-frequency term, as before this slice.
+
+**Owner defaults taken (not re-litigated):** append-mode credentials may label (SEC-15
+amendment); `useful` is required and must be a JSON boolean; negative labels are recorded and
+have no ranking effect; labelled events kept 180 days vs 90; labels do not travel with export
+or clone; no new prefix; the per-memory use summary and evolve carrying use history forward
+are the next slice.
+
+**Residuals, stated.** Prune does not replicate (inherited). Each node has its own
+`auth_secret`, so a read-only id (`ro2.`; `ro1.` before the associated block got its own
+section) minted on a follower fails on the leader. Open-server and
+static-token deployments are one credential for labelling. REST/MBP/gRPC writes carry no
+session, so their memories label as `self = unknown`. A hard-deleted memory's labels remain
+until prune, as its ids in 0x29 entries always did.
+
+### Cache fills are guarded at the commit, not at the call sites (2026-11-15)
+
+**Context.** Four independent reproductions in one night of one bug class: a read-through
+cache filled with a value read BEFORE a concurrent write committed, AFTER that write had
+invalidated the entry, so the stale value stayed cached. The forms: a recall's phase-6
+snapshot read re-caching a pre-write relevance; a lost access-count bump; a forgotten memory
+re-cached as active so `restore` refused it; a stale metadata-cache state that made a later
+restore skip its state-index move. "Invalidate before commit" (the existing pattern) cannot
+close it: the stale read can start before the invalidation and fill after it.
+
+**Decision.** A global write clock plus 4096 striped generations per cache family (engram
+values; association lists), in `cache_guard.go`. Writers bump after commit and then drop the
+entry; readers take the clock before pinning their source and install compare-then-recheck.
+The bump lives in `PebbleStore.commitBatch`, which walks the committed batch's keys, rather
+than in each write method: fifty-odd commit sites in the package, and a single forgotten one
+re-opens the bug. A source-scan test makes a raw `batch.Commit` in storage a test failure.
+
+**Alternatives rejected.** A per-key mutex on the read path (the brief ruled it out; it also
+serialises every concurrent recall on hot keys). Pebble sequence numbers (not exported by
+pebble v1's `Snapshot`, so a snapshot read cannot state its sequence). Invalidate-and-forbid
+windows (needs a timeout to end the window, which is a timing assumption). Not filling from
+snapshot reads at all (correct, but phase 6's batch read is recall's cold-fill path, so
+every recall after an invalidation would go back to Pebble).
+
+**Cost, measured.** Interleaved A/B on a shared machine: GetEngram hit and 50-id
+GetEngrams batches all within noise (hits never touch the guard); same allocations except
++0–2 on a 50-id all-miss batch. Writers that re-cached their own struct now pay one extra
+Pebble point read.
+
+**Residual.** Unlocked writers can still lose a locked writer's update in Pebble itself —
+a write-write race, not a cache one; listed in STO-22. `recentActiveCache` stays a TTL'd
+candidate list.
+
+### Retired versions stop taking candidate slots; declared chains lose their depth cap (2026-11-15)
+
+Evolve retires a version but leaves its vector in HNSW and its postings in FTS — on
+purpose, because COG-28 needs that evidence to route a query worded like an old version
+to the current head. Recall took the top k per index and only THEN dropped retired
+engrams, so they spent slots the phase-6 filter emptied. Measured on synthetic fixtures:
+in a 2,000-memory vault (k = 45) a 50-version chain on a topic took 44 of 45 vector slots
+and 0 of 20 relevant live memories came back; a 500-version chain took every slot and the
+recall returned nothing (`superseded_only`, the head lost too). Separately, the chain walk
+stopped at 8 hops, so for chains of 10+ an old-wording query's evidence was discarded and
+every recall that touched a long chain logged depth-cap WARNs (~15 per recall on a
+500-version chain). A production vault holds 18 chains longer than 8 (the longest ~495,
+repeatedly-evolved bookmark-style memories) and 15 forks.
+
+**One retired set, in the store, derived from what was committed.** A per-vault in-memory
+set of retired engrams (soft-deleted or archived) lives in `PebbleStore`. It is driven from
+`commitBatch`, through which every engram-record commit goes (a source-scan test pins it),
+on success and on error alike: each 0x02 metadata key a batch sets or deletes re-derives
+that entry from the record now in Pebble — the batch only says which records may have
+changed, so being told about a commit that failed is harmless and not being told about one
+that landed despite an error is impossible (a security review flagged the success-only
+form as fail-open; the replication applier's hooks follow the same rule). The first version noted only when the writer's cached old
+state differed from the new one; review showed a recall's snapshot read refilling the
+metadata cache with a pre-forget "active" made a later restore look like a no-op, so a
+restored, live memory stayed in the set and was hidden from recall until a restart (a
+randomized lifecycle differential diverged on every seed; the enrichment digest rewrite,
+which no lifecycle hook covered, left 2–4 of 3,000 live memories hidden). The same stale
+gate skipped `UpdateMetadata`'s 0x0B move; it now reads the old state from the raw record.
+The set is built from the 0x02 records themselves, not the 0x0B index, because the index can
+diverge from the records and a set built from it differed across a restart. Followers get
+the same rule through the replication applier's commit hooks; a resnapshot drops the set.
+No on-disk state. Measured: 20,000 memories / 5,000 retired build in ~2.5 ms, ~80 KB
+retained, 9 ns per lookup. The design asked for a per-index set; one shared set is the
+same information with one place to keep it correct.
+
+**Route, don't tombstone.** `hnsw.Index.SearchLive` treats a retired node as a routing
+node: it is expanded, never counted toward the ef beam, and the nearest 16 are returned as
+shadows on their own budget. Tombstoning was measured worse in the proof pass and would
+discard the evidence COG-28 redirects. Bounds, both derived from the index: retired
+expansions ≤ max(ef, N/M0) (the routing detour costs at most about one exact pass), and a
+walk that routes through a full beam (ef) of retired nodes, spends that budget, or ends
+short of ef live hits makes ONE exact pass over the unvisited nodes. The beam-of-retired
+trigger came from review: a walk inside a large retired region stops "by distance" on a
+beam of distant live hits (the frontier cap drops candidates there); on a 12k index with ten
+500-version chains, chain-aimed recall@10 against exact search over live vectors was 0.44,
+0.52 with budget exhaustion added, 1.00 with it (off-topic queries 0.84 → 0.92, the pass
+firing on 81 of 200 of them at ~1.4 ms each on that 42%-retired index).
+That fallback is load-bearing, not belt-and-braces: 34+ near-identical vectors form a
+CLOSED island (the neighbour-selection defect, 1A) — an unbounded walk through a
+500-version island reached 0 live nodes — so without it skipping retired nodes would
+return nothing. FTS skips retired documents at the cut instead of dropping postings
+(dropping them is what forget does to trash; for a superseded version it would make the
+old wording unable to find the current fact, and would need a backfill for every
+existing chain); no over-fetch is needed because BM25 scores every match before the cut.
+Shadows enter fusion with raw scores and no rank, so they feed the shadow pass but never
+seed the Hebbian boost or traversal. Historical views skip nothing. A vault with an empty
+retired set calls the unchanged `Search`.
+
+**No depth cap, no head map.** The walk limit is now retired count + 8: a chain of retired
+intermediates always reaches its terminus, and the 8 hops of slack bind only on hand-made
+graphs of active nodes. The walk's reads are memoised per recall phase; a 499-hop store
+walk measured 0.7–1.6 ms. The O(1) retired→head map was not built: the successor relation
+lives in 0x04 rows that ~15 storage sites mutate (Hebbian weight moves and decay archival
+included), so the map would be a second copy of every chain with that many invalidation
+obligations, to save about a millisecond on the recalls that touch a 500-version chain.
+Chain WARNs log once per (vault, node, kind) per process.
+
+**The candidate budget stays on the total count.** Sizing it from live memories (the
+design's suggestion, first built) made it jump across `CalcCandidatesPerIndex`'s 1,000 cliff
+with churn: 1,420 memories with 500 retired went from 37 to 920 per index (p50 1.1 → 3.6 ms)
+and would flip back as memories were restored. Since retired engrams no longer take slots,
+k is already "live hits per index"; the total count moves only on write and hard delete.
+Cross-binary differentials over one shared data dir with nothing retired, at 950, 1,050 and
+1,500 memories (both sides of the cliff), were identical to the trunk.
+
+**Measured before → after** (synthetic starvation fixture, 20 relevant live memories,
+vector-only query): see the commit for the full table; at 2,000 memories relevant
+reached went 20/20/0/0 → 20/20/20/20 for chains of 0/10/50/500, at 300 memories
+20/20/0/0 → 20/20/20/20. Recall p50 at 2,000 memories: no chain 0.44 → 0.43 ms;
+50-chain on-topic 0.45 → 0.87 ms (the exact pass plus 20 more live candidates scored);
+500-chain on-topic 5.1 → 2.0 ms (the old cost was eight-hop walks and their WARN flood).
+
+**Residuals, recorded.** The decay pool (`RecentActive`, state-blind, with a 1 s cache that
+ignores topK) still admits retired engrams. A `Link(relation=supersedes)` target is
+stamped but stays active, so it is not retired and still competes (and a chain built only
+from supersedes links keeps the old 8-hop reach); including it needs a clock-aware set.
+Pre-existing defects found on the way, not fixed here: a soft forget drops the memory's FTS
+postings and restore never re-adds them (a restored memory is unfindable by keyword); the
+digest rewrite takes no stripe lock and can commit a pre-forget copy (resurrecting a
+forgotten memory); snapshot reads refill the shared caches with stale records. Live near-duplicate islands (1A with no retired versions) are untouched: the
+plain `Search` path is unchanged, and 34+ live near-duplicates still hide everything
+behind them.
+
+### Integration of the cache guard and the retired set: one commit point (2026-11-15)
+
+**Decision.** `fix/cache-stale-fill` and `fix/retired-candidates` each introduced a single
+commit point for batches in `internal/storage`. The merged tree keeps one
+`PebbleStore.commitBatch` (`cache_commit.go`): commit, then the cache invalidation walk, then
+the retired set's `noteCommittedBatch` — both on success and on error. The order matters:
+the retired set re-derives each entry from the record as stored, read straight from Pebble,
+so it never sees a cache at all; invalidating first means nothing that follows can be served
+a pre-commit cached value. Followers compose the same two consumers in the same order on
+the applier's commit hook and on a resnapshot (`cmd/muninn/server.go`).
+
+**Known open, NOT fixed here (carried forward):**
+- Restore never re-adds the keyword (FTS) postings that forget removes, so a restored memory
+  cannot be found by keyword.
+- `UpdateDigest` can undo a concurrent forget (it rewrites the record from an older read).
+- The unlocked full-record writers — `UpdateRelevance`, `UpdateTrust`, `StampValidUntil`,
+  `UpdateMetadata` called directly, `StoreBatch.mutateEngram` — can lose a locked writer's
+  update in Pebble (record vs 0x0B state index). A write-write race, not a cache one (STO-22).
+- Closed near-duplicate islands in the HNSW graph: live near-duplicates can be unreachable
+  from the entry point.
+
+### Liveness has one source: the engram record (2026-11-15)
+
+**Context.** Review of the merged trunk found a new way to hide a live memory: a clone (or
+merge) of a vault being written copied 0x01 and 0x02 in separate live passes, so a forget
+between them tore the copy — 0x01 active, 0x02 soft-deleted. The retired set read 0x02;
+recall's filter and Read read 0x01. Reproduced as "Read says live, default recall never
+returns it", identical after a restart; 73 of 150 clones in a differential were torn.
+
+**Decision.** 0x01 is the single source of truth for liveness (STO-23), because it is what
+recall's final filter and Read already use; the cheaper 0x02 stays the scan's consistency
+check. Clone and merge read their source from one snapshot. Existing torn copies are not
+rewritten: the build trusts 0x01, counts the disagreement and WARNs once per vault.
+
+**Also pinned in this change (STO-22 guards no test covered):** the fill token is taken
+before the snapshot pin (a test seam lands a write between them); a follower's vault clear
+invalidates through the range tombstone; ClearVault bumps the fill generations
+(`InvalidateVault`) as well as dropping entries — the in-flight-fill test fails only when
+BOTH that and the range-tombstone path are reverted, since either alone suffices on the
+leader; the reverse-association fill is guarded.
+
+**Known open, NOT fixed here:**
+- `ClearVault` can panic: it calls the provenance worker's `Drain()` while concurrent
+  metadata writes call `Submit` ("sync: WaitGroup is reused before previous Wait has
+  returned", provenance_worker.go:101 ← vault_lifecycle.go:87); present before and after
+  these merges.
+- Clearing any vault empties the metadata and association caches for every vault (metaCache
+  is keyed by engram ID alone, so it cannot be scoped without a key change); the retired set
+  reset is now scoped to the cleared vault. Cost: one slower recall (+10–20 ms) per vault.
+- A shadow substitution can differ across a restart when the HNSW graph is repaired on load
+  (1 of 432 probes on one seed; the live head was returned both times).
+- Cache invalidation runs straight after commit, not in a defer (no reachable panic found
+  between them).
+- `internal/index/adjacency` writes 0x03/0x04 keys with a raw commit, bypassing
+  `commitBatch`; only its own test imports it today.
+
+
+### Storage hardening: record writers lock, restore inverts forget, clears stay scoped (2026-11-15)
+
+Closes four of the known-open items listed by the two entries above.
+
+**Every read-modify-write of an engram record holds its stripe lock (STO-24).** The
+alternative was a per-field merge without a lock (patch only my bytes into whatever is on
+disk). Rejected: a patch is still a read followed by a write, so it needs the same
+serialization to not revert a whole-record writer, and five whole-record writers
+(`SoftDelete`, `UpdateTags`, `UpdateConfidence*`, `UpdateDigest`) already existed. So the
+rule is both: hold the lock, and write only the fields you own over the committed record.
+`StoreBatch.mutateEngram` defers its read to `Commit` and takes every touched stripe in
+ascending order; the alternative (hold the lock from queue to commit) puts arbitrary caller
+code inside a non-reentrant lock. Callers that passed a whole metadata struct read earlier
+were moved to field-scoped writers (`AddAccessCount` for dream dedup) or to the `*Locked`
+variants under `LockEngram` (`Engine.Restore`). Benchmarked uncontended: see the commit.
+
+**Restore is the exact inverse of a soft forget.** A soft forget changes the state and drops
+the keyword postings, nothing else (vector, tag and entity indexes, associations and the
+content hash stay). Restore rebuilds the postings with `ReindexEngram(doc, doc)` — every
+posting, no DF or corpus-count move — which inverts `fts.DeleteEngram` exactly and is a no-op
+for a memory whose postings were never dropped. A retag of a forgotten memory now moves DF
+from the old tags to the new ones before dropping the postings, so forget → retag → restore
+equals a plain retag (score-equality pinned). Forget's two halves and Restore's rebuild run
+under the engram's lock. Memories restored before this change have no postings;
+admin observability reports them per vault (`keyword_unindexed_live`: live records with
+no keyword posting, one point read each, cached ten minutes, recomputed after a rebuild),
+and `muninn vault reindex-fts <name>` repairs them — nothing is rewritten automatically.
+The rebuild now drops a forgotten memory's postings after indexing it (term frequencies
+kept, as Forget keeps them), so it no longer makes trash keyword-findable. Follow-up: a
+state change out of soft-deleted (`muninn_state`, `muninn_compare_and_set`,
+`UpdateEngramState`) is refused with `ErrRestoreRequired`, so Restore is the only way back
+and always re-indexes; archival changes state only, so un-archiving needs nothing.
+`UpdateEmbedding` applies its batch under the stripe and syncs the WAL after releasing
+it (same durability, no fsync inside a shared stripe).
+
+**The provenance drain is epoch-based, not a WaitGroup.** A `sync.WaitGroup` cannot be
+`Add`ed while a `Wait` is returning, which a vault clear racing writes does routinely; the
+tracker also makes `Drain` wait only for jobs submitted before it began, so it cannot starve.
+
+**Clearing a vault keeps other vaults' association caches.** `metaCache` is still purged
+whole: it is keyed by engram ID alone, and scoping it is a cache-key change.
+
+**Still open:** provenance submitted after its write's commit can land after a clear's
+tombstones (a write committing just before the clear); metaCache keyed by ID alone also
+means a cloned vault and its source share entries; closed near-duplicate islands in HNSW.
+
+### Closed islands in the vector index: diverse neighbour selection (2026-11-15)
+
+**The defect.** `Insert` kept the M (layer 0: M0 = 32) nearest candidates as a node's
+neighbours and `pruneNeighbors` kept the nearest when a neighbour's list overflowed. Any set
+of 33 or more vectors that are each other's 32 nearest neighbours therefore ended with no
+layer-0 edge leaving the set: edges INTO it survive in outsiders' lists, so the load-time
+forward check passed, but a search whose descent lands inside can never leave. It is not
+limited to near-duplicates — synthetic ~40-member topics (intra-topic cosine ≈ 0.69) close
+the same way, 1,676 of 2,000 nodes on one corpus. All measurements here are on synthetic
+vectors; no production vault was read.
+
+**Decision.** One selection rule for a node's own pick AND for back-link pruning
+(`internal/index/hnsw/select.go`): Malkov–Yashunin Algorithm 4 (keep a candidate only if it
+is nearer to the base than to every neighbour already kept) with keepPruned back-fill (top
+lists up with the set-aside candidates, nearest first), plus one addition — a candidate
+bit-identical to a kept neighbour is set aside, because with identical vectors every
+comparison ties and the strict test keeps them all (40 identical vectors closed under the
+plain heuristic: `TestInsert_ExactDuplicatesAreNotClosed` fails with the addition removed).
+#620's just-linked edge is kept first. Ids with a missing vector are never selected (the old
+prune sorted them last; a search cannot expand them). The entry point is the smallest id at
+the top level, live and at load, so a reloaded graph starts every search where the live one
+did. A `cognitiontrial`-only switch (`MUNINN_TRIAL_LEGACY_HNSW_SELECT=1`) restores the old
+rules; the trial arm reproduces the trunk's failing test output exactly. Rejected, from the
+design pass: the heuristic without back-fill (cluster-aimed recall@10 0.898, lists thinned to
+16–20), the heuristic at the node's own pick only (topics 0.523 — the prune is where the
+island closes), a query-time escape (a short-count detector caught 0 of 149–233 failing
+queries: islands are larger than k, so result lists come back full), index-level dedup
+(needs a per-vault ε and new keys; deferred), an exact scan below some N (a fallback that
+leaves the graph broken).
+
+**The pre-registered acceptance rule FAILED as written, on two counts.** Written before any
+recall number existed (verbatim in the design record): S1 every clustered shape and class
+recall@10 ≥ 0.95 and recall@50 ≥ 0.90 against exact search; S2 uniform/topic/ordinary cells
+≥ current − 0.01; S3 distance computations per query ≤ 1.5× current and 12k build ≤ 3×
+current; S4 layer-0 degree ≤ current. (1) S1 failed: queries aimed into a 500-member
+near-identical cluster pooled at recall@10 ≈ 0.93 (1,000 queries × 3 seeds), below the 0.95
+bar. Every miss swaps one near-duplicate for another at a k-th-distance gap of 2–4 × 10⁻⁵.
+(2) S3 failed: distances per query up to 1.74× current and build up to 3.41× current. The
+current index's queries are cheap BECAUSE they are trapped; on uniform data, the one shape
+it does not island, the query-cost ratio is 1.00×. S2 and S4 passed; no kill line was
+crossed.
+
+**Amended rule — adopted AFTER seeing those numbers, i.e. post hoc.** (a) A returned vector
+counts as a hit when its true distance is within ε of the exact k-th distance, ε = 5.0 × 10⁻⁴:
+the minimum, rounded down, of the cosine distance between the same text embedded alone and
+inside a batch on the bundled bge-small (5.14 × 10⁻⁴ over 72 pairs; median 7.0 × 10⁻⁴, max
+1.24 × 10⁻³ — `TestMeasure_BatchCompositionJitter`, `MUNINN_MEASURE_EMBED_JITTER=1`). Two
+stored vectors closer than that cannot be ordered by anything the embedder guarantees. With
+that equivalence the bar stays recall@10 ≥ 0.95 on every clustered shape. (b) Uniform and
+plain-topic data no more than one point below current (unchanged; passed). (c) Cost bounded
+absolutely: distances per query must stay well under N on every non-degenerate shape, and
+build throughput is stated. The harness (`harness_test.go`, `HNSW_HARNESS=1`) prints strict
+and jitter-equivalent recall side by side for every cell.
+
+**Graded (dim 384, package M/M0/efC/efS, plain `Search`, 200 queries per class; recall@10
+strict / jitter-equivalent, recall@50 strict; current → new):**
+
+| N | shape | class | current | new | dist/q cur → new | build vec/s cur → new |
+|---|---|---|---|---|---|---|
+| 2k | uniform | ordinary | 0.948 / 0.960, 0.858 | 0.952 / 0.965, 0.863 | 1117 → 1139 | 1792 → 640 |
+| 2k | topics | ordinary | 0.296 / 0.297, 0.272 | 1.000 / 1.000, 0.992 | 242 → 273 | 3815 → 1340 |
+| 2k | dup10 | ordinary | 0.458 / 0.466, 0.431 | 1.000 / 1.000, 0.994 | 237 → 267 | 3938 → 1434 |
+| 2k | dup34 | ordinary | 0.250 / 0.254, 0.230 | 1.000 / 1.000, 0.991 | 182 → 276 | 3994 → 1449 |
+| 2k | dup500 | ordinary / topic / aimed | 0.738 / 0.753 / 0.820 strict | 1.000 / 0.998 / **0.918** strict | 147 → 247 | 3547 → 1324 |
+| 2k | dup500 | (jitter) | 0.742 / 0.771 / 0.980 | 1.000 / 1.000 / 1.000 | | |
+| 12k | uniform | ordinary | 0.741 / 0.753, 0.529 | 0.747 / 0.759, 0.540 | 1608 → 1611 | 643 → 338 |
+| 12k | topics | ordinary | 0.707 / 0.719, 0.649 | 1.000 / 1.000, 0.973 | 318 → 524 | 1887 → 897 |
+| 12k | topicsloose | ordinary | 0.782 / 0.786, 0.707 | 0.991 / 0.993, 0.924 | 765 → 964 | 1316 → 562 |
+| 12k | dup34 | ordinary / topic / aimed | 0.643 / 0.824 / 0.720 strict | 0.985 / 1.000 / 1.000 | 314 → 534 | 1954 → 808 |
+| 12k | dup50 | ordinary / topic / aimed | 0.626 / 0.655 / 0.745 strict | 0.995 / 0.990 / 0.990 | 377 → 520 | 2112 → 829 |
+| 12k | dup500 | ordinary / topic / aimed | 0.590 / 0.508 / 0.550 strict | 0.990 / 0.996 / **0.927** strict | 295 → 514 | 2359 → 944 |
+| 12k | dup500 | (jitter) | 0.595 / 0.553 / 0.990 | 0.990 / 1.000 / 1.000 | | |
+| 12k | mix | ordinary / topic / aimed | 0.637 / 0.698 / 0.760 strict | 1.000 / 0.988 / **0.944** strict | 310 → 493 | 2414 → 949 |
+| 12k | mix | (jitter) | 0.646 / 0.748 / 1.000 | 1.000 / 0.995 / 1.000 | | |
+
+Every clustered cell of the new rule reaches jitter-equivalent recall@10 ≥ 0.985 (minimum:
+dup34 ordinary at 12k), jitter-equivalent recall@50 ≥ 0.961. **Read the aimed rows with
+care:** the jitter grading saturates cluster-aimed queries for BOTH rules (current 0.98–1.00)
+— inside a near-identical cluster almost anything returned is within ε of the k-th. On that
+class the amendment shows only that the new rule's residual strict miss is below embedder
+resolution; it is not evidence that the fix helps there. The evidence that it does is the
+ordinary and cluster-topic classes, where strict and jitter grading agree within 0.05
+and the new rule gains 0.02–0.75 per cell (largest where the current graph islands worst). Cost, absolutely: distances per query at N = 2,000 are
+106–507 on clustered shapes (5–25% of N) and 1,139 on uniform (57% of N — the current rule
+spends 1,117 there, so this is HNSW on structureless 384-dim data at small N, not the fix);
+at N = 12,000 they are 185–574 on clustered shapes (1.5–4.8%), 964 on topicsloose (8%),
+1,611 on uniform (13.4%). N grew 6×, distances 1.4× (uniform) to 2.1× (clustered):
+sub-linear. In-memory build throughput on one M-series core: 338–949 vectors/s at 12k (current
+643–2,414). Heap and mean layer-0 degree (32.0) are identical for both rules. **The reviewer
+must judge (c) at N = 2,000 uniform, where "well under N" is not met by either rule.**
+
+**Residuals.** Within-cluster ORDER among near-identical vectors (the strict aimed cells,
+0.918–0.944) is the COG-34 known limit, extended from exact to near-identical duplicates;
+efSearch = 100 would lift it to 0.98–0.99 but is a global parameter change, not proposed.
+Synthetic is not real: the topic shape may exaggerate islands; a production vault's recall
+against exact search is unmeasured. Insert is 1.9–2.9× slower and holds the vault's write
+lock for longer.
+
+### Closed islands, part 2: an old graph is repaired once, in the background (2026-11-15)
+
+**Why a migration.** The selection fix changes only what new lists contain; a store keeps its
+old graph until something rebuilds it. The trunk's load-time rebuild did exist, and it was
+itself a defect: it ran synchronously inside `Registry.getOrCreate`, under the registry-wide
+write lock (stalling the first access to every vault), it fired only on forward reach (the
+entry reaching < 50%), and it rebuilt with the same nearest-only rule — re-creating the
+islands, so it fired again on every boot. Measured on the trunk (realistic mix shape, dim
+384, real-disk Pebble, one M-series core): 11,500 vectors 6.7 / 7.3 / 7.3 s per boot, 16,500
+vectors 10.9 / 10.9 / 11.7 s per boot, reach after every rebuild 1,365 / 11,500 and 2,126 /
+16,500. That loop was also the "graph is repaired on load" restart variance.
+
+**Detection is structural; the format carries no version.** At load, `assessGraph` counts
+linked vectors that cannot reach the entry point (reverse BFS over layer-0 edges, O(N + E)).
+**Threshold: one closed node means a full rebuild.** Evidence for the margin: graphs built by
+the new rule had 0 closed nodes in every build measured (16 harness builds at 2,000 / 12,000
+× 8 shapes, the 64- and 128-dim test corpora, and both migrated stores after their rebuild); graphs
+built by the old rule had 1,581–1,782 of 2,000 and 5,567–11,115 of 12,000 on every clustered
+harness shape, 10,829 / 11,500 and 13,449 / 16,500 on the persisted mix stores, and at least
+79 of 2,000 on the gentlest clustered corpus seen (0 on uniform and loose-topic data, which
+the old rule does not island and which are correctly left alone). A forward reach below
+half also means a full rebuild; vectors that are merely unreachable or have no list are
+re-linked by re-insertion. **Deviation from the design, on evidence:** the design proposed a
+full rebuild only at ≥ 50% closed and re-linking the closed nodes below that. Re-linking was
+built and does not converge — the old-rule lists around the re-linked nodes close again (79
+closed before, 82 after, the same on every subsequent boot; repaired-graph recall@10 0.93
+instead of 1.00). An island is therefore always rebuilt. ~~Loop-safety rests on the measured
+fact that a rebuilt graph has none~~ — **wrong, see the review section below:** 40–200
+bit-identical vectors left rebuilt graphs broken and the vault repaired on every boot. The
+repair now enforces its own postcondition instead.
+
+**Served throughout, swapped once, crash-safe without a marker.** The registry caches the
+index as loaded and starts the repair in a goroutine, one vault at a time across the
+registry (peak extra memory is one vault's scratch graph). The scratch index has no
+database, so nothing is written while it builds; searches and inserts use the loaded graph
+unchanged (determinism holds for the graph being served). The swap, under the index's write
+lock: replay inserts that landed meanwhile (also replayed in rounds beforehand, outside the
+lock), drain in-flight list writes, confirm the vault's entry vector is still on disk, then
+commit every list and the deletion of every layer a node no longer has in ONE synced batch,
+and only then replace the in-memory graph. A crash or cancel before the commit leaves the old
+graph byte-for-byte (`TestMigration_CancelledRepairWritesNothing`; with the scratch index
+given the database — persist-as-you-go, as the trunk's rebuild did — the same point already
+showed 2,006 changed and 117 extra keys);
+the next load assesses it again and starts over. `ResetVault` cancels and waits; Engine.Stop
+calls the new `Registry.Close`, which does the same for every vault, so a repair cannot write
+into a closed database. No marker key is used: one under 0x07 would load on an old binary as a
+vector-less entry point (that vault's vector search returning nothing), and none is needed.
+
+**Measured, new code, the same stores** (one M-series core on a shared, loaded machine):
+first access 0.056 s / 0.127 s (11,500 / 16,500) — the trunk's 6.7 s / 10.9 s is gone from
+this path; background rebuild 11.4–16.2 s / 18.9–25.6 s across two runs (645–1,013
+vectors/s, persistence included); every later boot 0.05–0.19 s with no repair. Extra heap
+while it runs: the scratch graph 7.6 MB / 20.4 MB (vectors are shared, not copied) plus the
+commit batch 6.4 MB / 9.2 MB — single GC-snapshot deltas, noisy, well inside a 2 GB host;
+allocation churn is 4.0 / 5.9 GB of short-lived garbage over the rebuild. A 2-vCPU server was
+not measured: the rebuild is single-threaded, so expect it to take the per-core slowdown
+(the design guessed 2–4×: roughly 25–60 s for 11,500 vectors), served throughout, and to
+occupy one of the two cores while it runs. Progress is reported per vault as `hnsw_rebuild`
+in admin observability (state, kind, done/total, counts at load, duration); `muninn_status`
+does not show it — that is an MCP surface change, not made here.
+
+**Retired-version trigger, re-measured on the new graph (kept, not removed).** `SearchLive`
+at 12,000 vectors / dim 384, recall@10 against exact search over live vectors, exact pass
+fired, distances per query — current rule; new rule; new rule with the beam-of-retired
+trigger off:
+
+| corpus | class | current | new | new, trigger off |
+|---|---|---|---|---|
+| 3,000 retired (25%) | ordinary | 0.749, 35/200, 2,438 | 0.995, 0/200, 704 | 0.995, 0/200, 704 |
+| 90% retired | ordinary | 1.000, 200/200, 12,075 | 1.000, 200/200, 12,078 | 1.000, 0/200, 1,495 |
+| ten 500-version chains | ordinary | 0.871, 83/200, 5,193 | 0.995, 16/200, 1,353 | 0.995, 0/200, 445 |
+| ten 500-version chains | chain-aimed | 0.995, 199/200, 12,022 | 1.000, 200/200, 12,082 | 1.000, 37/200, 2,912 |
+
+On these shapes the trigger buys no recall on the new graph and costs a full scan on every
+query of a mostly-retired vault. **But** on the in-tree 64-dim chain fixture
+(`TestSearchLive_ChainAimedRecallAgainstExact`) turning it off drops chain-aimed recall@10
+from 1.000 to 0.956 on the new graph (0.625 on the old). Its removal is a separate change
+that has to answer that cell.
+
+**Tombstones are in memory only — verified.** A hard delete tombstones the node in the
+running index and removes nothing from 0x07, so after a restart the deleted vector is an
+ordinary graph node again and the vector index returns it
+(`TestHNSWTombstone_KnownResidual_HardDeletedVectorIsAGraphHitAfterRestart`, fails when
+fixed). What the user sees: recall never returns it, before or after a restart (the engram
+record is gone; `TestHNSWTombstone_HardDeletedNeverRecalledAcrossRestart`); the cost is a
+vector candidate slot it can take from a live memory. Not fixed here.
+
+**Residuals.** ~~If `ClearVault` wipes the vault between the commit's vector check and the
+batch commit (microseconds…)~~ — **wrong on both counts, see the review section below:** the
+window was milliseconds, and the result was a silent vector-search outage, not harmless
+junk. Fixed by `BeginClear`/`EndClear` and by load deleting vector-less keys. The rebuild competes with serving for
+CPU. Concurrent-insert levels (RNG drawn before the lock) and index-level dedup remain
+deferred from the design.
+
+### Closed islands, part 3: what the adversarial review found, and the fixes (2026-11-15)
+
+An independent adversarial review found no must-fix and no data loss (power loss at 40
+random cut points during a repair left the old graph 8 times and the new one 32 times, never
+a mix; old and new binaries read each other's stores; 108,369 searches during a 12,000-vector
+repair, worst 11.4 ms). It confirmed the amended rule under a grading that needs no epsilon
+and found five defects in claims this branch made. Each fix below has a test that fails when
+that fix alone is removed (`guards_test.go`, `identical_test.go`; the per-guard sweep ran the
+whole package with each guard neutralised in turn).
+
+**The epsilon was the wrong quantity.** 5 × 10⁻⁴ is the distance between two copies of one
+STORED vector; the jitter grading compares QUERY distances, which batch jitter moves by a
+median of 2.1 × 10⁻³ (review's measurement). So 5 × 10⁻⁴ was about 4× too STRICT, not
+generous. The harness now reports a **collapsed** grading as primary — the near-identical
+cluster collapsed to one representative, so a swap inside it is not a miss and no epsilon is
+needed (`recallCollapsed`); strict and jitter stay as reference columns. Review's own
+collapsed numbers: aimed queries 1.000 on the new rule, every strict miss a within-cluster
+swap (gap p50 2.5–3.2 × 10⁻⁵, max 2.6 × 10⁻⁴), and shapes this harness skipped also pass
+(zipf 1.000, tiny 1.000, one giant cluster 1.000 aimed / 0.985 ordinary, time-ordered drift
+0.997). This branch's harness re-run with the collapsed column (dim 384, after the fixes
+below): every clustered cell of the new rule ≥ 0.982 collapsed recall@10 at 12,000 (min:
+mix cluster-topic) and 1.000 at 2,000; the current rule 0.506–0.835 on ordinary and
+cluster-topic cells. Collapsed grading, like the jitter one, saturates AIMED queries for
+both rules (current 0.97–1.00), so aimed cells still carry no evidence either way. Strict
+recall and distances per query are unchanged by the fixes (selection on non-identical data is
+the same rule).
+
+**Bit-identical vectors were not reachable, and their vault repaired on every boot.** Every
+distance among identical vectors ties, so candidates ordered by id sent every list to the
+same smallest-id copies. Measured before the fix (dim 32, synthetic): 100 copies in 600
+vectors, 55 found at k = 100 and 45 unreachable; a vault of 100 copies, 99 closed; restart
+cycles repaired on every boot, the unreachable count growing. Reachable in real data: the
+bundled embedder reads only the first 256 tokens, so memories sharing a long templated
+opening can embed identically; clients can also supply embeddings. **Fix: a ring.** At
+layer 0 a group of identical vectors is linked in id order — each member's list starts with
+its id-predecessor and id-successor in the group, and its own group does not compete for the
+other slots, which go to ordinary diverse selection over outsiders. Every member has two
+in-edges (the group is strongly connected) and out-edges leaving it; a beam that enters walks
+it; ties come back newest-first by the existing final sort (rankorder). Groups are derived
+from the vectors (exact bit pattern) at load and on insert; nothing is persisted, lists keep
+their size (≤ M0) and format, so the on-disk shape is unchanged. Chosen over "one graph node
+with a member list", which needs new keys. After: all copies reachable and returned at k =
+copies for 40/100/200 copies and an all-identical vault; five restart cycles repair at most
+once.
+
+**The repair loop is now impossible by construction.** Rather than record anything, the
+repair makes its result satisfy exactly what the next load checks: `ensureNavigable` gives a
+closed node an out-edge to the nearest node that can reach the entry (replacing its last,
+back-filled slot), and an unreachable node an in-edge from the nearest reachable node with a
+spare slot or a redundant last edge; it WARNs with the count when it had to. Removing an
+out-edge from a node that then reaches the entry directly cannot strand anything. Decided
+from the graph, nothing persisted, no marker.
+
+**Clear vs repair.** `ClearVault` deleted the vault's keys BEFORE calling `ResetVault`; the
+review measured the window at 2–8 ms after a 12,000-node build (not microseconds) and 12,811
+vector-less layer keys written back; in the same process a re-import then got 0 vector hits
+because the entry point had no vector — recall silently keyword-only until a restart. Fixes:
+`Registry.BeginClear` (cancel AND wait for the repair, drain list writes, keep the vault
+uncached and unrepaired) runs before the delete and `EndClear` after, in `ClearVault` and in
+re-embed; the commit still refuses when the entry vector is gone (for any path that bypasses
+the protocol); load ignores and deletes layer keys without a vector; the entry point is
+`canonicalEntry` alone; a search whose entry has no vector returns `ErrEntryWithoutVector`
+(logged once) so callers degrade LOUDLY. The earlier `ResetDuringRepair` test counted keys
+before the repair goroutine finished and passed with both guards removed; it is replaced by
+tests that wait for the goroutine.
+
+**Other review items.** Re-inserting the entry point's id dropped results from 10 to 1
+(pre-existing): stale in-edges routed the walk into the half-built node. A re-insert now links
+the new node before publishing it. An old-rule graph WITHOUT islands keeps its nearest-only
+lists forever (a fixture stayed at recall 0.931 where a fresh build gets 0.998); there is now
+an operator rebuild: `Registry.RebuildVault`, REST `POST /api/admin/vaults/{name}/reindex-hnsw`
+(202, background), CLI `muninn vault reindex-hnsw`, progress as `hnsw_rebuild` in admin
+observability. **Recorded, not fixed:** with the memory cap (`SetMaxBytes`) reached, the boot
+repair re-links the skipped vectors and ignores the cap (the trunk's orphan repair did the
+same).
+
+**CI RISK — the engine package under -race.** The review measured `internal/engine` at
+314.7 s under `-race` on a busy machine, over CI's 300 s per-package limit (this branch's two
+engine tests cost 0.2 s; the margin problem predates it — 292 s was measured here on a loaded
+machine). The next engine test added anywhere may be the one that tips CI. The hnsw package
+went from 43 s (trunk) to ~125 s under `-race` with this work.
+
+### Write-time twin check, slice 1: shadow first, the hook instead of a second embed (2026-11-15)
+
+The engine volunteered nothing at write time, and agents re-write facts instead of
+updating them (on real usage evolve:new ran about 1:7, and a large share of stored
+memories have a near-identical sibling). An offline, blind-judged replay found that a new
+write whose vector is very close to a write made in the same vault within the previous
+hour is a duplicate or an undeclared update 87% of the time (39 of 45), and that
+candidates at cosine ≥ 0.93 were correct 29 of 35 times (0.83, Wilson 95% [0.67, 0.92]).
+Slice 1 (COG-36) builds the narrowest version of that push and the tooling to measure it
+on each vault before anything is shown. It is **off by default**; `MUNINN_WRITE_RELATED=shadow`
+computes and logs; `=1` additionally shows a block on single `muninn_remember` responses in
+vaults an operator has opted in.
+
+**0.93 came from two production vaults.** It is not a canonical-corpus measurement and is
+not defended as one. It ships only as a *model-scale hint* keyed by embed model (how close
+bge-small places restatements and updates), with three things around it that keep it from
+being one vault's answer imposed on another (principle #11): a per-vault override
+(`write_twin_threshold`, clamped), a homogeneity guard that reports a vault where the hint
+does not discriminate (more than 5 of 100 ordinary writes already clear it), and the rule
+that the block is enabled on a vault only after that vault's own replay check passes. An
+unregistered model gets no hint at all and runs shadow-only. The recent-twin precision at
+≥ 0.93 specifically was never judged — Gate 0 judged the case at its ~0.87 floor — so each
+vault's replay judges the exact rule.
+
+**The vector comes from the hook, not from `TryEmbed` (deviation from v3 §4/§7).** v3 was
+written against one provider mutex that ignored deadlines; the trunk now has query and
+batch lanes (the embed-lanes change). The design's `LocalProvider.TryEmbed` would still have been a
+second inference per mode-1 write (~45 ms CPU), in a batch of one, so its vector would
+differ from the stored one by the int8 model's batch jitter, and it would have needed an
+`embedder_not_bounded` carve-out for every HTTP provider. Instead the retroactive
+processor — which embeds every write anyway — hands the engine the exact vector it just
+stored and indexed (`SetOnEmbedded`, with the vault prefix it already holds: a store lookup
+of an id's vault is a full scan). Shadow and mode 1 both add zero embed calls, the ring and
+HNSW hold identical vectors (pinned), it works for every provider, and the inline path only
+waits — `min(100 ms, 2 × measured delivery)`, the design's budget — then says
+`embedder_busy` (the processor was mid-pass before this write) or `embed_timeout`. The cost
+is that mode 1's latency is the processor's pass latency: measured on a 2,000-memory
+fixture with the bundled embedder on a shared development machine (120 remembers per mode),
+the remember handler was p50 9.5 ms / p99 35 ms off, 9.6 / 29 ms shadow (no added cost), and
+89–92 ms / 126–141 ms in mode 1, where 76% of checks got their vector in budget and the rest
+reported `embed_timeout` (18%) or `embedder_busy` (7%). That number is the next thing to
+improve (a direct hand-off from the write to the processor instead of a full-store pass).
+
+**Other deviations, each on evidence.**
+- *Per-vault opt-in.* v3 has one env var but also says mode 1 shows only on a vault whose
+  replay passed. That needs a per-vault switch, so mode 1 shows the block only where
+  plasticity `write_twin_inline: true` is set; everywhere else mode 1 is shadow.
+- *`calibrating`.* The guard is computed asynchronously; before its first measurement in a
+  process the vault reports `calibrating` (shows nothing) rather than guessing.
+- *The 1,000-byte cap and "at most 2 candidates" conflict.* With 26-character ids and options
+  that each name the id they retire, one candidate measures ~880 bytes and two 1,184–1,312.
+  The cap was kept (it is the stated budget); the block therefore shows one candidate in
+  practice and the second head is logged `shown=false` — the engine is told how many were
+  rendered so the log never claims a display that did not happen. Raising the cap to ~1,350
+  bytes would show two; that is a product call, not taken here.
+- *No web-console field for the override.* The console's plasticity form already preserves
+  fields it does not edit (`plasticityRawConfig` merge), the closest precedent
+  (`semantic_floor`) has no field either, and the only reader is an off-by-default feature.
+- *Backlog embeds are not writes.* The processor also embeds re-embeds and pre-existing
+  backlog; comparing those with each other would log "twins" nobody wrote. Only a write
+  noted by this process, or an engram created within the hour, enters the ring; an id
+  admitted within the hour is not re-admitted; a pair is logged and counted once per
+  hour. (The first cut claimed backlog "never enters"; review found a re-embed within the
+  hour re-admitted both members of a pair and logged it again. Now pinned.)
+- *Off is inert, and what is not.* With the check off the hook is not wired, the MCP path
+  allocates and calls nothing, and the guide, the tool description and resolved
+  plasticity JSON are unchanged. Unconditional: a nil check per write, one interface
+  assertion per remember, two accepted plasticity fields, two CLI subcommands, and four
+  unlabelled metrics exporting zeros.
+- *Review fixes, slice 1.* `Engine.Stop` could hang if a hook's send landed after the
+  worker's final drain (reproduced; admission, send and accounting are now one locked
+  step). The ring was bounded per vault but not in total and idle vaults never emptied
+  (300 vaults x 512 entries measured +255.6 MB); it is now capped at 16 MiB across vaults
+  and swept by age. The blind judging file paired each flagged write twice with the same
+  later text, giving the arm away; controls now come from unflagged writes and no later
+  text repeats. Shadow lines carry `considered` and `ring=warming|warm`, and `twin-audit`
+  reports the hour after each restart apart. `vault_ws` is a fixed-key SipHash: shadow
+  logs identify vaults to anyone with a guess list.
+- *Invariant number.* COG-35 is claimed by another branch merging first; this is COG-36.
+- *Client-supplied embeddings are not checked.* A write that carries its own `embedding`
+  is indexed inline and never passes through the embed processor, so it never enters the
+  ring (its vector may also come from another model). No block, no shadow line.
+- *Batch ids.* Intra-batch pairs need to know which items shared a `WriteBatch` call; the
+  engine notes it just after the commit. A pass that embeds an item in the microseconds
+  between commit and note logs it as `rule=recent` — a labelling race only.
+
+**Acceptance tooling.** `muninn twin-replay` replays the last 60 days of a vault (read-only,
+on a backup copy) under the exact rule — heads resolved as of each write, a supersedes edge
+the write itself made at write time (an evolve) skipped, a link made later still counted as
+a flag — and prints flags, flags per 100 writes, the per-day maximum, the guard, and the
+pre-committed verdict (VETO under a 0.70 precision lower bound, over 5 per 100, or
+`too_homogeneous`; DO_NOT_ENABLE under 40 flags or at cold start). `--out` writes ids-only
+pairs, a blind judging file with full text (every sampled flag, up to 100, plus as many controls: unflagged writes against a rank-11–20 neighbour; no later text repeats), and a
+separate key; `--key/--labels` scores the judgements. `muninn twin-audit` reads the shadow
+log back and counts unresolved near-twin pairs (both live, no supersedes/contradicts edge,
+neither forgotten) per 100 writes, for pairs at least 7 days old. Its known over-counts are
+printed with every report (undatable forgets, the ring cap, dequantized vectors).
+
+**Handed off, confirmed on this trunk, not fixed here.**
+- The novelty fingerprint sorts terms by count only, over map order (`novelty.go:45`), so
+  ties are nondeterministic. Still true.
+- Prospective-notice dedup is keyed on the raw client `Mcp-Session-Id` (`server.go:650`), a
+  shared `anon` bucket, arbitrary eviction at 1,024 sessions. Still true.
+- "A client retrying a failed write without an op id stores a duplicate" is **narrower than
+  stated**: an exact retry returns the existing id with `duplicate_content` (content-hash
+  dedup), as does a retry that changes only the concept. A retry whose content bytes differ
+  (re-rendered punctuation, casing) stores a second memory. That is the residual.
+
+### Evidence of match orders; evidence of association annotates (COG-35, 2026-11-15)
+
+**What was wrong.** On the default ACT-R path the order of a recall was content
+match × confidence MULTIPLIED by the Hebbian/PAS prior (up to 3.24×) and then
+PLUS an entity boost of up to 0.30. Measured on a production install, read-only:
+150 questions written by a model as rewordings of 150 live memories' titles
+(median 20% of title words reused), three vaults, labels the ranker did not
+choose; recall at limit 100, rows re-ordered offline.
+
+- Engine order: right memory at rank 1 in 15/150, top 3 in 46, top 10 in 86;
+  MRR 0.238 (at the default limit of 10: 34 / 61 / 93, MRR 0.341).
+- Same rows by the absolute content score alone: rank 1 in 62, top 3 in 79,
+  top 10 in 101; MRR 0.495. Paired MRR difference +0.257, 95% CI
+  [+0.199, +0.318]. Same direction in all three vaults (rank 1: 35 vs 8,
+  14 vs 1, 13 vs 6).
+- Engine score with only the entity boost removed: rank 1 in 47, MRR 0.419 —
+  the Hebbian and PAS boosts cost rank too.
+- Content score plus a scaled entity boost: 0.05×–0.25× indistinguishable from
+  content-only (rank 1 = 62; top 3 = 81–83); 0.5× → rank 1 = 48; 1.0× → 24.
+  Content-first with the boost breaking ties inside a 0.005–0.05 window:
+  indistinguishable from content-only.
+- Why: on boosted top-10 rows the entity boost was 0.115 at the median (p90
+  0.247), while the content-score spread between rank 1 and rank 10 was 0.078 at
+  the median — the boost was larger than the whole top ten's spread. 858 of
+  1,410 top-10 rows carried one; the top row was the best content match in 23
+  of 141 queries.
+- The top ten also depended on `limit`: for 56 questions the first ten rows at
+  limit=100 equalled the rows at limit=10 in only 5 (same top row in 39).
+  Cause: phase 6 cut at `limit` BEFORE the entity boost, which could lift only
+  rows inside the cut; a row past it re-entered as a content-less injection.
+
+**Decision.** Order by the absolute content score; association evidence breaks
+exact ties and orders injected rows (which have score 0 and follow every scored
+row); the cut to `limit` happens once, after every post-pipeline phase. Learning
+is untouched: Hebbian edges, PAS transitions and entity links are recorded,
+read, reported per row and still inject associated rows. Plasticity switches
+keep their meaning for whether those mechanisms run. rrf / weighted_sum / CGDN
+are unchanged (their scores are not content scores; pinned by a differential
+against the trunk).
+
+**Why structural, not a tuned weight.** The evidence is one install, three
+vaults, model-written questions. No boost strength measured BETTER than none, so
+the defensible rule is the one that needs no constant: match evidence first.
+A small multiplier (0.05×–0.25×) measured the same as zero here and would be a
+number tuned on one install — principle #11 forbids shipping it.
+
+**What does change for callers** (also COG-35): weaker matches stop outranking
+stronger ones; for a query whose matched rows fill the limit, the returned rows
+are the top-N matches and nothing an association injected; score equals
+`absolute_score` on default vaults; COG-29's adjacency rule (both sides of a
+declared contradiction) now applies at a tight limit, because the partner is no
+longer cut before COG-29 runs; COG-25 examines only the returned rows (its
+margin, measured, tripled limit=10 p50 once the cut was deferred).
+
+**What remains unbacked.** "Strengthens with use" has no ranking effect on the
+default path until a label-backed, bounded salience term exists — association
+features annotate and inject but do not reorder. Residuals: exact ties are broken
+by evidence that reads the in-memory log (pinned, fails when fixed); on vaults
+above 1,000 memories a PAS transition can still add a genuine match to the
+candidate pool.
+
+**A/B.** `cognitiontrial` build with `MUNINN_TRIAL_LEGACY_BOOST_ORDER=1`
+restores the boosted order on the same store; every RED test of this change
+fails again under it. No runtime toggle ships.
+
+**Principle: a signal that says two memories are related is not evidence that
+either one answers the question. Let it annotate and inject; let only match
+evidence order.**
+
+### Association-only memories get their own channel: `associated` (COG-35 follow-up, 2026-11-15)
+
+**What content-first cost.** Measured live on the production install, content-first
+order moved right-memory-first from 34 to 60 of 150 reworded questions (top ten
+93 → 95; paired MRR +0.132, 95% CI +0.088 to +0.175; 47 up, 4 down, none lost).
+The adversarial review then measured the other side: on a 1,000-memory fixture
+with realistic entity density, 46 of 150 limit-10 responses carried an
+association-only row before and 0 after; a memory linked to the queried entity
+that matches none of the query's words went from rank 2 to not returned at
+limits 5 and 10. Those rows were displacing better matches — the production
+numbers show that — but dropping them silently removes "pushes to you when it
+matters" from recall.
+
+**Decision.** A separate, bounded, labelled block: at most 3 compact items
+(no content), at most 600 bytes, never counted against `limit` or in `total`,
+never a band other than `associated_not_matched`, selected by the existing
+seed rule and injection gate, absent when empty, on by default with an opt-out.
+Measured on a 2,000-memory synthetic vault with dense invented entities: present
+on 179 of 200 limit-10 recalls, median 419 bytes, p99 613 bytes including the key.
+
+**Why this and not a re-weighted boost.** Association evidence was measured to
+cost rank whenever it was allowed to order matches, at every strength tried.
+Presenting it beside the matches, labelled as association, keeps the product's
+push without letting it impersonate relevance.
+
+**How we will learn whether it is ever useful.** Associated items are served
+rows for the label pipeline: they are in the recall event's entries (after the
+matched rows, source flag `associated`) and in a read-only query id's row tags,
+so `muninn_feedback` labels for them are accepted and stored with that source.
+Whether association earns more than an annotation is a question for those
+labels — nothing in ranking reads them yet. Today only the entity boost produces
+association-only rows; Hebbian and predictive-activation evidence attaches to
+rows that also matched, so their `why` variants are not built.
+
+### The candidate budget stays as it is — an honest negative (2026-11-15)
+
+**The defect is real.** `CalcCandidatesPerIndex` is not monotone in vault size:
+a 1,000-memory vault considers 1,000 candidates per index and a 1,001-memory
+vault 31 (sqrt(N) past the knee). On a production install about a fifth of right
+answers to model-reworded questions were never candidates at all.
+
+**Fixing it bought nothing measurable.** An experimental build with the ceiling
+raised to 1,000 on the same install (150 reworded questions, three vaults, with
+content-first order already in place) moved the right memory into the top ten
+for 95 → 98 of 150 and to rank 1 for 60 → 61; paired MRR +0.010, 95% CI −0.001
+to +0.024 — not distinguishable from noise. It also made explain 3–5x slower at
+the time (since fixed separately: explain no longer scales with its candidate
+list). The candidate cliff is not what keeps a third of right answers out of the
+top ten.
+
+**Decision.** Left unchanged pending evidence that it costs answers. A monotone
+alternative measured on synthetic vaults, min(N, 200), would REDUCE candidates
+for vaults of 201–1,000 memories with no measured benefit to offset it; a change
+with no measured value does not ship. The work (rule, monotonicity RED tests,
+the 60th-nearest fixture, and an opt-in latency harness: p50 at 12,000 memories
+29.2 ms old rule / 31.0 at 200 / 43.3 at 500 / 57.0 at 1,000) is kept on the
+local branch `exp/candidate-budget`.
+
+### Honest relevance labels: the band claims evidence, not an answer (2026-11-15)
+
+**What the bands claimed, and what the data shows.** The `muninn_recall` tool description
+opened "Returns the most relevant memories. Judge each result by its `relevance_band`" and
+never said what `moderate` means; the guide glossed it as "real evidence" in a section about
+how well a memory matched. An agent reading `moderate` reads "moderately relevant". Blind
+grading of real recalls on three production vaults (1,590 rows, one rater, self-agreement
+κ 0.91 on 80 re-graded items) found:
+
+- `strong` rows: directly useful 76%, on topic but not answering 22%, unrelated 2% (n=149);
+  directly useful 71–85% per vault.
+- `moderate` rows — most of what recall returns: directly useful 23%, on topic but not
+  answering 49%, unrelated 28% (n=1,042); directly useful 17–31% and unrelated 24–36% per
+  vault.
+- Another product's fluent questions sent to an unrelated vault: 0 of 300 graded rows on
+  topic, 263 of them banded `moderate` (random-word top rows median 0.12–0.20 absolute;
+  cross-vault rows 0.24–0.31). Their score is almost all SEMANTIC: the lexical component of a
+  cross-vault row has a median of 0.056 (10th percentile 0.000), so a moderate score can come
+  almost entirely from similarity to the vault's general subject matter with little of the
+  query's wording matched. The lexical component is what separates them from reworded true
+  answers (AUC 0.91) — a hypothesis for a second signal, not a shipped rule.
+
+These numbers are from production vaults graded by one rater. They are recorded here and
+deliberately NOT shipped in product text (principle #11): another vault's subject matter could
+make them wrong. An earlier draft of this increment said moderate "measures shared
+vocabulary"; the lexical figures above show the opposite, and it was corrected before merge. Shipped text uses only mechanism claims (true by construction) and ordinal
+claims that held on every vault measured ("strong is the band most likely to answer";
+"moderate is often on topic without answering").
+
+**No threshold fixes it.** A reworded question whose true answer was returned scores a
+median absolute 0.31–0.35 — `moderate`, as low as an unrelated row. Moving the moderate edge
+to 0.35–0.40 withholds 50–63% of those. A leave-one-out null is not a null (the best OTHER
+memory for a memory's own title was on topic 84% of the time), so a vault cannot self-derive
+a better edge from its own contents.
+
+**Decision: redefine the text, keep every wire value.** The predicate was always honest
+("real absolute evidence, clear of the noise band"); the implication of answerability lived
+in the surrounding text. So the change is wording only: one source of band text in
+`internal/mcp/band_claims.go`, rendered into the tool description and the guide, mirrored in
+`openapi.yaml`, pinned by `TestRelevanceBandWording_NoAnswerClaim` (COG-30 (d)). Rejected:
+renaming `moderate` (to `candidate`/`unverified`) — the enum is on three wire surfaces and an
+external parser comparing against `"moderate"` would misclassify silently, with no evidence a
+new token moves agents more than a correct definition (deferred, triggered only by a
+no-effect result in the paired wording test). Rejected: a response-level "no strong match"
+field — it equals `not any(band == "strong")`, which every client can compute, and its
+variants failed a pre-committed rule twice for the same reason, firing on reworded true
+answers (#773 `relevance_summary`: A(moderate) 10% > 0%; L3 "nothing strong and coverage < ½":
+18% > 15% of reworded questions whose answer was returned). `related` was rejected as a band
+name and as wording for the same reason the evidence gives: 28% of moderate rows were
+unrelated.
+
+**Cost.** The always-loaded `muninn_recall` description grew from 1,702 to 2,186 characters
+(+86 words); the server instructions are unchanged (1,220). A paired wording test (old vs new
+text on byte-identical frozen recall responses, invented corpus) is pre-registered in the
+design and prepared but not run; its HARM branch (correct use of a moderate gold row falls
+10 points or more) would revert the tool and guide wording and leave the doc corrections.

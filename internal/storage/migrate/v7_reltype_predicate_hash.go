@@ -46,7 +46,11 @@ import (
 // impossible because the source key is deleted in the same batch the
 // destination is written. A completed pass finds no 42-byte keys and no-ops
 // (idempotent, including via --force-migration-rerun, where v2 re-runs first
-// and skips every 49-byte key by its own length guard).
+// and skips every 49-byte key by its own length guard). Where a forced pass
+// DOES find a destination already occupied — a replicated stray and a live
+// re-assert of the same triple — it keeps whichever value is newer and deletes
+// the legacy key regardless, so the rerun converges on the newest row rather
+// than clobbering it.
 //
 // HISTORICAL LOSS. Records already destroyed by a pre-fix collision are
 // unrecoverable — only the survivor's value exists, and this migration re-keys
@@ -93,13 +97,14 @@ func RekeyRelationshipPredicateHash(db *pebble.DB) error {
 
 	batch := db.NewBatch()
 	batchCount := 0
-	// migrated/alreadyMigrated/skipped are ADVISORY log counts, nothing more:
-	// the correctness mechanism is the per-key length discrimination above,
-	// never these counters. An iterator that revisits a just-committed
-	// destination key (which Pebble may surface after an interim batch commit)
-	// can double-count alreadyMigrated; a count that drifts by a few is
-	// expected and harmless, and no behavior may ever gate on these numbers.
-	migrated, alreadyMigrated, skipped := 0, 0, 0
+	// migrated/alreadyMigrated/keptNewer/skipped are ADVISORY log counts,
+	// nothing more: the correctness mechanism is the per-key length
+	// discrimination above, never these counters. An iterator that revisits a
+	// just-committed destination key (which Pebble may surface after an interim
+	// batch commit) can double-count alreadyMigrated; a count that drifts by a
+	// few is expected and harmless, and no behavior may ever gate on these
+	// numbers.
+	migrated, alreadyMigrated, keptNewer, skipped := 0, 0, 0, 0
 
 	for valid := iter.First(); valid; valid = iter.Next() {
 		k := iter.Key()
@@ -139,10 +144,33 @@ func RekeyRelationshipPredicateHash(db *pebble.DB) error {
 
 		newKey := keys.RelationshipKey(ws, engramID, fromHash, keys.PredicateHash(rec.RelType), toHash)
 
-		// Value bytes verbatim — no re-encode, no read-modify-write.
-		if err := batch.Set(newKey, val, nil); err != nil {
-			batch.Close()
-			return fmt.Errorf("reltype predicate hash: set 49-byte key: %w", err)
+		// A post-fix row can already sit at newKey: the replica-first recovery
+		// case, where a replicated legacy stray and the upgraded node's own
+		// re-assert of the same triple are both on disk when
+		// --force-migration-rerun runs. Overwriting the destination is wrong when
+		// the legacy row is the stale one, and keeping the destination is wrong
+		// when the legacy row is the newer one, so keep whichever value is NEWER
+		// (ties keep the destination — the row a live writer produced). The
+		// legacy key is deleted either way. A batch-local lookup would not see an
+		// uncommitted Set, but two legacy keys cannot share a destination (an
+		// identical RelType implies an identical legacy byte, hence an identical
+		// legacy key), so a committed-state Get is the whole comparison.
+		keep := true
+		if existing, closer, gerr := db.Get(newKey); gerr == nil {
+			var cur v7RelationshipRecord
+			if uerr := msgpack.Unmarshal(existing, &cur); uerr == nil && cur.UpdatedAt >= rec.UpdatedAt {
+				keep = false
+			}
+			closer.Close()
+		}
+		if keep {
+			// Value bytes verbatim — no re-encode, no read-modify-write.
+			if err := batch.Set(newKey, val, nil); err != nil {
+				batch.Close()
+				return fmt.Errorf("reltype predicate hash: set 49-byte key: %w", err)
+			}
+		} else {
+			keptNewer++
 		}
 		oldKey := make([]byte, legacyKeyLen)
 		copy(oldKey, k)
@@ -152,7 +180,9 @@ func RekeyRelationshipPredicateHash(db *pebble.DB) error {
 		}
 
 		batchCount++
-		migrated++
+		if keep {
+			migrated++
+		}
 		if batchCount >= batchSize {
 			if err := batch.Commit(pebble.Sync); err != nil {
 				batch.Close()
@@ -179,6 +209,7 @@ func RekeyRelationshipPredicateHash(db *pebble.DB) error {
 	slog.Info("reltype predicate hash migration complete",
 		"migrated", migrated,
 		"already_migrated", alreadyMigrated,
+		"kept_newer_existing", keptNewer,
 		"skipped", skipped,
 	)
 	return nil

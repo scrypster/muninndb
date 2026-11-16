@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main, develop]
 
+# Every job only reads the repository: actions/checkout needs contents: read;
+# actions/cache and actions/upload-artifact authenticate with the runner's own
+# runtime token, which GITHUB_TOKEN permissions do not govern; nothing here
+# writes to the repo, PRs, issues, or packages. A job that needs more must
+# declare its own permissions block.
+permissions:
+  contents: read
+
 jobs:
   # ── Go: build + test ────────────────────────────────────────────────────
   go:
@@ -60,8 +68,14 @@ jobs:
       - name: go vet
         run: go vet -tags localassets ./...
 
-      - name: Run Go tests
-        run: go test -tags localassets ./... -timeout 300s -race -coverprofile=coverage.out -covermode=atomic
+      # internal/engine (go-engine, sharded) and internal/index/hnsw (go-hnsw)
+      # run in their own jobs below: under -race -cover each outgrew the
+      # per-package -timeout 300s here.
+      - name: Run Go tests (every package except internal/engine and internal/index/hnsw)
+        run: |
+          pkgs=$(go list -tags localassets ./... | grep -vxE 'github.com/scrypster/muninndb/internal/(engine|index/hnsw)')
+          # shellcheck disable=SC2086 # word-splitting the package list is intended
+          go test -tags localassets $pkgs -timeout 300s -race -coverprofile=coverage.out -covermode=atomic
 
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
@@ -72,11 +86,103 @@ jobs:
           name: coverage
           path: coverage.out
 
+  # ── Go: internal/engine tests, sharded ──────────────────────────────────
+  # The largest package, and the only one whose -race run outgrew the
+  # per-package -timeout 300s on one runner. scripts/go-test-shard.sh assigns
+  # each top-level test to a shard by a hash of its own name, so adding a test
+  # never moves another; --check fails the job unless the shards partition the
+  # package exactly. Each shard is its own test binary with its own timeout.
+  # Changing the shard count means changing both the matrix and SHARDS.
+  go-engine:
+    name: Go engine tests (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    env:
+      SHARDS: 2
+      # Identical to the run's build flags, so listing and running share one
+      # compiled test binary.
+      ENGINE_TEST_FLAGS: -tags localassets -race -covermode=atomic
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Restore embed assets from cache
+        uses: actions/cache@v5
+        with:
+          path: internal/plugin/embed/assets
+          key: embed-assets-ort-1.24.2-bge-small-en-v1.5-linux
+
+      - name: Fetch embed assets if needed
+        run: |
+          if [ ! -f internal/plugin/embed/assets/model_int8.onnx ]; then
+            make fetch-model _ort-linux-amd64
+          fi
+
+      - name: Check the shards partition internal/engine
+        run: |
+          # shellcheck disable=SC2086 # ENGINE_TEST_FLAGS is a flag list
+          bash scripts/go-test-shard.sh --check "$SHARDS" ./internal/engine/ $ENGINE_TEST_FLAGS
+
+      - name: Run internal/engine tests (this shard)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          # shellcheck disable=SC2086 # ENGINE_TEST_FLAGS is a flag list
+          run=$(bash scripts/go-test-shard.sh "$SHARD" "$SHARDS" ./internal/engine/ $ENGINE_TEST_FLAGS)
+          # shellcheck disable=SC2086
+          go test $ENGINE_TEST_FLAGS -timeout 300s -run "$run" -coverprofile="coverage-engine-$SHARD.out" ./internal/engine/
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-engine-${{ matrix.shard }}
+          path: coverage-engine-${{ matrix.shard }}.out
+
+  # ── Go: internal/index/hnsw tests ───────────────────────────────────────
+  # -race requires -covermode=atomic, and in this package atomic coverage
+  # counters land inside the vector loops, where the race detector instruments
+  # every one: on a 4-CPU linux container one test took 99s with coverage and
+  # 30s without, and the package timed out at 300s with it but finished in
+  # ~116s without. So the race run here collects no coverage, and coverage
+  # comes from a second, uninstrumented run (~20s). Every test still runs under
+  # -race.
+  go-hnsw:
+    name: Go hnsw tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run internal/index/hnsw tests under -race
+        run: go test -tags localassets -race -timeout 300s ./internal/index/hnsw/
+
+      - name: Coverage for internal/index/hnsw (no -race)
+        run: go test -tags localassets -timeout 300s -covermode=set -coverprofile=coverage-hnsw.out ./internal/index/hnsw/
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-hnsw
+          path: coverage-hnsw.out
+
   # ── CLI: integration tests (full binary lifecycle + MCP round-trip) ─────
   cli-integration:
     name: CLI integration tests
     runs-on: ubuntu-latest
-    needs: go
+    needs: [go, go-engine, go-hnsw]
 
     steps:
       - uses: actions/checkout@v5
@@ -313,7 +419,7 @@ jobs:
   playwright-e2e:
     name: Playwright E2E tests
     runs-on: ubuntu-latest
-    needs: go
+    needs: [go, go-engine, go-hnsw]
 
     steps:
       - uses: actions/checkout@v5
@@ -370,7 +476,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run shellcheck
-        run: shellcheck install.sh scripts/check-build-tags.sh scripts/check-filename-build-constraints.sh scripts/check-nul-bytes.sh scripts/check-leak-tells.sh
+        run: shellcheck install.sh scripts/check-build-tags.sh scripts/check-filename-build-constraints.sh scripts/check-nul-bytes.sh scripts/check-leak-tells.sh scripts/go-test-shard.sh
 
       - name: Check build tags
         run: bash scripts/check-build-tags.sh
@@ -456,6 +562,47 @@ jobs:
           else
             echo "Route count parity OK (delta=$diff, within threshold of 5)."
           fi
+
+  # ── Proto: committed stubs must match service.proto (#873) ──────────
+  # The stubs are generated, not hand-written. This gate rejects any commit
+  # whose committed stubs drift from a fresh `protoc` run — the failure mode
+  # that let hand-edits accumulate and break the gRPC surface. Cheap: no embed
+  # assets, no web build, runs in parallel.
+  proto-check:
+    name: Proto stubs up to date
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          # Pinned to the version that generated the committed stubs. protoc-gen-go
+          # embeds the protoc version in each generated file's header (e.g.
+          # "// protoc v7.35.1"); a different protoc would rewrite that header and
+          # flap `make proto-check`. Keep in sync with the dev toolchain.
+          version: "35.1"
+          # Without a token the action pages the GitHub releases API anonymously
+          # (60 requests an hour per runner IP, shared with every other job on
+          # that IP) and fails the job when the limit is hit.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install protoc-gen-go & protoc-gen-go-grpc
+        run: |
+          # Pinned to the versions that generated the committed stubs.
+          # Bump together with a regeneration; a mismatch silently drifts.
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Check stubs match service.proto
+        run: make proto-check
 
   vuln-check:
     name: Vulnerability scan

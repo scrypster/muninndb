@@ -139,7 +139,32 @@ type PlasticityConfig struct {
 	// opt-in: nil or empty means no exclusion, so a vault without this config
 	// recalls byte-identically to before (#713).
 	ExcludeTags []string `json:"exclude_tags,omitempty"`
+
+	// WriteTwinThreshold overrides the write-time twin check's "very close"
+	// cosine bar for this vault (COG-36), instead of the hint looked up from
+	// the embed model (internal/plugin/embed.WriteTwinHint). nil = use the
+	// model hint (or none: an unregistered model runs shadow-only). Not
+	// preset-varying. Clamped to [0.50, 0.999] at resolution (COG-2:
+	// clamped, never rejected) — a wild value cannot make every write a
+	// "twin" or switch the check off by stealth.
+	WriteTwinThreshold *float64 `json:"write_twin_threshold,omitempty"`
+
+	// WriteTwinInline opts this vault in to the write-time twin block on
+	// muninn_remember responses when the server runs MUNINN_WRITE_RELATED=1.
+	// nil/false = the vault stays in shadow (computed and logged, never
+	// shown). Set it only after this vault's own replay check
+	// (`muninn twin-replay`) reports ENABLE: the flag is the operator's
+	// record that the vault passed. Not preset-varying.
+	WriteTwinInline *bool `json:"write_twin_inline,omitempty"`
 }
+
+// writeTwinThresholdMin/Max are the COG-2 clamp for WriteTwinThreshold. They
+// equal writetwin.OverrideMin/Max (pinned by a test there; duplicated here
+// because auth must not import the rule package).
+const (
+	writeTwinThresholdMin = 0.50
+	writeTwinThresholdMax = 0.999
+)
 
 // ResolvedPlasticity is the fully-merged configuration after applying preset defaults
 // and any field-level overrides from PlasticityConfig.
@@ -215,6 +240,13 @@ type ResolvedPlasticity struct {
 	// at resolution: blank entries dropped, duplicates collapsed. Not
 	// preset-varying.
 	ExcludeTags []string `json:"exclude_tags,omitempty"`
+
+	// WriteTwinThresholdOverride is PlasticityConfig.WriteTwinThreshold,
+	// clamped to [0.50, 0.999]. nil = no override (use the model hint).
+	WriteTwinThresholdOverride *float64 `json:"write_twin_threshold_override,omitempty"`
+	// WriteTwinInline is PlasticityConfig.WriteTwinInline (default false).
+	// omitempty: a vault without the setting resolves to byte-identical JSON.
+	WriteTwinInline bool `json:"write_twin_inline,omitempty"`
 }
 
 type plasticityPreset struct {
@@ -456,6 +488,23 @@ func ResolvePlasticity(cfg *PlasticityConfig) ResolvedPlasticity {
 	// or all-blank config resolves to nil, byte-identical to "no config" (the
 	// default-empty / opt-in invariant, #713).
 	r.ExcludeTags = resolveExcludeTags(cfg.ExcludeTags)
+
+	// The write-time twin fields are not preset-varying either (COG-36).
+	// The threshold override is CLAMPED here, never rejected (COG-2); NaN
+	// clamps to the top of the range — the least intrusive value.
+	if cfg.WriteTwinThreshold != nil {
+		v := *cfg.WriteTwinThreshold
+		switch {
+		case v != v || v > writeTwinThresholdMax:
+			v = writeTwinThresholdMax
+		case v < writeTwinThresholdMin:
+			v = writeTwinThresholdMin
+		}
+		r.WriteTwinThresholdOverride = &v
+	}
+	if cfg.WriteTwinInline != nil {
+		r.WriteTwinInline = *cfg.WriteTwinInline
+	}
 
 	// Apply pointer-field overrides
 	if cfg.HebbianEnabled != nil {
@@ -715,13 +764,13 @@ func validInlineEnrichment(s string) bool {
 	return validInlineEnrichments[s]
 }
 
-// ValidRecallMode returns true if s is a known recall mode name.
+// ValidRecallMode returns true if s is a known recall mode name. Derived from
+// the preset map itself: a hand-written list let a preset added only to the
+// map validate false here, so a vault configured for it silently resolved to
+// balanced (pinned by TestValidRecallMode_MatchesPresetMap).
 func ValidRecallMode(s string) bool {
-	switch s {
-	case "semantic", "recent", "balanced", "deep":
-		return true
-	}
-	return false
+	_, ok := recallModePresets[s]
+	return ok
 }
 
 // ValidPlasticityPreset returns true if s is a known preset name.

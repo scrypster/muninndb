@@ -53,6 +53,23 @@ const entityTypeDescription = "Entity type — OPTIONAL. Omit it and the server 
 const contentMarkupTip = " TIP: wrap entity names in [[double brackets]] — \"Migrated [[Auth Service]] to [[PostgreSQL]] 16\" — " +
 	"and they are registered as entities at ~2 tokens each. The brackets are removed from the stored text."
 
+// inlineRelationshipsDescription documents the `relationships` parameter of
+// muninn_remember. The supersedes sentences are load-bearing (COG-38): on a
+// write that creates a memory, an inline supersedes is the same declaration as
+// muninn_link(relation="supersedes") and has the same effect, including a write
+// that is REFUSED where it cannot be honoured — a caller must be able to learn
+// that from the schema, not from its first refusal. Kept short: every session
+// pays for it.
+const inlineRelationshipsDescription = "Relationships to existing memories. Creates associations at write time. " +
+	"A `supersedes` relationship on a new memory does exactly what muninn_link(relation=\"supersedes\") does: it retires the target from present-tense recall, atomically with this write. " +
+	"If the target is missing, forgotten, or already has a successor, the write is REFUSED and nothing is stored (the error names the target's current version). Append-mode keys are refused. " +
+	"It is not applied when the write returns `duplicate_content` or uses upsert_mode — link those explicitly."
+
+// inlineSupersedesBatchNote is the same rule for one item of
+// muninn_remember_batch, where a refusal is per item.
+const inlineSupersedesBatchNote = "A `supersedes` relationship on a new memory retires its target as muninn_link(relation=\"supersedes\") does; " +
+	"an item whose target is missing, forgotten, or already superseded fails alone (the error names the current version) and the rest of the batch is stored."
+
 func allToolDefinitions() []ToolDefinition {
 	vaultProp := map[string]any{
 		"type":        "string",
@@ -117,7 +134,7 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"relationships": map[string]any{
 						"type":        "array",
-						"description": "Relationships to existing memories. Creates associations at write time.",
+						"description": inlineRelationshipsDescription,
 						"items": map[string]any{
 							"type": "object",
 							"properties": map[string]any{
@@ -160,8 +177,9 @@ func allToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "muninn_remember_batch",
-			Description: "Store multiple memories at once. More efficient than calling muninn_remember repeatedly. Maximum 50 per batch. Best practice: break complex topics into individual atomic memories — one concept, decision, or fact each. This produces sharper embeddings, better associations, and more accurate retrieval.",
+			Name: "muninn_remember_batch",
+			Description: "Store multiple memories at once. More efficient than calling muninn_remember repeatedly. Maximum 50 per batch. Best practice: break complex topics into individual atomic memories — one concept, decision, or fact each. This produces sharper embeddings, better associations, and more accurate retrieval. " +
+				"An item whose content exactly matches an existing memory is not stored again: its result carries `duplicate_of` (the existing id, also returned as `id`) and hint `duplicate_content`.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -200,7 +218,7 @@ func allToolDefinitions() []ToolDefinition {
 										},
 										"required": []string{"target_id", "relation"},
 									},
-									"description": "Relationships to existing memories.",
+									"description": "Relationships to existing memories. " + inlineSupersedesBatchNote,
 								},
 								"entity_relationships": map[string]any{
 									"type": "array",
@@ -231,14 +249,15 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_recall",
-			Description: "Search long-term memory using semantic context. Returns the most relevant memories. Judge each result by its `relevance_band` (strong|moderate|weak|filter_match|uncalibrated), NOT by `score` — score is relative to this query's own best candidate, so the top row is near the top of the range on every query including one this vault cannot answer — and NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. A response whose rows are all `weak` matched nothing strongly: those are related memories to verify, not answers.",
+			Description: "Search long-term memory. Simplest call: {\"query\": \"what we decided about caching\"} (or `context`: an array of phrases). Returns the best-matching memories. Judge each result by its `relevance_band`, NOT by `confidence`, which is belief that the stored fact is TRUE, not a measure of how well it matched. " + recallBandSentence + " Results are ordered by how well each memory MATCHED (on default-scoring vaults `score` is that content score, content match x confidence, equal to `absolute_score` except where a declared contradiction (0.9x) or declared supersession moved it; on rrf/weighted_sum vaults it is relative to this query's best candidate). `entity_boost`, `hebbian_boost` and `transition_boost` are evidence that a memory is ASSOCIATED with the matches or with recently recalled memories — not match strength; on default-scoring vaults they only break exact ties (with a real embedder matched rows practically never tie, so they do not change the order of matched rows), and a row with `score` 0 was added because of that association, after every matched row. A response whose rows would all be `weak` matched nothing clear of the noise floor: on a calibrated vault recall WITHHOLDS them by default and answers `abstained: true, abstained_reason: \"weak_only\"` with `weak_available` = how many — pass `include_weak: true` to receive them as neighbours to verify, not answers. One moderate or strong row returns the whole set as usual. An optional `associated` array (at most 3, compact, not counted against limit) lists memories that did NOT match but are associated with a returned one — each says why; follow them with muninn_read if relevant; include_associated: false omits it.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"vault":     vaultProp,
-					"context":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Search context phrases."},
+					"query":     map[string]any{"type": "string", "description": "What to search for, as one plain string. Give this OR context (if both, query is one more context phrase)."},
+					"context":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Search context phrases (alternative to query; a bare string is also accepted)."},
 					"threshold": map[string]any{"type": "number", "description": "Minimum relevance score 0.0-1.0, compared against the ABSOLUTE content score (not the displayed per-query-normalized one). Omit it for the engine's fusion-aware default: 0.1 on normal (ACT-R) vaults — a semantic-only match structurally caps near 0.6 and a lexical-only one near 0.4, so values above ~0.4 filter almost everything honest; 0.5 on legacy weighted_sum vaults; near-zero on scoring_fusion='rrf', whose rank-based scores rarely exceed ~0.15 (an explicit threshold above ~0.01 there can filter out everything)."},
-					"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 10)."},
+					"limit":     map[string]any{"type": "integer", "description": "Max results to return (default 10). The response can exceed it in exactly one case: a returned memory with an unresolved declared contradiction whose disputing partner did not make the cut brings that partner along — only the partner, at most one per returned memory, never chained, at most min(limit, 3) extra rows in total, reported as conflict.adjacency_overflow."},
 					"profile": map[string]any{
 						"type":        "string",
 						"description": "Traversal profile for BFS graph traversal. Leave unset for automatic inference from your context phrases.\n• default       — balanced retrieval across all edge types; contradiction edges dampened (0.3×)\n• causal        — follow cause/effect/dependency chains (Causes, DependsOn, Blocks, PrecededBy, FollowedBy)\n• confirmatory  — find supporting evidence; contradiction edges excluded (Supports, Implements, Refines, References)\n• adversarial   — surface conflicts and contradictions (Contradicts, Supersedes, Blocks; Contradicts boosted 1.5×)\n• structural    — follow project/person/hierarchy edges (IsPartOf, BelongsToProject, CreatedByPerson)\n\nWhen to specify explicitly:\n  Use 'causal' when asking why something happened or what something depends on.\n  Use 'adversarial' when auditing for inconsistencies or contradictions.\n  Use 'confirmatory' when looking for supporting evidence for a claim.\n  Use 'structural' when navigating project or organizational structure.",
@@ -246,7 +265,7 @@ func allToolDefinitions() []ToolDefinition {
 					"mode": map[string]any{
 						"type":        "string",
 						"enum":        []string{"semantic", "recent", "balanced", "deep"},
-						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — recency-biased, 1 hop (threshold=0.2)\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1)\nPreset thresholds are ACT-R-calibrated and apply only under ACT-R/weighted-sum scoring; on an rrf-fusion vault the preset threshold abstains and the rrf mode-aware default (~0.001) applies, so modes are safe to use there. An explicit threshold always wins.",
+						"description": "Recall mode preset.\n• semantic  — high-precision vector search (threshold=0.3)\n• recent    — ALIAS of balanced: engine-default scoring and threshold. Like every mode sent here it replaces (ignores) the vault's default recall mode. It declares session-orientation intent (attaches the unresolved-contradiction readout). It does NOT list recent memories or favour recency beyond the default ranking. For topic-free orientation use muninn_where_left_off (single-user) or tags_any with your per-user tag (shared).\n• balanced  — engine defaults (no override)\n• deep      — exhaustive graph traversal, 4 hops (threshold=0.1); being an explicit exhaustive request it implies include_weak\nPreset thresholds are ACT-R-calibrated and apply only under ACT-R/weighted-sum scoring; on an rrf-fusion vault the preset threshold abstains and the rrf mode-aware default (~0.001) applies, so modes are safe to use there. An explicit threshold always wins.",
 					},
 					"since": map[string]any{
 						"type":        "string",
@@ -308,8 +327,20 @@ func allToolDefinitions() []ToolDefinition {
 						"type":        "boolean",
 						"description": "When true, marks this recall as a pure read that must not trigger any write side effects. Always effectively true for observe-mode credentials -- passing read_only=false with an observe credential is rejected. Default false.",
 					},
+					"include_associated": map[string]any{
+						"type":        "boolean",
+						"description": "Default true. When a memory did not match your query but is ASSOCIATED with one that did (it shares a rare named entity with a returned memory) and did not make the cut, the response carries it in a separate `associated` array: at most 3 compact items (id, concept, why, strength, basis \"associated_not_matched\"; truncated: true when concept or why was shortened to fit), the array at most 600 bytes as JSON (the key not counted), not counted in total or against limit; `associated_omitted` says how many more qualified but did not fit. They are leads to follow, not answers. A muninn_feedback label on one is recorded as an associated item, not a ranked match. Pass false to omit the block.",
+					},
+					"include_weak": map[string]any{
+						"type":        "boolean",
+						"description": "When true, return the rows even if every one is `weak` (by default such a response is withheld with abstained_reason \"weak_only\" and a weak_available count). Implied by an explicit threshold, any tag/time filter, and mode=\"deep\". Default false.",
+					},
 				},
-				"required": []string{"context"},
+				// Neither query nor context is schema-required: exactly which one
+				// is present is checked by the handler, which names both options.
+				// (A top-level anyOf would express it, but several MCP clients
+				// reject combinators in tool schemas.) query is emitted first.
+				schemaPropertyOrderKey: []string{"query", "context"},
 			},
 		},
 		{
@@ -378,8 +409,11 @@ func allToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "muninn_status",
-			Description: "Get health and capacity statistics for the vault.",
+			Name: "muninn_status",
+			Description: "Get health and capacity statistics for the vault. `health` is derived, not a constant: \"good\" when the embedder is up (or not yet exercised by a recall) and no cognitive worker is erroring or stopped; " +
+				"otherwise \"degraded\" with one entry per cause in `health_reasons`. Also reports `embedder.state` (up | degraded_to_keyword | disabled | unknown), " +
+				"each cognitive worker's state (active | idle | dormant | stopped | disabled | erroring) with `last_run_age_seconds`, `embeddings_pending` while an embed backfill runs, and `enrichment_mode`. " +
+				"`storage` is writable | not_writable | unknown (a data directory that refuses writes is degraded). A dormant worker just has nothing to do — reported, not a degradation.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -389,8 +423,10 @@ func allToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "muninn_evolve",
-			Description: "Update a memory with new information. Creates a new version linked to the old one by a supersedes association, and soft-deletes the old version so it drops out of present-tense recall (never destroyed — as_of still sees it). Use this — not a repeated muninn_remember — whenever a new call is re-asserting or replacing a fact you already stored; otherwise every stale copy stays fully active and crowds recall with near-duplicates.",
+			Name: "muninn_evolve",
+			Description: "Update a memory with new information. Creates a new version linked to the old one by a supersedes association, and soft-deletes the old version so it drops out of present-tense recall (never destroyed — as_of still sees it). Use this — not a repeated muninn_remember — whenever a new call is re-asserting or replacing a fact you already stored; otherwise every stale copy stays fully active and crowds recall with near-duplicates. " +
+				"Evolve the CURRENT version: a memory that already has a successor is refused with an error naming its current version, because a second successor would fork its history. " +
+				"`content` is accepted as an alias for `new_content` when `new_content` is absent (the response notes it).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -445,20 +481,26 @@ func allToolDefinitions() []ToolDefinition {
 			},
 		},
 		{
-			Name:        "muninn_session",
-			Description: "Get a summary of recent memory activity since a timestamp — vault-wide: in a vault shared by multiple users or agents this includes other users' activity (admin/audit use there).",
+			Name: "muninn_session",
+			Description: "Get a summary of recent memory activity since a timestamp — vault-wide: in a vault shared by multiple users or agents this includes other users' activity (admin/audit use there). " +
+				"`writes` lists live memories created since `since`, NEWEST first, one page at a time (forgotten and superseded memories are excluded); " +
+				"`total` counts the whole window, `returned` this page, and `truncated` is true when more remain (page with `before` = the response's `next_before`; `offset` also works but repeats items if writes land between pages). A `since` before 1970 (including Go's zero time) means from the beginning. " +
+				"`activations` counts recalls since `since` that returned at least one result (read-only and empty recalls are not recorded; records are kept 90 days).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"vault": vaultProp,
-					"since": map[string]any{"type": "string", "description": "ISO 8601 timestamp. Return activity after this time."},
+					"vault":  vaultProp,
+					"since":  map[string]any{"type": "string", "description": "ISO 8601 timestamp. Return activity at or after this time."},
+					"limit":  map[string]any{"type": "integer", "description": "Max writes to return (default 100, max 500)."},
+					"offset": map[string]any{"type": "integer", "description": "Skip this many of the newest writes (default 0). Not stable if writes land between pages — prefer `before`."},
+					"before": map[string]any{"type": "string", "description": "Paging cursor: the `next_before` of the previous page (same `since`). Returns only writes older than it, so new writes between pages cause no repeats."},
 				},
 				"required": []string{"since"},
 			},
 		},
 		{
 			Name:        "muninn_decide",
-			Description: "Record a decision with rationale and link it to supporting evidence.",
+			Description: "Record a decision with rationale and link it to supporting evidence. The decision text becomes the memory's concept; when it is longer than the concept limit (512 bytes) the concept is cut at a sentence or word boundary, the full decision is kept in the stored content, and the response notes it.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -502,7 +544,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_explain",
-			Description: "Show the full score breakdown for why a specific memory would be returned for a given query. Use for debugging recall quality — to understand why a memory ranked high or low.",
+			Description: "Show the full score breakdown for why a specific memory would be returned for a given query. Use for debugging recall quality — to understand why a memory ranked high or low. On default-scoring vaults the final score is the content score (content match x confidence) that orders recall; the association fields (entity, Hebbian, transition boosts) are reported beside it and do not change the order except to break exact ties.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -520,7 +562,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_state",
-			Description: "Transition a memory's lifecycle state. Use to mark work as active, completed, paused, blocked, or archived. Valid states: planning, active, paused, blocked, completed, cancelled, archived.",
+			Description: "Transition a memory's lifecycle state. Use to mark work as active, completed, paused, blocked, or archived. Valid states: planning, active, paused, blocked, completed, cancelled, archived. A forgotten (soft-deleted) memory cannot change state — the call is refused; use muninn_restore to bring it back.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -534,7 +576,7 @@ func allToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "muninn_compare_and_set",
-			Description: "Atomically transition a memory's lifecycle state only if it currently matches an expected state (compare-and-set). Use to avoid clobbering concurrent transitions. Returns whether it applied and the current state/owner on conflict.",
+			Description: "Atomically transition a memory's lifecycle state only if it currently matches an expected state (compare-and-set). Use to avoid clobbering concurrent transitions. Returns whether it applied and the current state/owner on conflict. A forgotten (soft-deleted) memory cannot change state — the call is refused; use muninn_restore.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -976,18 +1018,53 @@ func allToolDefinitions() []ToolDefinition {
 				"required": []string{"entity_name"},
 			},
 		},
-		// SGD learning loop feedback
+		// Explicit feedback. The per-vault weight update it also records is a
+		// pinned no-op (internal/scoring/deadloop_characterization_test.go) and
+		// nothing outside internal/scoring reads those weights, so the
+		// description states only the effect that exists.
 		{
-			Name:        "muninn_feedback",
-			Description: "Record explicit feedback on an engram. Use useful=false when a retrieved engram was not helpful. Updates the vault's learned scoring weights via SGD.",
+			Name: "muninn_feedback",
+			Description: "Say which memories a recall returned were useful. Send once per recall, after you used its results: " +
+				`{"vault":"<the vault you recalled in>","query_id":"<the recall's query_id>","engram_ids":["<ids that helped>"],"useful":true}. ` +
+				"Every muninn_recall response carries this call ready to copy (feedback.call) — replace the placeholder with the ids that actually helped. " +
+				"A label records that this memory helped (useful=true) or did not (useful=false) for THIS query; " +
+				"labels are recorded for measurement and do not change ranking yet. useful=false changes nothing about the memory. " +
+				"useful is required and must be a JSON boolean. " +
+				"Re-sending the same labels is harmless (one label per query, memory and credential; the latest useful value wins). " +
+				`Batch form, e.g. for a handoff drain: {"groups":[{"query_id":"…","engram_ids":["…"],"useful":true}],"source":"handoff"} — at most 50 groups, 20 ids per group, 200 ids per call; never pair an id with a recall that did not return it. ` +
+				"The memory ids are engram_ids in both forms (ids is accepted as an alias; a single id may be a bare string). " +
+				"Legacy form {\"engram_id\":\"…\",\"useful\":true} is still accepted but records no label. " +
+				"A credential that can read the vault gets one result per id (recorded, repeat, or rejected with a reason and a hint, e.g. wrong_vault, not_in_recall, substituted); a write-only key gets {ok, received_groups, received_ids} whatever happened. muninn_status reports label counts. " +
+				"A first useful=true label also counts as one access of the memory (access count and last-access time; under default ACT-R scoring that does not change ranking). Feedback never changes confidence.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"vault":     vaultProp,
-					"engram_id": map[string]any{"type": "string", "description": "Engram ID that was retrieved"},
-					"useful":    map[string]any{"type": "boolean", "description": "Whether the engram was helpful (default false = negative signal)"},
+					"vault":    vaultProp,
+					"query_id": map[string]any{"type": "string", "description": "The query_id returned by the muninn_recall whose results you are labelling (also in its feedback block)"},
+					"engram_ids": map[string]any{
+						"type": "array", "items": map[string]any{"type": "string"}, "maxItems": feedbackMaxIDsPerGroup,
+						"description": "Ids of memories that recall returned and that helped (useful:true) or did not (useful:false). ids is accepted as an alias; a single id may be a bare string",
+					},
+					"useful": map[string]any{"type": "boolean", "description": "Required. true = these memories helped; false = they were returned and did not help"},
+					"groups": map[string]any{
+						"type": "array", "maxItems": feedbackMaxGroups,
+						"description": "Batch form: one group per recall. Send instead of query_id+engram_ids",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"query_id":   map[string]any{"type": "string"},
+								"engram_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": feedbackMaxIDsPerGroup, "description": "Memory ids from that recall (ids is accepted as an alias)"},
+								"useful":     map[string]any{"type": "boolean"},
+							},
+							"required": []string{"query_id", "engram_ids", "useful"},
+						},
+					},
+					"source":    map[string]any{"type": "string", "enum": []string{FeedbackSourceDirect, FeedbackSourceHandoff}, "description": "direct (default) or handoff (a later drain posting on an agent's behalf)"},
+					"engram_id": map[string]any{"type": "string", "description": "Legacy: a single memory id with no query_id — records no label"},
 				},
-				"required": []string{"engram_id"},
+				// useful is required in every form, but lives per group in the
+				// batch form, so the server validates it rather than the schema.
+				"required": []string{},
 			},
 		},
 		// Entity aggregate view
@@ -1044,7 +1121,7 @@ func allToolDefinitions() []ToolDefinition {
 		// In-place retag: metadata only, no new version.
 		{
 			Name:        "muninn_update_tags",
-			Description: "Replace an engram's full tag set IN PLACE. The ID, version lineage, and access history are preserved — unlike muninn_evolve, which mints a new ULID and archives the predecessor. This is the tool for mutable tag conventions such as due:<ISO-date> or status:<value>. The tags given REPLACE the existing set entirely; pass an empty array to clear all tags. To change content and tags together, call muninn_evolve first and then this tool on the new id. Normalization is lenient, not strict (identical rules to muninn_remember): a non-string entry, an empty string, or a tag longer than 128 BYTES is DROPPED rather than rejected, and a set longer than 50 tags is TRUNCATED to 50 — the response echoes the tag set that was actually stored, so diff it against what you sent if that matters. The limit is bytes, not glyphs: a 50-character CJK tag is 150 bytes and is silently dropped. A soft-deleted engram CAN be retagged (muninn_restore brings it back), but its keyword-search postings are DELETED rather than rebuilt while it is deleted — that is what keeps a deleted memory out of search results — so retag it after restoring, or run muninn reindex-fts, if you need it findable by the new tags.",
+			Description: "Replace an engram's full tag set IN PLACE. The ID, version lineage, and access history are preserved — unlike muninn_evolve, which mints a new ULID and archives the predecessor. This is the tool for mutable tag conventions such as due:<ISO-date> or status:<value>. The tags given REPLACE the existing set entirely; pass an empty array to clear all tags. To change content and tags together, call muninn_evolve first and then this tool on the new id. Normalization is lenient, not strict (identical rules to muninn_remember): a non-string entry, an empty string, or a tag longer than 128 BYTES is DROPPED rather than rejected, and a set longer than 50 tags is TRUNCATED to 50 — the response echoes the tag set that was actually stored, so diff it against what you sent if that matters. The limit is bytes, not glyphs: a 50-character CJK tag is 150 bytes and is silently dropped. A soft-deleted engram CAN be retagged: it stays out of keyword search while deleted, and muninn_restore makes it findable again by its current content and tags.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

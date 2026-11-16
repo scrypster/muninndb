@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
+	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
@@ -52,6 +53,10 @@ type ExplainData struct {
 	WouldReturn bool
 	Threshold   float64
 	Components  mbp.ScoreComponents
+	// WithheldReason is set when the memory clears the bar but a default
+	// recall would still not return it: "weak_only" — the whole response is
+	// band weak on a calibrated vault and is withheld (include_weak returns it).
+	WithheldReason string
 	// Note is a plain-language explanation, set whenever Found or Scored is
 	// false. Empty on the fully-scored happy path.
 	Note string
@@ -74,6 +79,29 @@ const weightedSumRecallThreshold = 0.5
 // indexes never produced this engram", not "it fell off the end of a short
 // result list" — and the Note says which claim is being made.
 const explainMaxCandidates = 1000
+
+// explainRecallLimit is the default recall explain compares itself against:
+// the MCP muninn_recall default limit. Explain's weak_only probe recalls with
+// it, and the diagnostic activation bounds its declared-relationship windows
+// (supersession, contradiction) to it — the rows such a recall examines.
+const explainRecallLimit = 10
+
+type explainTargetKey struct{}
+
+// withExplainTarget marks an activation as explain's diagnostic run for one
+// memory. activateCore then skips work that cannot change that memory's
+// score card and scales with the candidate list: COG-25 currency (no score
+// change), per-row hydration of every other row (items, provenance, brief),
+// and the associated block; the supersession and contradiction windows are
+// bounded to explainRecallLimit. Engine-internal; not a wire field.
+func withExplainTarget(ctx context.Context, id storage.ULID) context.Context {
+	return context.WithValue(ctx, explainTargetKey{}, id)
+}
+
+func explainTargetFrom(ctx context.Context) (storage.ULID, bool) {
+	id, ok := ctx.Value(explainTargetKey{}).(storage.ULID)
+	return id, ok
+}
 
 // recallThresholdFor returns the threshold a default recall applies in
 // vault. RRF fusion produces reciprocal-rank scores that are not calibrated to
@@ -553,6 +581,9 @@ func (e *Engine) Traverse(ctx context.Context, vault, startID string, maxHops, m
 // those facts plus an explicit Note, instead of an all-zero card that reads
 // like a genuine score of zero.
 func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []string, embedding []float32) (*ExplainData, error) {
+	// A diagnostic is not an access: its loads must not stamp the L1 cache's
+	// access time, which later recalls read back as a recency score.
+	ctx = storage.ContextWithNoAccessCacheStamp(ctx)
 	result := &ExplainData{
 		EngramID:  engramID,
 		Threshold: e.recallThresholdFor(vault),
@@ -585,18 +616,21 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 	// "why didn't my memory come back". Passing 0 does NOT work: the COG-6
 	// coerce turns it into the live default and the absolute gate then drops the
 	// engram before it is ever scored.
-	resp, err := e.Activate(ctx, &mbp.ActivateRequest{
-		Vault:      vault,
-		Context:    query,
-		Embedding:  embedding,
-		MaxResults: explainMaxCandidates,
-		Threshold:  -1,
+	resp, err := e.Activate(withExplainTarget(ctx, id), &mbp.ActivateRequest{
+		Vault:             vault,
+		Context:           query,
+		Embedding:         embedding,
+		MaxResults:        explainMaxCandidates,
+		Threshold:         -1,
+		ExcludeAssociated: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("explain activation: %w", err)
 	}
+	var band string
 	for _, item := range resp.Activations {
 		if item.ID == engramID {
+			band = item.RelevanceBand
 			result.Scored = true
 			result.FinalScore = float64(item.Score)
 			result.Concept = item.Concept
@@ -615,9 +649,59 @@ func (e *Engine) Explain(ctx context.Context, vault, engramID string, query []st
 	// it against the bar reproduced the argmax-exemption lie explain existed to
 	// debug. rrf and weighted_sum still gate on Final.
 	gated := result.FinalScore
-	if fusion := e.ResolveVaultPlasticity(vault).ScoringFusion; fusion != "rrf" && fusion != "weighted_sum" {
+	fusion := e.ResolveVaultPlasticity(vault).ScoringFusion
+	if fusion != "rrf" && fusion != "weighted_sum" {
 		gated = float64(result.Components.AbsoluteScore)
 	}
+	// Whether a default recall in this vault has the COG-35 associated
+	// channel at all (content-first order; rrf/weighted_sum do not).
+	assocChannel := activation.ContentFirstOrder(&activation.Weights{
+		UseRRFFusion: fusion == "rrf", DisableACTR: fusion == "rrf" || fusion == "weighted_sum"})
 	result.WouldReturn = result.Scored && gated >= result.Threshold
+	// Clearing the bar is not the whole story: a default recall withholds a
+	// calibrated response whose every row is weak (weak_only). That is a
+	// property of the RESPONSE, not of this row, so it is answered by running
+	// exactly that default recall (read-only; explain's ctx already suppresses
+	// cache stamps and runs in observe mode) — would_return then agrees with
+	// what recall does, by construction rather than by a re-derivation.
+	// The probe is a whole second recall, so it runs only when it can change
+	// the answer: weak_only withholds a response whose EVERY row is weak, and
+	// a row's band is a function of its own absolute score, so a target that
+	// is moderate/strong/filter_match/uncalibrated keeps its response.
+	if result.WouldReturn && band == activation.RelevanceWeak {
+		probe, perr := e.Activate(ctx, &mbp.ActivateRequest{
+			Vault: vault, Context: query, Embedding: embedding, ReadOnly: true, MaxResults: explainRecallLimit,
+		})
+		if perr == nil && probe.AbstainedReason == activation.AbstainWeakOnly {
+			result.WouldReturn = false
+			result.WithheldReason = activation.AbstainWeakOnly
+			result.Note = fmt.Sprintf("this memory clears the bar but only as a WEAK match, and every row a default recall would return for this query is weak, "+
+				"so recall withholds them (abstained_reason \"weak_only\", %d weak rows available). Recall with include_weak: true to receive them.", probe.WeakAvailable)
+		}
+	}
+	// COG-35: explain evaluates CONTENT match, but a default recall can still
+	// surface a non-matching memory in its separate `associated` block (a
+	// rare named entity shared with a returned row). A memory explain would
+	// not return always gets a note saying so, with the shared-entity
+	// evidence explain's own run measured (its boost seeds as a default
+	// recall does). It does NOT say whether this memory IS in the block: only
+	// a second, default recall can say that by construction, and that probe
+	// could not be shown to stay within explain's 1.5x cost bound on the
+	// targets it would run for (TestExplain_CostRatioMeasure times that
+	// target set; the paired ratio swings with which call runs warm).
+	if result.Scored && !result.WouldReturn && result.Note == "" {
+		note := fmt.Sprintf("explain evaluates CONTENT match: this memory's match score (%.3f) is below the recall threshold (%.3f), "+
+			"so a default recall does not return it in `memories`.", gated, result.Threshold)
+		if assocChannel {
+			note += " A memory that does not match can still be surfaced in a recall's separate `associated` block (not a match) when it shares a rare named entity with a returned row."
+			if result.Components.EntityBoost > 0 {
+				note += fmt.Sprintf(" This query's top matches credited this one shared-entity evidence (%.3f), so it may appear there — run the recall and look in `associated` (explain does not check it).",
+					result.Components.EntityBoost)
+			} else {
+				note += " This query's top matches credited this one no shared-entity evidence, so it is not expected there."
+			}
+		}
+		result.Note = note
+	}
 	return result, nil
 }

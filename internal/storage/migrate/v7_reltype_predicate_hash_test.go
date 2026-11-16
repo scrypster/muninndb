@@ -348,7 +348,7 @@ func TestRunner_RefusesDowngradeAfterV7(t *testing.T) {
 }
 
 // TestMigrationV7_ForceRerunRekeysReplicatedStrays pins the replica-first
-// recovery documented in STO-21 and the v7 header: a follower that upgraded
+// recovery documented in STO-25 and the v7 header: a follower that upgraded
 // (v7 stamped) and THEN applied a PRE-upgrade leader's replicated
 // UpsertRelationshipRecord batch repr ends up with a legacy 42-byte key the
 // applier committed byte-verbatim AFTER the stamp (internal/replication
@@ -510,5 +510,95 @@ func TestMigrationV7_BatchReallocationPath(t *testing.T) {
 	}
 	if counts = countRelationshipKeys(t, db); counts[49] != total || counts[42] != 0 {
 		t.Fatalf("second pass changed the store: %v", counts)
+	}
+}
+
+// TestMigrationV7_PrefersNewerRowOnForceRerun pins the keep-whichever-is-newer
+// rule for the one case where a forced pass finds its destination already
+// occupied: a replicated legacy 42-byte stray (a pre-upgrade leader's write
+// landing after v7 stamped) and the upgraded node's own re-assert of the same
+// triple (a 49-byte row) are BOTH on disk when --force-migration-rerun runs.
+// v7 re-keys the stray onto that same 49-byte key, so the pass must keep the
+// NEWER value and delete the legacy key regardless — the legacy row can be the
+// newer one, and the destination can be the newer one.
+//
+// RED on 730596a: the destination subtest fails there, because v7 unconditionally
+// overwrote the 49-byte row with the legacy value and logged nothing, so the
+// rerun left only the stale row (review finding on #896).
+func TestMigrationV7_PrefersNewerRowOnForceRerun(t *testing.T) {
+	cases := []struct {
+		name          string
+		legacyAt      int64
+		destinationAt int64
+		wantSurvivor  int64
+	}{
+		{"legacy row is newer", 90, 55, 90},
+		{"destination row is newer", 55, 90, 90},
+		{"tie keeps the destination", 70, 70, 70},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := v7TestDB(t)
+			ws := [8]byte{'v', '7', 0, 0, 0, 0, 0, 9}
+			engramID := [16]byte{0xEE}
+			fromHash := keys.EntityNameHash("Aurora Platform")
+			toHash := keys.EntityNameHash("Kepler Cache")
+			relType := "integrates_with"
+			wantKey := keys.RelationshipKey(ws, engramID, fromHash, keys.PredicateHash(relType), toHash)
+
+			// The upgraded node's own post-fix re-assert of the same triple.
+			destination := v7RelationshipRecord{
+				FromEntity: "Aurora Platform", ToEntity: "Kepler Cache",
+				RelType: relType, Weight: 0.8, Source: "inline", UpdatedAt: tc.destinationAt,
+			}
+			destVal, err := msgpack.Marshal(destination)
+			if err != nil {
+				t.Fatalf("marshal destination: %v", err)
+			}
+			if err := db.Set(wantKey, destVal, pebble.Sync); err != nil {
+				t.Fatalf("plant post-fix row: %v", err)
+			}
+
+			// The replicated legacy stray for the same triple, both rows live.
+			legacy := v7RelationshipRecord{
+				FromEntity: "Aurora Platform", ToEntity: "Kepler Cache",
+				RelType: relType, Weight: 0.8, Source: "inline", UpdatedAt: tc.legacyAt,
+			}
+			strayKey := plantLegacyRelationship(t, db, ws, engramID, fromHash, toHash, 0xFF, legacy)
+
+			// Recovery: force-rerun re-runs every migration over both rows.
+			if err := writeMigrationVersion(db, 7); err != nil {
+				t.Fatalf("stamp version 7: %v", err)
+			}
+			if err := ForceRerunMigrations(db); err != nil {
+				t.Fatalf("force-rerun: %v", err)
+			}
+			runner := NewRunner(db)
+			RegisterMigrations(runner)
+			if _, err := runner.Run(); err != nil {
+				t.Fatalf("recovery run: %v", err)
+			}
+
+			// Exactly one row, at the post-fix key, carrying the NEWER value.
+			if counts := countRelationshipKeys(t, db); counts[42] != 0 || counts[49] != 1 {
+				t.Fatalf("post-recovery key lengths = %v; want one 49-byte row and no stray", counts)
+			}
+			if _, _, err := db.Get(strayKey); err != pebble.ErrNotFound {
+				t.Fatalf("legacy stray key must be gone, got err=%v", err)
+			}
+			got, closer, err := db.Get(wantKey)
+			if err != nil {
+				t.Fatalf("recovered row not found at %x: %v", wantKey, err)
+			}
+			defer closer.Close()
+			var gotRec v7RelationshipRecord
+			if err := msgpack.Unmarshal(got, &gotRec); err != nil {
+				t.Fatalf("decode survivor: %v", err)
+			}
+			if gotRec.UpdatedAt != tc.wantSurvivor {
+				t.Fatalf("survivor UpdatedAt = %d; want %d (the newer row must win)", gotRec.UpdatedAt, tc.wantSurvivor)
+			}
+		})
 	}
 }

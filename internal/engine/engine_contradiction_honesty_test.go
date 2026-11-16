@@ -442,30 +442,44 @@ func TestContradictionHonesty_TightLimitStillDisclosesTheConflict(t *testing.T) 
 	defer cleanup()
 	a, b := contradictionFixture(t, eng, "test")
 
+	// COG-35 changed what a tight limit returns here, deliberately. Phase 6
+	// used to cut at max_results BEFORE COG-29 ran, so the partner of a
+	// disputed top row was already gone and COG-29's own adjacency rule ("if
+	// any cluster member is inside the caller's cut, all of them are; the
+	// overflow is bounded and reported") could never apply. The cut now
+	// happens once, after COG-29, so the disputing partner follows the cut
+	// (applyContradictionCut: only the partner, at most min(limit, 3) extra
+	// rows): max_results=1 on a disputed top row returns BOTH sides, annotated,
+	// with the overflow reported — the first row is the same row it always was.
 	resp := recallContradiction(t, eng, "test", func(r *mbp.ActivateRequest) { r.MaxResults = 1 })
-	if len(resp.Activations) != 1 {
-		t.Fatalf("max_results=1 returned %d rows", len(resp.Activations))
+	if len(resp.Activations) != 2 {
+		t.Fatalf("max_results=1 on a disputed top row returned %d rows, want both sides (1 + adjacency overflow 1)", len(resp.Activations))
 	}
-	only := resp.Activations[0]
-	if only.ID != a && only.ID != b {
-		t.Fatalf("unexpected row %s", only.ID)
+	got := map[string]bool{resp.Activations[0].ID: true, resp.Activations[1].ID: true}
+	if !got[a] || !got[b] {
+		t.Fatalf("rows %v are not the two sides %s / %s", got, a, b)
 	}
-	c := only.UnresolvedContradiction
-	if c == nil {
-		t.Fatal("the single returned row carries no unresolved_contradiction — an agent consuming only the first result would be confidently misled, which is the reported failure")
-	}
-	if c.PartnerInResults {
-		t.Error("partner_in_results = true, but the partner was cut by the limit")
-	}
-	want := b
-	if only.ID == b {
-		want = a
-	}
-	if c.With != want {
-		t.Errorf("annotation names %s, want the partner %s", c.With, want)
+	for _, row := range resp.Activations {
+		c := row.UnresolvedContradiction
+		if c == nil {
+			t.Fatalf("row %s carries no unresolved_contradiction — an agent consuming only the first result would be confidently misled, which is the reported failure", row.ID)
+		}
+		if !c.PartnerInResults {
+			t.Errorf("row %s: partner_in_results = false, but the partner was returned beside it", row.ID)
+		}
+		want := b
+		if row.ID == b {
+			want = a
+		}
+		if c.With != want {
+			t.Errorf("row %s: annotation names %s, want the partner %s", row.ID, c.With, want)
+		}
 	}
 	if resp.Conflict == nil {
-		t.Error("response carries no conflict block")
+		t.Fatal("response carries no conflict block")
+	}
+	if resp.Conflict.AdjacencyOverflow != 1 {
+		t.Errorf("adjacency_overflow = %d, want 1: the row returned beyond max_results must be reported, never silent", resp.Conflict.AdjacencyOverflow)
 	}
 }
 
@@ -589,7 +603,7 @@ func TestContradictionHonesty_SupersedesEdgeAloneResolves(t *testing.T) {
 		req := &activation.ActivateRequest{MaxResults: 10}
 		now := time.Now()
 		in := append([]activation.ScoredEngram(nil), rows...)
-		_, block, _ := eng.applyContradictionHonesty(ctx, ws, in, req, newVisibilityGate(req, now), now)
+		_, block := eng.applyContradictionHonesty(ctx, ws, in, req, newVisibilityGate(req, now), now)
 		return block
 	}
 	if run() == nil {

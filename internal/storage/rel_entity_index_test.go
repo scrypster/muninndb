@@ -6,7 +6,34 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/scrypster/muninndb/internal/prefix"
 )
+
+// countRelEntityIndexKeys returns the number of RAW 0x26 keys in a vault. A
+// ScanEntityRelationships assertion cannot substitute for it: that scan walks
+// the 0x26 index and resolves each entry to a 0x21 record, so an orphaned 0x26
+// key whose 0x21 row is already gone yields no RelationshipRecord and the
+// assertion passes while the orphan survives (review finding on #896).
+func countRelEntityIndexKeys(t *testing.T, store *PebbleStore, ws [8]byte) int {
+	t.Helper()
+	p := make([]byte, 1+8)
+	p[0] = prefix.RelEntityIndex
+	copy(p[1:9], ws[:])
+	iter, err := PrefixIterator(store.db, p)
+	if err != nil {
+		t.Fatalf("0x26 iter: %v", err)
+	}
+	defer iter.Close()
+	n := 0
+	for valid := iter.First(); valid; valid = iter.Next() {
+		n++
+	}
+	if err := iter.Error(); err != nil {
+		t.Fatalf("0x26 iter error: %v", err)
+	}
+	return n
+}
 
 // ---------------------------------------------------------------------------
 // UpsertRelationshipRecord — 0x26 index writes
@@ -321,8 +348,18 @@ func TestDeleteEngram_CleansRelEntityIndex(t *testing.T) {
 			return nil
 		}))
 	require.Len(t, before, 1, "0x26 index must be populated before delete")
+	// Raw key count, not the resolved scan: one relationship writes both the
+	// from-entity and to-entity 0x26 entries, and only a raw count can see an
+	// orphan left behind when deleteEntityLinks' length guard skips a key.
+	require.Equal(t, 2, countRelEntityIndexKeys(t, store, ws),
+		"raw 0x26 key count before delete (from-entity + to-entity)")
 
 	require.NoError(t, store.DeleteEngram(ctx, ws, eng.ID))
+
+	// The raw count is the assertion that pins the length guard: the resolved
+	// scan above stays empty even when an orphaned 0x26 key survives.
+	require.Equal(t, 0, countRelEntityIndexKeys(t, store, ws),
+		"raw 0x26 key count after DeleteEngram must be zero")
 
 	// After hard delete: 0x26 entries must be gone.
 	var after []RelationshipRecord

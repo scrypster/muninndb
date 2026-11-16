@@ -98,15 +98,16 @@ The ACTIVATE pipeline has **6 phases**:
 | **Phase 6** | Final Scoring + Filter | Computes ACT-R score, applies filters, ranks, truncates, and builds response |
 
 #### Scoring Models
-- **ACT-R** (default, production) — `ContentMatch × softplus(BaseLevel + HebbianScale × HebbianBoost + TransitionBoost)`. Power-law temporal decay based on access count and recency. This is the only production scorer
+- **ACT-R** (default, production) — results are ordered by `min(ContentMatch, 1) × Confidence` (content-first, COG-35). The contextual prior `softplus(BaseLevel + HebbianScale × (HebbianBoost + TransitionBoost))` is still computed and reported in `raw`, but it no longer orders results; BaseLevel is the neutral constant `bLevelCap` for every memory (honest clock), so age and access history change neither findability nor score (see ACT-R Scoring below). This is the only production scorer
 - **CGDN** (Cognitive-Gated Divisive Normalization) — experimental, and **currently inert at any positive activation threshold**: its component producer never sets the field the abstention gate reads, so `absolute` is 0.0 for every non-tag-pool candidate and every threshold above zero drops the whole result set (measured, #768 — see `docs/internals/decision-record.md`). Requires `experimental_cgdn: true` in vault plasticity config
 
 #### Score Components
 - Semantic Similarity (vector cosine)
 - Full-Text Relevance (BM25)
 - Decay Factor (temporal, ACT-R power-law)
-- Hebbian Boost (co-activation strength)
-- Transition Boost (PAS sequential prediction)
+- Hebbian Boost (co-activation strength) — association evidence; on ACT-R it breaks exact ties only
+- Transition Boost (PAS sequential prediction) — association evidence; on ACT-R it breaks exact ties only
+- Entity Boost (rare shared named entities) — association evidence; on ACT-R it breaks exact ties only and orders injected rows
 - Access Frequency
 - Recency
 
@@ -123,7 +124,7 @@ The ACTIVATE pipeline has **6 phases**:
 
 #### Recall Modes (MCP shortcuts)
 - `semantic` — high-precision vector search (threshold=0.3)
-- `recent` — recency-biased, 1 hop (threshold=0.2; hop count has no effect today, #801)
+- `recent` — alias of `balanced`: engine-default scoring and threshold. Like any mode passed on a request, it replaces (ignores) the vault's default recall mode. It declares session-orientation intent only (on MCP it attaches the unresolved-contradiction readout); it does not list recent memories or favour recency beyond the default ranking. For topic-free orientation use `muninn_where_left_off` (single-user) or `tags_any` with your per-user tag (shared vault)
 - `balanced` — engine defaults
 - `deep` — lowest threshold (0.1), 4 hops (hop count has no effect today, #801)
 
@@ -236,8 +237,8 @@ scoring is query-time and is not a worker entry.
 ### Hebbian Learning
 Co-activated memories have their association weights strengthened automatically. Background `HebbianWorker` processes co-activation events from an in-memory ring buffer (`ActivationLog`).
 
-### ACT-R Temporal Scoring
-Power-law decay based on access count and time since last access. Frequently accessed memories stay strong. Configurable per vault via `actr_decay` and `actr_heb_scale`.
+### ACT-R Scoring
+The default scoring. A memory's score is its content match × confidence, and results are ordered by it ("content-first", COG-35). Association evidence — rare named entities shared with the top matches, learned Hebbian co-activation, PAS transitions — is still learned, still reported per row (`entity_boost`, `hebbian_boost`, `transition_boost`) and still injects associated memories the query did not match (with score 0, after every matched row), but it no longer changes the order except to break an exact content tie — and with a real embedder matched rows practically never tie exactly (0 in 27,000 adjacent top-10 pairs measured), so on embedder vaults it does not change their order at all; ties occur on keyword-only vaults. A row's score equals its absolute score except where a declared contradiction (0.9x demotion) or declared supersession (head raised to its chain's best score, superseded row 0.01 below it) moved it. The first N results do not depend on `limit`. The ACT-R base level is neutral for every memory. **Guaranteed:** age and access history do not change whether a memory is found, its absolute score or its relevance band, and neither does cache state, uptime or a restart — a freshly restarted server finds exactly what a long-running one does — and matched results with different content scores keep their order across other recalls and restarts. **Not guaranteed:** the order of memories whose content scores are EXACTLY equal: that tie is broken by association evidence, and the Hebbian/PAS halves read an in-memory activation log that a restart clears (a known residual, pinned by `TestContentFirst_KnownResidual_TieOrderReadsTheInMemoryLog`). Remaining ties go to the newer memory. `scoring_fusion: rrf` and `weighted_sum` keep association boosts in their score. `actr_decay` is accepted but currently inert (it WARNs once per vault); it is reserved for a planned earned-use salience term. Memories retire through `valid_until`, `muninn_evolve`/`muninn_forget`, `retention_days` or `max_engrams` — not age. `scoring_fusion: weighted_sum` keeps additive recency/decay terms.
 
 ### Bayesian Confidence
 Memories have a confidence score (0.0–1.0) that's adjusted based on evidence:
@@ -338,15 +339,15 @@ Every cognitive behavior is tunable per vault:
 |---------|---------|-------|-------------|
 | `preset` | `"default"` | default/reference/scratchpad/knowledge-graph/working | Base behavior template |
 | `hebbian_enabled` | true | bool | Hebbian co-activation learning. Governs the WHOLE loop (COG-32): weight updates, association decay, **and** the read-side phase-4 boost during recall. `false` means recall is never scored by association weights. |
-| `temporal_enabled` | true | bool | Temporal decay scoring |
-| `auto_link_neighbors` | true | bool | Semantic neighbor auto-linking on write |
+| `temporal_enabled` | true | bool | Accepted and stored, but no runtime path reads it — changing it has no effect (temporal decay is not switched by this flag) |
+| `auto_link_neighbors` | true | bool | Accepted and stored, but no runtime path reads it — changing it has no effect |
 | `hop_depth` | 2 | 0–8 | BFS traversal depth. Accepted and stored, but Phase 5 emits nothing on real corpora (#801), so this value does not currently change any recall result |
 | `semantic_weight` | 0.6 | 0–1 | Vector similarity weight |
 | `fts_weight` | 0.3 | 0–1 | BM25 full-text weight |
-| `relevance_floor` | 0.05 | 0–1 | Minimum activation threshold |
-| `temporal_halflife` | 30 | days | Stability / decay resistance |
+| `relevance_floor` | 0.05 | 0–1 | Accepted and stored, but no runtime path reads it — changing it has no effect |
+| `temporal_halflife` | 30 | days | Accepted and stored, but no runtime path reads it — changing it has no effect |
 | `traversal_profile` | auto | string | Default traversal profile |
-| `actr_decay` | 0.5 | 0.01–2.0 | ACT-R power-law exponent |
+| `actr_decay` | 0.5 | 0.01–2.0 | ACT-R power-law exponent — currently inert in recall scoring (WARNs once per vault when set) |
 | `actr_heb_scale` | 4.0 | 0–50 | Hebbian amplifier in ACT-R |
 | `experimental_cgdn` | false | bool | Enable experimental CGDN scorer. Accepted and stored, but the scorer is inert at any positive activation threshold (#768), so on the surface default (0.5) it returns nothing — see below |
 | `predictive_activation` | true | bool | Enable PAS |
@@ -361,8 +362,8 @@ Every cognitive behavior is tunable per vault:
 
 ### Presets
 - **default** — balanced, all features on, autonomous behavior
-- **reference** — long-term knowledge, minimal decay, strong Hebbian, autonomous behavior
-- **scratchpad** — short-lived, high recency bias, no Hebbian, PAS off, selective behavior
+- **reference** — long-term knowledge, strong Hebbian, autonomous behavior
+- **scratchpad** — no Hebbian, PAS off, selective behavior (no recency bias in recall: pair with `retention_days` or `valid_until` for short-lived notes)
 - **working** — default cognition (Hebbian + PAS on) with 7-day auto-eviction and selective behavior; for shared workflow scratch vaults, pair with `multi_user` (RFC #597)
 - **knowledge-graph** — deep traversal (4 hops — inert today, #801), strong Hebbian (8.0 scale), autonomous behavior
 
@@ -403,7 +404,12 @@ The calling LLM already has full conversation context when it decides to remembe
 ### Optional fields on `muninn_remember` / `muninn_remember_batch`:
 - **summary** — one-line summary (skips background summarization)
 - **entities** — `[{"name": "PostgreSQL", "type": "database"}]` (skips entity extraction)
-- **relationships** — `[{"target_id": "01ABC...", "relation": "depends_on", "weight": 0.9}]`
+- **relationships** — `[{"target_id": "01ABC...", "relation": "depends_on", "weight": 0.9}]`.
+  On a write that creates a memory, a `supersedes` relationship is a declaration, not only an
+  edge: it does what `muninn_link(relation="supersedes")` does — the target is retired from
+  present-tense recall, atomically with the write — and the write is refused (nothing stored)
+  if the target is missing, forgotten, or already has a successor (the error names the current
+  version), or if the credential is append-mode.
 - **type** / **type_label** — memory classification
 
 ### Inline Enrichment Modes (per vault)
@@ -568,16 +574,16 @@ For quick reference, these are the MCP tools available to AI agents:
 
 1. `muninn_remember` — store a memory
 2. `muninn_remember_batch` — store multiple memories at once (max 50)
-3. `muninn_recall` — semantic search with modes and profiles
+3. `muninn_recall` — semantic search with modes and profiles. Pass the text as `query` (one string) or `context` (array of phrases, or a bare string); at least one is required, and both together are combined (MCP only — REST/MBP still take `context`)
 4. `muninn_read` — fetch by ID
 5. `muninn_forget` — soft-delete
 6. `muninn_link` — create/strengthen association
 7. `muninn_contradictions` — check for contradictions
-8. `muninn_status` — health and stats
+8. `muninn_status` — memory count plus a derived `health`: `good` only when the embedder is up (or not yet exercised) and no cognitive worker is erroring/stopped, else `degraded` with `health_reasons`; also `embedder.state`, per-worker state and last-run age, `embeddings_pending` during a backfill, and `enrichment_mode`
 9. `muninn_guide` — get vault-aware usage instructions (call on first connect)
 10. `muninn_evolve` — update a memory (archive old version)
 11. `muninn_consolidate` — merge N memories into 1
-12. `muninn_session` — recent activity summary
+12. `muninn_session` — recent activity since a timestamp: live writes newest first (paged via `limit`/`offset`, with `total`, `returned`, `truncated`; forgotten/superseded memories excluded) and `activations`, the count of recalls with at least one result in the window (recall records are kept 90 days)
 13. `muninn_decide` — record a decision with rationale
 14. `muninn_restore` — recover a soft-deleted memory
 15. `muninn_traverse` — BFS graph exploration
@@ -597,7 +603,7 @@ For quick reference, these are the MCP tools available to AI agents:
 29. `muninn_similar_entities` — trigram duplicate detection; returns pairs of entity names above a similarity threshold (default 0.85). See [docs/entity-graph.md](entity-graph.md)
 30. `muninn_merge_entity` — merge entity_a into canonical entity_b: relinks all engrams, marks entity_a as merged; supports dry_run. See [docs/entity-graph.md](entity-graph.md)
 31. `muninn_export_graph` — export the entity relationship graph as JSON-LD (default) or GraphML for visualisation or external analysis. See [docs/entity-graph.md](entity-graph.md)
-32. `muninn_feedback` — SGD scoring weight update; pass `useful` (bool) to signal whether a retrieved engram was helpful. Note: `useful` is the external parameter — `direction` is an internal variable in scoring/weights.go and is never exposed.
+32. `muninn_feedback` — explicit feedback on a retrieved engram. `useful=true` counts as an access (access count and last-access time, as a read by id would); `useful=false` currently has no effect. It does not change recall ranking weights or confidence: the per-vault weight update it also records is a mathematical no-op that nothing outside `internal/scoring` reads (pinned by `internal/scoring/deadloop_characterization_test.go`).
 33. `muninn_provenance` — full audit trail for an engram: who wrote it, what changed, and why. Implementation: internal/provenance/
 34. `muninn_replay_enrichment` — re-run the enrichment pipeline delta on one or more engrams that are missing specific stages (entities, relationships, classification, summary); supports dry_run
 35. `muninn_where_left_off` — most recently accessed memories for session context; uses the 0x22 LastAccess index for O(limit) performance regardless of vault size

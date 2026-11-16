@@ -13,12 +13,26 @@ import (
 )
 
 // appendAdditive: exported *Engine methods that only CREATE new state (allowed for append).
+//
+// Write and WriteBatch are additive with ONE exception that this census cannot
+// express, because it classifies methods and the exception is a property of the
+// request: a write that declares an inline `supersedes` retires the memory it
+// names, and is refused for append inside the method (COG-38,
+// refuseInlineSupersedesForAppend). That refusal is pinned behaviourally, per
+// writer and per field, by TestInlineSupersedes_AppendModeIsRefusedOnEveryWriter
+// and TestInlineSupersedes_AppendBatchUpsertItemIsRefused.
 var appendAdditive = map[string]bool{
 	"Write": true, "WriteBatch": true, "WriteIdempotency": true,
 	"RememberTree": true, "AddChild": true, "RegisterVaultName": true,
 	// Intend only CREATES: a new TypeGoal engram (via Write) plus new 0x2D
 	// armed-intention keys. It never modifies or deletes existing state.
 	"Intend": true,
+	// Label pipeline (SEC-15 amendment). RecordFeedbackLabels creates a NEW
+	// child row of a recall event and, on a first positive label, bumps the
+	// memory's access metadata — the dedup-touch residual class, never an
+	// overwrite/evolve/forget. RecordFeedback (legacy, no label) only bumps
+	// access, capped per credential/memory/day. Both refuse observe.
+	"RecordFeedbackLabels": true, "RecordFeedbackLabelsDetailed": true, "RecordFeedback": true,
 }
 
 // appendInfra: engine wiring/lifecycle/getters with no credential-reachable
@@ -34,7 +48,11 @@ var appendInfra = map[string]bool{
 	"Store":           true, "ResetReplayFailCount": true, "Stop": true, "Checkpoint": true,
 	// SetWriteGate installs the cluster single-writer gate (#596) — wiring, and
 	// it can only ever REFUSE writes, never perform one.
-	"SetWriteGate":  true,
+	"SetWriteGate": true,
+	// Write-time twin check (COG-36). WriteTwinOnEmbedded is the embed
+	// processor's post-store hook (in-memory ring + a shadow log line; no
+	// store write); SetWriteTwinFeed is wiring. Neither is credential-reachable.
+	"WriteTwinOnEmbedded": true, "SetWriteTwinFeed": true,
 	"Observability": true, "LatencyTracker": true, "ActivityTracker": true,
 	// WaitWriteTimeIdle drains the write-time async workers and writes
 	// nothing itself — an out-of-package test seam (#722 doctrine, #764).
@@ -71,8 +89,10 @@ var appendReadOnly = map[string]bool{
 	"Hello": true, "ListDeleted": true, "ListEngrams": true, "ListEntities": true, "ListVaults": true,
 	"Read": true, "RecallTree": true, "ReevaluatePushOnEmbed": true, "ResolveVaultPlasticity": true,
 	"VaultPlasticityConfig": true,
-	"Session":               true, "SessionPaged": true, "Stat": true, "Subscribe": true, "SubscribeWithDeliver": true,
+	"Session":               true, "SessionPaged": true, "SessionPagedBefore": true, "Stat": true, "Subscribe": true, "SubscribeWithDeliver": true,
 	"Traverse": true, "Unsubscribe": true, "VaultNameExists": true, "WhereLeftOff": true, "WorkerStats": true,
+	// EmbedHealth is two atomic loads of recall-observed embed outcomes.
+	"EmbedHealth": true,
 	// NoticesFor* are read/query surfaces with ONE recorded residual write: on
 	// delivery they bump the fired-marker (FiredCount/LastFiredAt; a one-shot
 	// consumes its own 0x2D keys). That is delivery bookkeeping on the
@@ -81,6 +101,11 @@ var appendReadOnly = map[string]bool{
 	// consume delivery state, never overwrite/evolve/forget an engram. COG-11
 	// readOnly (observe) suppresses even the marker.
 	"NoticesForRecall": true, "NoticesForRemember": true,
+	// LabelStats counts label rows and reads an in-process rejection tally.
+	"LabelStats": true,
+	// WriteTwinInline (COG-36) reads the ring and resolves chain heads through
+	// no-stamp reads; it writes nothing (not even access metadata).
+	"WriteTwinInline": true, "WriteTwinEnabled": true,
 }
 
 // TestAppendMode_MethodCensus is the ANTI-ROT pin the #687 reviews demanded: it
@@ -141,7 +166,6 @@ func guardedOps(eng *Engine, ap context.Context) map[string]func() error {
 		"SetTrust":             func() error { return eng.SetTrust(ap, v, id, "verified") },
 		"Consolidate":          func() error { _, e := eng.Consolidate(ap, v, []string{id}, "m"); return e },
 		"Decide":               func() error { _, e := eng.Decide(ap, v, "d", "r", nil, nil); return e },
-		"RecordFeedback":       func() error { return eng.RecordFeedback(ap, v, id, true) },
 		"RecordAccess":         func() error { return eng.RecordAccess(ap, v, id) },
 		"SetEntityState":       func() error { return eng.SetEntityState(ap, "v", "E", "merged", "", "") },
 		"SetEntityStateBatch":  func() error { errs := eng.SetEntityStateBatch(ap, "v", []EntityStateOp{{}}); return errs[0] },

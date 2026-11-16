@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -97,17 +98,30 @@ func TestSessionToken_WrongSecret(t *testing.T) {
 	}
 }
 
+// TestSessionToken_EmptySecret pins that an empty secret neither issues nor
+// accepts a token. Anyone can compute an HMAC under an empty key, so a token
+// that verifies under one proves nothing.
 func TestSessionToken_EmptySecret(t *testing.T) {
 	emptySecret := []byte{}
 
 	token, err := NewSessionToken("admin", emptySecret)
-	if err != nil {
-		t.Fatalf("NewSessionToken with empty secret should not panic: %v", err)
+	if !errors.Is(err, ErrEmptySessionSecret) {
+		t.Fatalf("NewSessionToken with empty secret: err = %v, want ErrEmptySessionSecret", err)
+	}
+	if token != "" {
+		t.Fatalf("NewSessionToken with empty secret returned token %q; want none", token)
 	}
 
-	otherSecret := []byte("other-secret")
-	if validateSessionToken(token, otherSecret) {
-		t.Error("token created with empty secret should not validate with different secret")
+	// A token correctly signed under the empty key — what an attacker would
+	// build — must not validate under it.
+	expiry := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	encoded := base64.RawURLEncoding.EncodeToString([]byte("admin|" + expiry))
+	forged := encoded + "." + computeHMAC(encoded, emptySecret)
+	if validateSessionToken(forged, emptySecret) {
+		t.Error("a token signed with the empty key validated under the empty secret")
+	}
+	if validateSessionToken(forged, nil) {
+		t.Error("a token signed with the empty key validated under a nil secret")
 	}
 
 	if validateSessionToken("random.garbage", emptySecret) {

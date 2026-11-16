@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/scrypster/muninndb/internal/engine/activation"
 	"github.com/scrypster/muninndb/internal/metrics"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/storage/keys"
@@ -68,11 +69,6 @@ func (e *Engine) ReindexFTSVault(ctx context.Context, vaultName string) (int64, 
 		return 0, fmt.Errorf("reindex-fts: clear keys: %w", err)
 	}
 
-	// Invalidate in-memory IDF cache so stale scores are not carried forward.
-	if e.fts != nil {
-		e.fts.InvalidateIDFCache()
-	}
-
 	// Step 2: Re-index all engrams using the current stemmed tokenizer.
 	var indexed int64
 	scanErr := e.store.ScanEngrams(opCtx, ws, func(eng *storage.Engram) error {
@@ -80,6 +76,16 @@ func (e *Engine) ReindexFTSVault(ctx context.Context, vaultName string) (int64, 
 			if err := e.fts.IndexEngram(ws, [16]byte(eng.ID), eng.Concept, eng.CreatedBy, eng.Content, eng.Tags); err != nil {
 				slog.Warn("reindex-fts: IndexEngram failed", "vault", vaultName, "id", eng.ID, "err", err)
 				metrics.FTSIndexFailures.WithLabelValues(vaultName).Inc()
+			} else if eng.State == storage.StateSoftDeleted && !activation.CarriesSupersessionSignature(eng) {
+				// A forgotten (trash) memory ends as Forget leaves it: no
+				// postings, its term frequencies still counted, so Restore
+				// stays the exact inverse. Indexing it and leaving it made a
+				// rebuild resurrect it into keyword search. Superseded
+				// versions keep their postings on purpose (COG-28); archived
+				// memories keep theirs too.
+				if err := e.fts.DeleteEngram(ws, [16]byte(eng.ID), eng.Concept, eng.CreatedBy, eng.Content, eng.Tags); err != nil {
+					slog.Warn("reindex-fts: dropping a forgotten memory's postings failed", "vault", vaultName, "id", eng.ID, "err", err)
+				}
 			}
 		}
 		indexed++
@@ -94,6 +100,7 @@ func (e *Engine) ReindexFTSVault(ctx context.Context, vaultName string) (int64, 
 		return indexed, fmt.Errorf("reindex-fts: set version marker: %w", err)
 	}
 
+	e.invalidateKeywordCoverage(ws)
 	slog.Info("reindex-fts: complete", "vault", vaultName, "engrams", indexed)
 	return indexed, nil
 }

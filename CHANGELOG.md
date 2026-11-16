@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An opt-in write-time twin check. With `MUNINN_WRITE_RELATED=shadow` the server notices
+  when a new memory is very close to one written in the same vault within the last hour
+  (most such pairs are duplicates or undeclared updates) and logs and counts it — nothing
+  is shown. With `MUNINN_WRITE_RELATED=1`, in a vault whose operator has set
+  `write_twin_inline: true`, single `muninn_remember` responses for full-mode credentials
+  carry a `related` block: the earlier memory, how close it is against the threshold in
+  use, and the exact call that would retire it (update first; it never suggests the old
+  memory superseding the new one). Off by default. The check never adds an embed call, never
+  delays the commit, and waits at most 100 ms for the write's own vector before answering
+  `embedder_busy` or `embed_timeout`. `muninn twin-replay` checks a vault (read-only, on a
+  backup) before you enable it; `muninn twin-audit` measures unresolved near-twins
+  afterwards. Per-vault `write_twin_threshold` overrides the model hint (bge-small: 0.93).
+- A metric for memories stored without a summary:
+  `muninndb_engine_writes_missing_field_total{vault,field}` counts writes that stored with an
+  empty `summary` at write time, which is otherwise silent on a deployment with no summarize
+  stage. The per-vault series show which vault such writes come from.
+  `muninndb_engine_writes_total` has no vault label, so a ratio is server-wide only: sum the
+  new metric across vaults before dividing. Vaults with `inline_enrichment: background_only`
+  are not counted, since a background stage owns the summary there, but their writes are in
+  that total, so the ratio reads low on a server that has such vaults. Tree writes and the
+  upsert-evolve path are not covered.
+
+### Changed
+
+- Vaults with no explicit access policy are reported in one startup line, with the count and
+  the names, instead of one `WARN` per vault on every start. Such a vault is locked and requires
+  an API key, which is the secure default and not a fault, so the line is `INFO`; the per-vault
+  line is now `DEBUG`. A failure to build the list is still a `WARN`. Behaviour is unchanged.
+
 ### Fixed
 
 - **Relationship records no longer collide when two unmapped predicates are
@@ -41,8 +72,367 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   yields two rows, entity-merge leaves the stale-name row behind, hard-delete
   orphans its 0x26 index entries). If a replica-first upgrade has already
   happened, run `muninn start --force-migration-rerun` on the upgraded nodes
-  and restart: v7's length discriminator re-keys the replicated strays. A
-  pre-upgrade binary also refuses to open a migrated data directory outright.
+  and restart: v7's length discriminator re-keys the replicated strays. **Where
+  that rerun finds its destination already occupied** — the stray and this node's
+  own re-assert of the same triple are both on disk — it keeps whichever value is
+  newer (by the record's `updated_at`) and deletes the legacy key either way, so
+  the rerun converges on the newest row instead of overwriting it with a stale
+  one. A pre-upgrade binary also refuses to open a migrated data directory
+  outright.
+
+- Declaring `supersedes` inline on a new memory now retires the old one, exactly as
+  `muninn_link` does. A write can carry links to existing memories: the `relationships`
+  parameter of `muninn_remember` and `muninn_remember_batch`, and the `relationships` /
+  `associations` fields of the REST, gRPC and MBP writes. **Before:** a `supersedes` among them
+  was stored as an edge and nothing else. The old memory stayed valid and kept coming back as
+  a current fact (demoted one step below the new one, but present), and a second such write
+  gave it two successors — a fork, which recall refuses to resolve; 15 forked memories were
+  found in a copy of production data. **Now**, on a write that creates a memory, it does what
+  `muninn_link(relation="supersedes")` does. The old memory's `valid_until` is stamped in the
+  same atomic commit as the new memory and the link, so default recall answers with the new
+  memory even for the old wording, and the old one appears only under `as_of` /
+  `include_invalid`, marked expired and `superseded_by`. (As with `muninn_link`, a
+  `valid_until` the old memory already had is kept: one set in the future stays current until
+  then.)
+  **A write can now be refused where it used to succeed.** Nothing is stored, and the error
+  says why, when the memory named as superseded:
+  - already has a successor — the error names its current version, which is the one to
+    supersede or evolve (REST: 409);
+  - is forgotten or archived (REST: 409);
+  - does not exist in the vault (REST: 400, as before);
+  - is also the target of another relation at the same weight in the same write, because
+    the two links would occupy one storage key (422) — give them different weights between
+    0 and 1 (weights at or above 1 all count as 1, and at or below 0 as 0);
+
+  or when the vault's `inline_enrichment` is `background_only`, which ignores `relationships`
+  and would have dropped the declaration (422; send it in `associations`, or link after the
+  write); or when the credential is append-mode (403; see Security). In a batch only that
+  item fails and the rest are stored. gRPC and MBP return the same message as the error text.
+  Two things change for a batch that contains a superseding item: that item is stored after
+  the others, so its id sorts after theirs whatever the order of the request, and the batch
+  is no longer one all-or-nothing commit.
+  Two more consequences of the old memory now being retired. If the new memory is later
+  forgotten, neither of the two is in default recall: the old one stays retired (it is still
+  returned under `as_of` / `include_invalid`), exactly as after `muninn_link` and a forget.
+  Before, the old memory had never been retired, so it was simply still there. And each
+  memory named as superseded is locked for the length of the write's commit, so a single
+  write that names hundreds of them makes most other evolves and supersedes links wait for
+  it (one write naming 500 took 4 to 6 ms and held about 220 of the 256 locks).
+  **Not changed yet:** a write that resolves to a memory that already exists. If the text is
+  identical to a stored memory the write still returns that memory with `duplicate_content`
+  and does not apply the declaration, and `upsert_mode` still stores the link as a plain edge
+  when it creates and ignores it afterwards. A retry with the same `op_id` returns the
+  original as before. Every other inline relation behaves as before. Memories superseded
+  inline before this release are not changed by the upgrade: where the old memory has one
+  successor, recall still demotes and annotates it, and declaring the same supersession once
+  with `muninn_link` retires it; an old memory that was given two successors stays ambiguous
+  until one branch is removed (`muninn_forget` with `hard=true`), as before. (COG-38)
+
+- Memories written by evolve and by tree writes are put in the keyword index in full.
+  `muninn_evolve`, and an `upsert_mode` re-sync with changed content, gave the new version its
+  predecessor's tags but left them out of the keyword index. Recall still reached the current
+  version through the retired one, whose index entries are kept. The miss showed once the
+  retired version was pruned or hard-deleted, and in the tag search that links a new memory to
+  related ones, which could not see the current version. `muninn_remember_tree` has submitted
+  nothing to the keyword index since it moved to a single batch write in March 2026, so a
+  tree's memories could not be found by keyword, and a vault that had only ever received trees
+  was missing from the vault list. Every path that stores a new memory now builds its index job
+  in one place. Measured on a copy of real production data: in three production vaults, 36 of
+  1,143, 116 of 1,181 and 454 of 8,462 live memories carried tags with no keyword index entry.
+  Every missing entry was in the tags field, and every tagged live memory whose history records
+  an evolve was affected (29 of 29, 103 of 103, 422 of 422). History records that verb from
+  v0.10.0 on. Those vaults held no tree-written memories, so the tree half is shown by test
+  only. Memories written before this release keep the gap until the vault's keyword index is
+  rebuilt with `muninn vault reindex-fts`. Not changed here: the dream dedup pass merges tags
+  into the surviving memory without updating the keyword index.
+- Cluster: a data race between a failed send to a peer and the checks that ask whether that
+  peer is connected. `PeerConn.Send` clears a connection's state under the peer's lock when a
+  write fails, while `ConnManager.HasLivePeerAt` and `RegisterConnKind` read that state holding
+  only the manager's lock. It was reached when a frame was sent to a node that had just stopped
+  while peer discovery or a second handshake from that node was in progress. Both reads now take
+  the peer's lock.
+- A word a memory holds can no longer score as if the vault had never seen it because of
+  what the server searched earlier. Keyword search kept each word's rarity (IDF) in memory,
+  worked out from two numbers read at different moments and refreshed only when another
+  memory holding that word was indexed. A search that overlapped the indexing of a memory
+  could work out a rarity from a memory count one behind the word's own count, which reads as
+  "never seen", and keep it. The write path does that search itself, for the tags of every
+  tagged memory. From then on the word matched nothing in that vault — `full_text_relevance`
+  0, the memory found by meaning alone at a lower band, or not at all when no vector was
+  available — until another memory holding the word was written, a keyword reindex ran, or
+  the server restarted. The index on disk was complete throughout, so nothing reported it.
+  Measured before this change, from an empty data directory, 40 invented memories per vault
+  written over MCP by one to four writers at once: the first tag written ended that way in 12
+  of 820 vaults, and 3 more held a stale value that mis-weighted it. An independent
+  reproduction, one writer and a searcher that never pauses: 300 of 300 before, 0 of 300
+  after.
+
+  What changed. Rarity is worked out on every search. A search reads the memory count, every
+  word's count and every posting list from one snapshot, so a score always belongs to a state
+  the index was really in (under a concurrent writer, 339 of 383,404 scores for one memory
+  matched no such state before, and 0 of 602,783 after). A memory's postings, its words' counts and the vault's
+  memory count are committed together. A word that has a count record always counts as
+  present. Searches no longer wait on the keyword indexer: with one writer indexing
+  continuously, median keyword search time went from 17 ms to 0.2 ms. A search does one more
+  point read per query word; the snapshot itself cost nothing measurable.
+
+  On upgrade. Keyword scores no longer depend on what the server searched earlier, so a vault
+  scores a query the same before and after a restart. On a long-running server some scores
+  therefore move once, toward the correct value, and a memory can cross the default threshold
+  when they do. The memories affected hold only the common word of a query whose rare word
+  was first searched while the vault was small. In a vault grown from 30 to 430 memories, 847
+  of 25,477 (query, memory) keyword scores were at or above 0.1 on the long-running server
+  and are below it after a restart or this change; none moved the other way.
+
+  Not fixed here. A word can have postings and no count record at all, and still matches
+  nothing: a memory whose keyword index was never built — its index job is dropped when the
+  queue is full or the server stops first, and nothing rebuilds it at startup — and that was
+  later retagged or restored. That predates this change and a restart does not clear it. And
+  a vault last written by an older build that stopped between its two writes carries a memory
+  count one behind; for words almost every memory holds, that changes a rarity by up to about
+  3x and a keyword score by up to 0.25.
+
+  A word counted in more memories than the vault holds. The server now reports this with
+  `muninndb_fts_stats_inconsistent_total`. One cause is ordinary and clears by itself: a
+  memory retagged before its keyword index was built (write it, then retag it inside the
+  indexer's 100 ms) has its new tag counted before the memory itself is. Seen within a minute
+  of such an edit it is counted as `state="expected"` and nothing is logged. Anything else is
+  counted as `state="unexplained"` and logged once per vault per ten minutes with the vault
+  prefix. That covers the same edit when the memory's index job was then dropped or the
+  server stopped first, a retag that landed while `reindex-fts` was rebuilding the vault (the
+  new tag is counted twice), and a vault last written by an older build that stopped between
+  its two writes. The log line says what was seen and to run `muninn vault reindex-fts <name>`
+  only if it keeps appearing.
+
+- A keyword index that cannot be read no longer answers "no match" or corrupts its counts.
+  Every read error in the keyword index was treated as "not found". A search over an
+  unreadable index returned nothing and no error, so recall looked exactly like a genuine
+  miss. Indexing, retagging or restoring a memory while a read failed took the unreadable
+  count as zero and saved 1 over it: indexing one memory while reads were failing took a
+  word's count from 6 to 1 and the vault's memory count from 6 to 1, durably, and reported
+  success. Read errors are now returned. Recall logs `activation: fts search degraded` for
+  the vault and still returns what the vector channel found; an index write that cannot read
+  its counts fails without writing anything. Two things to know. An index job that fails this
+  way is logged (`fts: worker failed to index engram`) and dropped, with no retry, so that
+  memory has no keyword entries until the vault is reindexed. And a recall response carries
+  no marker that its keyword channel was down: on a vault with no vectors a keyword read
+  error gives an empty result, and the log line is the only signal.
+
+- After a cluster failover, replicas no longer discard the new leader's writes. A replica
+  does not advance its own replication sequence counter while it follows, so a replica that
+  was promoted numbered its writes from wherever that counter had been left. On a node that
+  had never led, that is 1. Every other replica had already applied entries up to the old
+  leader's position and treats anything numbered at or below that as already applied, so it
+  dropped the new leader's writes one after another until the new leader's counter passed
+  the old position. Its health read `ok` and its lag 0 the whole time. On a three-node test
+  cluster, with no log pruning involved, 0 of 10 writes accepted after a failover reached the
+  surviving replica. This affected every failover of a cluster with more than one replica,
+  automatic or operator-triggered. A promoted node now continues the numbering from the last
+  entry it applied (STO-26).
+  - **Already affected:** a replica that followed a promoted leader on an earlier version may
+    be missing the writes that leader accepted first. Upgrading does not put them back.
+    Re-seed such a replica from its leader. The procedure is in `docs/cluster-operations.md`
+    under "What a failover does to replication".
+  - **Upgrade order matters:** the fix runs on the node that is promoted. A promoted node on
+    an older version still restarts the numbering, whatever its replicas run. Upgrade
+    replicas first and fail over to an upgraded one, as the rolling-upgrade procedure already
+    says.
+  - **Still open, and silent unless noted.** This fixes replicas that were level with the
+    node that won. It does not fix these:
+    - A replica that was *ahead* of the node that won holds entries the new leader never
+      received. The new leader's first writes reuse those numbers and that replica skips
+      them.
+    - A replica that was *behind* the node that won misses the entries in between.
+    - A replica that is behind can win an election, because votes do not compare positions.
+    - Entries the old leader still streams after the new one has been promoted are applied
+      by whoever receives them.
+    - Writes the old leader accepted but had not shipped when it went away stay on its disk
+      only.
+    - After a *graceful* failover, replicas other than the handoff target keep reading from
+      the old leader and receive nothing from the new one until the old leader is stopped or
+      restarted. Restart it promptly.
+    - `POST /api/admin/cluster/failover` can answer 500 although the handoff took effect
+      (the old leader's log says "HANDOFF_ACK timeout"). This one is not silent, but it is
+      wrong.
+    - A node can keep a `seed-<addr>` placeholder in its voter list next to the same peer's
+      real id, which raises the quorum by one until that node restarts.
+    - Draining is not enforced, so the old leader keeps accepting writes during a graceful
+      failover.
+    - No replica is sent a snapshot. One that joins after the leader has pruned its log gets
+      only what the log still holds.
+
+- `source_type` on a recall row is the memory's origin again. It was read from the newest
+  provenance entry, and the first read or feedback appends an update entry recorded as
+  `inferred`, so the field flipped from the writer's source to `inferred` after one access: it
+  reported who touched the memory last. It is now read from the entry that created the memory
+  and does not change afterwards. Recall also stops loading a memory's whole provenance log to
+  answer it. Known limit, unchanged here: every ordinary write is recorded as `human` whoever
+  made it, so the field does not yet tell a person from an agent.
+
+- A connected follower no longer serves a memory that was soft-deleted on the leader.
+  A follower applies replicated writes straight to storage, and nothing told its read caches,
+  so a Lobe that stayed connected kept returning a deleted memory as active until it rejoined.
+  The follower now invalidates what each applied batch touched right after the commit, drops
+  every cache on a snapshot reset, and a cache fill that raced the commit can no longer install
+  the old value (STO-22). Reported by likesjx (#869), who also wrote the first fix and verified
+  it on a live cluster (#878).
+
+- Two links written at the same moment can no longer silently replace one another. Two
+  links between the same pair of memories at the same weight share one storage key, whatever
+  their relation. A guard refuses the second, but it checked and then wrote with nothing
+  holding the two steps together. When the write-time near-duplicate check linked a new
+  memory to an older one with `refines` at the same moment a caller declared `supersedes` on
+  that pair, both writes were told OK and one edge was lost. When `supersedes` was the one
+  lost, recall presented the superseded memory as the current version. The check and the
+  write are now one step on both write paths: the later writer gets the existing collision
+  error. This closes the concurrent case only. A later weight update on the pair can still
+  land one relation on another's key, and a declared link can still be refused because an
+  automatic one reached the key first; both need the relation in the key (#880).
+
+- Relevance band descriptions corrected. A band reports how much evidence a memory has
+  against your query, measured against the embedding model's noise floor — not whether it answers
+  you. `moderate` is now documented as a candidate to verify, not an established answer, and
+  a recall that is not withheld is no longer described as proof the vault holds an answer: a
+  fluent question about something the vault does not hold often still returns `moderate`
+  rows. Changed in the `muninn_recall` tool description, the guide, the weak-only hint and
+  the REST `relevance_band`/`abstained_reason` descriptions. No wire value, ranking, score or
+  abstention change.
+- A restored memory is findable by keyword again. Forgetting a memory drops
+  its keyword-search postings and `muninn_restore` never put them back, so a
+  restored memory could only be found by meaning, never by its words. Restore
+  now rebuilds them from the memory's current text and tags without moving
+  the keyword statistics, and a memory retagged while deleted comes back
+  findable by its new tags. A memory restored before this release is still
+  missing its postings: the admin observability snapshot
+  (`/api/admin/observability`, and the web console's per-vault breakdown)
+  now reports `keyword_unindexed_live` per vault, and if it is non-zero
+  `muninn vault reindex-fts <name>` rebuilds that vault's keyword index. The
+  rebuild runs online under the vault's lock; keyword results for that vault
+  are partial until it finishes. It no longer makes forgotten memories
+  keyword-findable (it used to index them too).
+- `muninn_state` and `muninn_compare_and_set` refuse to move a forgotten
+  (soft-deleted) memory to another state and point at `muninn_restore`, the
+  one way back; a state change used to bring it back unfindable by keyword.
+- Concurrent writes to one memory no longer undo each other. Enrichment's
+  summary write, the decay worker's relevance update, trust and validity
+  stamps, embedding status, evolve's supersede and dream dedup each rewrote a
+  memory from a copy read without a lock, so a forget landing at the same
+  moment could be reverted (the memory came back active) and other fields
+  could silently roll back. Every such write now holds the memory's lock and
+  writes only its own fields over the stored record.
+- Clearing a vault while it is being written can no longer crash the server
+  ("sync: WaitGroup is reused before previous Wait has returned").
+- Clearing one vault no longer empties every other vault's association
+  caches.
+- Retired versions no longer take recall's candidate slots. An evolved
+  memory's old versions keep their vector and keyword postings (so a query in
+  the old wording can still reach the current fact), but recall used to count
+  them toward each index's top-k before discarding them: in a 2,000-memory
+  vault a 50-version chain on a topic hid all 20 relevant live memories, and a
+  500-version chain made the recall return nothing at all. Retired (forgotten,
+  superseded or archived) memories are now routed through but never counted;
+  the nearest few are kept separately as evidence for version-head
+  substitution. `as_of` and `include_invalid` recalls are unchanged.
+- A query worded like an old version reaches the current version at any chain
+  length. The supersession walk stopped at 8 hops, so on chains of 10+ versions
+  that evidence was discarded (`abstained_reason: superseded_only`), and every
+  such recall logged depth-cap warnings. Declared chains are now walked to
+  their head; `chain_truncated` is reported only for hand-built chains of
+  active memories past the walk limit. Contract change: an 8-hop chain is no
+  longer flagged `chain_truncated`, and a 9-hop chain now substitutes its head
+  instead of abstaining. Chain warnings (fork, cycle, walk limit) log once per
+  memory per process instead of on every recall.
+
+- Recall no longer waits behind background embedding. The bundled local
+  embedder serialised every inference behind one lock that ignored deadlines:
+  a recall's query embed queued behind retroactive 64-text batches (p50 ~2.4 s
+  versus ~16 ms idle) and, with a caller deadline, recall then failed outright
+  with zero results. Inference now runs in a query lane (recall's query embed,
+  marked explicitly by the caller) and a batch lane (everything else, still one
+  batch at a time), and a queued call gives up when its deadline passes. A
+  recall whose query embed misses its budget answers keyword-only with
+  `semantic_degraded: true` and `semantic_degraded_reason: "embed_timeout"`
+  (other reasons: `embed_unavailable`, `embed_zero_vector`,
+  `stored_embedding_read`); `muninn_status` reports the reason. The local
+  embedder's batch size drops from 64 to 8 (same throughput, peak RSS ~0.8 GB
+  instead of ~2.5 GB) and it is no longer rate-limited — a `rate_per_sec`
+  plugin option is now ignored for the local provider. gRPC's
+  `ActivateResponse` gains `semantic_degraded` (7) and
+  `semantic_degraded_reason` (8); it previously served keyword-only results
+  unmarked. Only recall's query embed uses the query lane; a burst of
+  simultaneous recalls serialises on it. New metrics:
+  `muninndb_embed_lane_waits_total{lane}`,
+  `muninndb_embed_lane_timeouts_total{lane}`,
+  `muninndb_embed_lane_wait_seconds{lane}`,
+  `muninndb_recall_embed_timeout_total{vault}`.
+
+- A cluster leader can no longer crash with `panic: pebble: closed` because a
+  replication stream outlived storage at shutdown. Stopping the cluster
+  coordinator cancelled its streams without waiting for them, so a stream
+  already past its cancellation check — or one started for a follower that
+  reconnected while the leader was still shutting down — read the replication
+  log after storage had closed. Shutdown now waits for every stream to exit
+  before storage closes, and starts none once it has begun. Found as an
+  intermittent failure of the project's own test suite; hitting it on a
+  running cluster needs unlucky timing and nobody has reported it. Other
+  cluster background work (the periodic log prune, for one) is still not
+  waited for at shutdown.
+
+### Internal
+
+- The `cmd/muninn` tests no longer contact a daemon running on the same machine. Several used
+  the CLI's default addresses, so running them next to a live daemon sent it health probes
+  and, from two tests, a login with the default admin credentials. The package's `TestMain`
+  now points every CLI address at a refusing port, gives the tests a temporary home
+  directory, stubs the release lookup and refuses any dial to a default daemon port or a
+  non-loopback host, failing the run if a test attempts one. Three enrichment tests that sent
+  placeholder keys to the real OpenAI and Anthropic APIs now use a local stand-in or a
+  cancelled context. The integration suite checks all five default ports before it starts
+  its daemon and runs under a temporary home directory.
+
+### Security
+
+- An append-mode key can no longer supersede another memory by writing. Append keys may
+  create memories and read; they may not modify existing ones, and `muninn_link`, evolve and
+  forget were already refused. But a `supersedes` link sent inline on `muninn_remember` (or
+  on a REST, gRPC or MBP write) was accepted: it attached a successor to any memory in the
+  key's vault, which made recall demote that memory and mark it superseded, and could fork
+  one that already had a successor. Such a write is now refused with "append-mode credential
+  cannot modify or delete existing memories" (REST: 403) and stores nothing — on every write
+  path, including `upsert_mode` and a write whose text already exists. Append keys can still
+  write memories that carry any other inline relation. (SEC-15, COG-38)
+
+- A blank session-secret file no longer turns admin authentication off or lets a session
+  cookie be forged. If `auth_secret` in the data directory was empty (a first-run write that
+  failed part-way, a truncated restore, a placeholder), the server read it as a valid
+  zero-length secret, and with a zero-length secret the REST and UI admin routes were served
+  without a session. If it held only whitespace or only zero bytes, admin routes still asked
+  for a session, but the signing key was one anyone could guess, so a session cookie could
+  be forged — for admin routes and for any locked vault. A blank file is now replaced with a
+  fresh secret at startup (logged at WARN), the secret is written to a temporary file and
+  renamed into place so a failed write cannot leave a blank one, and an empty secret neither
+  issues nor accepts a session token. A secret file that exists but cannot be read is now a
+  startup error instead of being overwritten. To check yours, run
+  `LC_ALL=C tr -d ' \t\r\n\v\f\000' < <data-dir>/auth_secret | wc -c`: if it prints 0, the file was
+  blank and the server was affected. A file size above zero is not enough to rule it out.
+
+- gRPC now refuses read calls from an ingest-only key. A `write`-mode API key is meant to
+  store memories and read nothing; REST and MCP enforced that, the gRPC handlers for Read,
+  Activate, Stat, ListVaults and Subscribe did not check the mode at all, and
+  AdjustConfidence returned an engram's confidence to such a key. All six now return
+  `PermissionDenied` ("write-only key cannot read") before the engine is called. Every RPC
+  is classified as a handshake, a read, a mutation or both, and a test checks every
+  credential mode against every RPC, so a new RPC cannot be added without that decision.
+
+- Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
+  v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
+  v0.60.0, clearing all 23 reachable govulncheck findings. Notable ones:
+  GO-2026-6865 (zstd, reached via the MBP transport compressor), GO-2026-6859
+  (`net/http`), GO-2026-6809 (`crypto/x509`), GO-2026-6443 and GO-2026-6348
+  (gRPC server), GO-2026-6603/6611/6612/6617 (`x/net`), plus standard-library
+  fixes in `net/http`, `crypto/tls`, `html/template`, `net/url` and
+  `encoding/asn1` between go1.26.6 and go1.26.11. The Docker builder image
+  moves from `golang:1.24` to `golang:1.26.11` to match.
 
 ---
 
@@ -452,7 +842,7 @@ the rollback note.
   not to how big the tag set is. A memory whose tag set grows in place is still
   length-normalized by BM25 like any longer document, and because the rebuild
   leaves the corpus *average* document length alone, that penalty is slightly
-  over-applied until the next `muninn reindex-fts` — the conservative direction,
+  over-applied until the next `muninn vault reindex-fts <name>` — the conservative direction,
   scores under-credited rather than inflated. There is no ratchet either way:
   returning to a previous tag set restores the previous score exactly. (#720)
 

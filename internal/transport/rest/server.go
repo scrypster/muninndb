@@ -265,6 +265,7 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 	mux.HandleFunc("GET /api/admin/vaults/{name}/export-markdown", s.withAdminMiddleware(s.handleExportVaultMarkdown))
 	mux.HandleFunc("POST /api/admin/vaults/import", s.withAdminMiddlewareNoSizeLimit(s.withLargeBody(s.withCortexWrite(s.handleImportVault))))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-fts", s.withAdminMiddleware(s.withCortexWrite(s.handleReindexFTSVault)))
+	mux.HandleFunc("POST /api/admin/vaults/{name}/reindex-hnsw", s.withAdminMiddleware(s.withCortexWrite(s.handleRebuildVectorIndex)))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/repair-watermark/reset", s.withAdminMiddleware(s.handleResetRepairWatermark))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/reembed", s.withAdminMiddleware(s.withCortexWrite(s.handleReembedVault)))
 	mux.HandleFunc("POST /api/admin/vaults/{name}/rename", s.withAdminMiddleware(s.withCortexWrite(s.handleRenameVault)))
@@ -382,6 +383,10 @@ func (s *Server) ActiveCoordinator() *replication.ClusterCoordinator {
 
 // SetDataDir sets the data directory used for persisting cluster configuration.
 func (s *Server) SetDataDir(dir string) { s.dataDir = dir }
+
+// DBWritable reports the cached data-directory writability probe (the
+// db_writable of /api/health). Cheap: an atomic load.
+func (s *Server) DBWritable() bool { return s.dbWritable.Load() }
 
 // SetVersion sets the version string reported by the health endpoint.
 func (s *Server) SetVersion(v string) { s.version = v }
@@ -731,10 +736,39 @@ func (s *Server) handleCreateEngram(w http.ResponseWriter, r *http.Request) {
 			s.sendError(r, w, http.StatusUnprocessableEntity, ErrInvalidEngram, err.Error())
 			return
 		}
+		if status, code, ok := inlineSupersedesRefusal(err); ok {
+			s.sendError(r, w, status, code, err.Error())
+			return
+		}
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return
 	}
 	s.sendJSON(w, http.StatusCreated, resp)
+}
+
+// inlineSupersedesRefusal classifies a write the engine refused because of the
+// supersedes declaration it carries inline (COG-38). These are the caller's to
+// act on, and the message is the whole point — it says what was and was not
+// stored, why, and for a target that already has a successor, which memory is
+// the current one. REST has no hint channel to report a partial result, so the
+// write is refused; and it must not fall through to the 500 branch, because
+// sendError replaces every 5xx message with "an internal error occurred".
+//
+//	403  an append-mode credential (retiring a memory modifies existing state)
+//	409  the target already has a successor, or is forgotten/archived
+//
+// A missing or malformed target is ErrInvalidID (400) and a declaration that is
+// self-contradictory is ErrInvalidRequest (422); both are matched before this.
+func inlineSupersedesRefusal(err error) (status int, code ErrorCode, ok bool) {
+	switch {
+	case errors.Is(err, engine.ErrAppendForbidden):
+		return http.StatusForbidden, ErrVaultForbidden, true
+	case errors.Is(err, engine.ErrEvolveTargetSuperseded),
+		errors.Is(err, engine.ErrEngramSoftDeleted),
+		errors.Is(err, engine.ErrEngramArchived):
+		return http.StatusConflict, ErrInvalidAssociation, true
+	}
+	return 0, 0, false
 }
 
 func (s *Server) handleBatchCreate(w http.ResponseWriter, r *http.Request) {
@@ -872,7 +906,10 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	// to the outer WriteTimeout so we never wait longer than the HTTP server allows.
 	ctx, cancel := context.WithTimeout(r.Context(), activateTimeout)
 	defer cancel()
-	resp, err := s.engine.Activate(ctx, &req)
+	// The response is mbp.ActivateResponse verbatim (sendJSON), so it carries
+	// the COG-35 associated block: the engine may build it and record its
+	// ids as served.
+	resp, err := s.engine.Activate(mbp.WithAssociatedRendered(ctx), &req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			s.sendError(r, w, http.StatusGatewayTimeout, ErrIndexError, "activation timeout: query took too long")

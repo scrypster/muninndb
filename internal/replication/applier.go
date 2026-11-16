@@ -21,6 +21,23 @@ type Applier struct {
 	lastApplied  uint64
 	appliedSince uint64 // entries since last explicit sync
 	mu           sync.Mutex
+
+	// onCommitted / onReset let the local store keep its derived in-memory
+	// state (the retired set, storage/retired.go) in step with what this
+	// applier writes behind its back. onCommitted receives the repr of every
+	// batch the applier commits; onReset is called when a snapshot has
+	// replaced local state wholesale (ResetTo). Both nil unless wired.
+	onCommitted func(repr []byte)
+	onReset     func()
+}
+
+// SetCommitHooks installs the post-commit hooks (see the Applier fields).
+// Must be called before the applier is shared across goroutines.
+func (a *Applier) SetCommitHooks(onCommitted func(repr []byte), onReset func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onCommitted = onCommitted
+	a.onReset = onReset
 }
 
 // NewApplier creates a new Applier for a Pebble database.
@@ -85,7 +102,14 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 		if err := reprBatch.SetRepr(entry.Value); err != nil {
 			return fmt.Errorf("apply batch repr at seq %d: %w", entry.Seq, err)
 		}
-		if err := reprBatch.Commit(pebble.NoSync); err != nil {
+		// The hook runs whether or not Commit succeeded (fail-safe): a commit
+		// that errors may still have landed, and the hook's consumers
+		// re-derive from what Pebble holds rather than trusting the batch.
+		err := reprBatch.Commit(pebble.NoSync)
+		if a.onCommitted != nil {
+			a.onCommitted(entry.Value)
+		}
+		if err != nil {
 			return err
 		}
 		seqBuf := make([]byte, 8)
@@ -121,7 +145,12 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 	// Use NoSync per entry — Pebble's WAL provides crash-safety without an fsync
 	// on every write. Syncing every entry would serialize on disk I/O, making
 	// replication throughput proportional to fsync latency (~1 IOPS per entry).
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	// Fail-safe, as above: the hook runs on a failed commit too.
+	err := batch.Commit(pebble.NoSync)
+	if a.onCommitted != nil {
+		a.onCommitted(batch.Repr())
+	}
+	if err != nil {
 		return err
 	}
 
@@ -149,6 +178,19 @@ func (a *Applier) LastApplied() uint64 {
 	return a.lastApplied
 }
 
+// HoldCursor calls fn with the current apply cursor while no entry can be
+// applied: Apply waits until fn returns. A promotion uses it to read the cursor
+// and take the leader role as one step (ClusterCoordinator.handlePromotion), so
+// an entry still arriving from the previous leader is either counted in the
+// value fn sees or applied only after the role has changed, never in between.
+//
+// fn must not call back into the Applier.
+func (a *Applier) HoldCursor(fn func(lastApplied uint64)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	fn(a.lastApplied)
+}
+
 // ResetTo rebases the apply cursor onto seq, in memory and in Pebble, and is
 // the ONLY way the cursor moves other than applying an entry.
 //
@@ -168,6 +210,11 @@ func (a *Applier) ResetTo(seq uint64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// The snapshot replaced local state: anything derived from it is stale,
+	// whether or not the cursor moves.
+	if a.onReset != nil {
+		a.onReset()
+	}
 	if a.lastApplied == seq {
 		return nil
 	}

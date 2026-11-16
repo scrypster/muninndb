@@ -121,6 +121,18 @@ type ClusterCoordinator struct {
 	// Per-Lobe streamers (Cortex only): lobeID -> cancel func
 	streamers   map[string]context.CancelFunc
 	streamersMu sync.Mutex
+	// streamerWG counts live streamer goroutines so Stop can join them. A
+	// cancel func only asks a streamer to exit; a streamer already past its
+	// context check still performs one more replication-log read, and the
+	// caller of Stop closes the store next.
+	streamerWG sync.WaitGroup
+	// streamersStopped latches in Stop (guarded by streamersMu). Once set,
+	// startStreamerForLobe starts nothing: a streamer started after Stop has
+	// begun its join would be neither cancelled nor waited for.
+	streamersStopped bool
+	// streamerBeforeRead is handed to every NetworkStreamer this coordinator
+	// starts (NetworkStreamer.beforeRead). Test seam; nil in production.
+	streamerBeforeRead func()
 
 	// quorumLostSince is the time when this Cortex first noticed it could not
 	// reach a quorum of live peers. Zero value means quorum is healthy.
@@ -810,7 +822,7 @@ func (c *ClusterCoordinator) streamFromCortex(ctx context.Context, conn net.Conn
 		}
 		// After applying a replication entry, report our progress so the Cortex
 		// can track replica lag (#516 part 3). The Cortex reads these acks via
-		// handleClusterConn → HandleIncomingFrame → UpdateReplicaSeq.
+		// ServeConn → HandleIncomingFrame → UpdateReplicaSeq.
 		if frame.Type == mbp.TypeReplEntry {
 			c.sendReplAck(cortexID, conn)
 		}
@@ -1315,7 +1327,7 @@ func (c *ClusterCoordinator) EvictConn(nodeID string, conn net.Conn) {
 // HandleIncomingJoin processes a TypeJoinRequest frame on a raw inbound conn
 // whose node ID is not yet known. It registers the live conn under req.NodeID
 // so that peer.Send works immediately (no dial required), processes the join
-// request, and returns the joining node's stable ID so that handleClusterConn
+// request, and returns the joining node's stable ID so that ServeConn
 // can use it for all subsequent frames on the same connection.
 func (c *ClusterCoordinator) HandleIncomingJoin(conn net.Conn, payload []byte) (string, bool, error) {
 	var req mbp.JoinRequest
@@ -1580,18 +1592,42 @@ func (c *ClusterCoordinator) HandleIncomingFrame(fromNodeID string, frameType ui
 	}
 }
 
-// Stop performs a graceful shutdown: stops streamers, stops MSP, closes connections.
+// Stop shuts the replication streamers down and closes every peer connection.
+// It is terminal: no streamer starts on this coordinator afterwards.
+//
+// Stop returns only after every streamer goroutine has exited, because its
+// caller closes the store next (cmd/muninn/server.go) and a streamer reads the
+// replication log straight from Pebble, which panics on a read after Close.
+// Cancelling is not enough on its own: Stream checks its context and then
+// reads, so a streamer already past the check reads once more.
+//
+// The wait is short: a cancelled streamer exits at its next context check, and
+// between two checks it does one log read (at most 1000 entries) or one frame
+// send, which the connection close below fails.
+//
+// Only the streamers are joined. The other goroutines this coordinator starts
+// are not: they end with Run's context, with their connection, or on their
+// own, and nothing waits for them. Some of those use the store as well (the
+// periodic prune, the post-join snapshot sender, the frame readers that apply
+// entries), so "Stop returned" does not yet mean nothing in this package can
+// touch the store.
 func (c *ClusterCoordinator) Stop() error {
-	// Stop all streamers
+	// Cancel all streamers and refuse new ones.
 	c.streamersMu.Lock()
+	c.streamersStopped = true
 	for id, cancel := range c.streamers {
 		cancel()
 		delete(c.streamers, id)
 	}
 	c.streamersMu.Unlock()
 
-	// Close all peer connections
-	return c.mgr.Close()
+	// Close all peer connections. Before the join, not after: a streamer in
+	// the middle of a frame write to a slow peer sees its context only once
+	// that write returns.
+	err := c.mgr.Close()
+
+	c.streamerWG.Wait()
+	return err
 }
 
 // handlePromotion is called when this node wins an election.
@@ -1608,9 +1644,7 @@ func (c *ClusterCoordinator) handlePromotion(epoch uint64) {
 			"epoch", epoch, "node", c.cfg.NodeID)
 		return
 	}
-	c.roleMu.Lock()
-	c.role = RolePrimary
-	c.roleMu.Unlock()
+	c.takeLeaderRole(epoch)
 	c.election.mu.Unlock()
 
 	slog.Info("cluster: promoted to Cortex", "epoch", epoch, "node", c.cfg.NodeID)
@@ -1618,6 +1652,67 @@ func (c *ClusterCoordinator) handlePromotion(epoch uint64) {
 	c.pushRoleEvent(roleEvent{promoted: true})
 
 	c.invokeOnBecameCortex(epoch)
+}
+
+// takeLeaderRole makes this node the leader: it brings the replication log's
+// sequence counter up to the node's applied position and then flips the role,
+// in that order and as one step with respect to the applier.
+//
+// Why the counter moves. While this node followed, it applied the leader's
+// entries without appending any of its own (the applier records last_applied
+// only, and LocalAppendFunc suppresses a follower's appends), so its counter is
+// wherever its own last term as leader left it, which is 0 if it has never led. A
+// follower of the previous leader has applied up to that leader's head and
+// skips every entry numbered at or below that (Applier.Apply). Numbered from
+// the stale counter, this node's first writes as leader would all be skipped,
+// by followers reporting no lag. Numbered from its applied position, its first
+// entry is one past everything it has applied.
+//
+// Why before the flip. The role is what lets local writes into the log
+// (LocalAppendFunc appends unless the node is definitively a follower). With
+// the counter raised first, no append can be numbered from the old value.
+//
+// Why under the applier's lock. An entry from the previous leader may still be
+// arriving. Holding the cursor means such an entry has either been counted in
+// the position read here or is applied after the role has changed. It cannot
+// land between the read and the flip and leave the counter one short.
+//
+// What this does not cover:
+//   - A follower that had applied FURTHER than this node. This node cannot
+//     number its way past entries it never saw: its first writes reuse their
+//     numbers, and that follower skips them. Nothing detects that yet.
+//   - Entries the previous leader streams after this point. A leader does not
+//     stop applying what a deposed leader still sends, and another follower
+//     may apply them too. Telling two leaders' entries apart needs positions
+//     tagged with the epoch that wrote them.
+//
+// Caller holds election.mu.
+func (c *ClusterCoordinator) takeLeaderRole(epoch uint64) {
+	flip := func() {
+		c.roleMu.Lock()
+		c.role = RolePrimary
+		c.roleMu.Unlock()
+	}
+	if c.applier == nil || c.repLog == nil {
+		flip()
+		return
+	}
+	c.applier.HoldCursor(func(applied uint64) {
+		previous, err := c.repLog.AdvanceTo(applied)
+		switch {
+		case err != nil:
+			// AdvanceTo keeps the target whichever step failed (see its doc), so
+			// the promotion goes ahead: the claim is already broadcast, and a
+			// leader that then declined the role would leave the cluster
+			// following nobody.
+			slog.Error("cluster: could not record the replication sequence position at promotion (numbering continues from it regardless)",
+				"node", c.cfg.NodeID, "epoch", epoch, "applied", applied, "err", err)
+		case applied > previous:
+			slog.Info("cluster: replication sequence continues from this node's applied position",
+				"node", c.cfg.NodeID, "epoch", epoch, "log_head_was", previous, "log_head", applied)
+		}
+		flip()
+	})
 }
 
 // invokeOnBecameCortex runs OnBecameCortex synchronously on the caller's
@@ -1723,11 +1818,21 @@ func (c *ClusterCoordinator) startStreamerForLobe(info NodeInfo) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.streamersMu.Lock()
+	if c.streamersStopped {
+		// Stop has run (see streamersStopped). A Lobe can still get here: Stop
+		// drops its connection, it rejoins, and the join handler calls this.
+		c.streamersMu.Unlock()
+		cancel()
+		return
+	}
 	// Cancel any existing streamer for this lobe
 	if existing, ok := c.streamers[info.NodeID]; ok {
 		existing()
 	}
 	c.streamers[info.NodeID] = cancel
+	// Counted under the same lock as the streamersStopped check, so Stop's
+	// Wait cannot begin between that check and this Add.
+	c.streamerWG.Add(1)
 	c.streamersMu.Unlock()
 
 	startSeq := c.streamStartSeq(info.NodeID)
@@ -1736,7 +1841,9 @@ func (c *ClusterCoordinator) startStreamerForLobe(info NodeInfo) {
 		"lobe", info.NodeID, "from_seq", startSeq, "log_seq", logSeq, "backlog", logSeq-min(logSeq, startSeq))
 
 	go func() {
+		defer c.streamerWG.Done()
 		s := NewNetworkStreamer(c.repLog, peer, startSeq)
+		s.beforeRead = c.streamerBeforeRead
 		if err := s.Stream(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			// Report where the stream got to. Without this a streamer that died
 			// mid-catch-up was indistinguishable in the log from a healthy idle

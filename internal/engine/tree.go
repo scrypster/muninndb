@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scrypster/muninndb/internal/index/fts"
 	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/storage"
 )
@@ -122,6 +121,9 @@ func flattenTree(root TreeNodeInput) []flatTreeItem {
 // leave the constellation in a partially-written state. Associations and
 // ordinal keys are wired after the batch commits (Phase 2).
 func (e *Engine) RememberTree(ctx context.Context, req *RememberTreeRequest) (*RememberTreeResult, error) {
+	// Label pipeline: create/evolve provenance records the writer's hashed
+	// session and credential, so a later label can tell self-labelling.
+	ctx = e.withWriterIdentity(ctx)
 	// Cluster single-writer gate (#596).
 	if err := e.refuseNonLeaderWrite(); err != nil {
 		return nil, err
@@ -162,6 +164,26 @@ func (e *Engine) RememberTree(ctx context.Context, req *RememberTreeRequest) (*R
 	}
 	if err := batch.Commit(); err != nil {
 		return nil, fmt.Errorf("RememberTree: commit batch: %w", err)
+	}
+
+	// The nodes are durable from here, whatever happens to the links below, so
+	// this is where they are registered and indexed. Without the vault name a
+	// vault whose only writes were trees was not listed and could not be
+	// reindexed. Without the index jobs a tree's memories could not be found by
+	// any word.
+	vaultName := req.Vault
+	if vaultName == "" {
+		vaultName = "default"
+	}
+	if err := e.store.WriteVaultName(ws, vaultName); err != nil {
+		slog.Warn("engine: failed to persist vault name", "vault", vaultName, "err", err)
+	}
+	if e.ftsWorker != nil {
+		for _, eng := range engrams {
+			if !e.ftsWorker.Submit(keywordIndexJob(ws, eng.ID, eng)) {
+				slog.Warn("engine: FTS index job dropped in tree write", "id", eng.ID.String())
+			}
+		}
 	}
 
 	// Build ID slices now that the batch has assigned ULIDs via defaulting.
@@ -223,6 +245,9 @@ func (e *Engine) CountChildren(ctx context.Context, vault, engramID string) (int
 // a crash between any two writes cannot leave the tree in an inconsistent state.
 // If input.Ordinal is nil, appends after the last existing child.
 func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *AddChildInput) (*AddChildResult, error) {
+	// Label pipeline: create/evolve provenance records the writer's hashed
+	// session and credential, so a later label can tell self-labelling.
+	ctx = e.withWriterIdentity(ctx)
 	// Cluster single-writer gate (#596).
 	if err := e.refuseNonLeaderWrite(); err != nil {
 		return nil, err
@@ -350,13 +375,7 @@ func (e *Engine) AddChild(ctx context.Context, vault, parentID string, input *Ad
 	e.activity.Record(ws)
 
 	if e.ftsWorker != nil {
-		e.ftsWorker.Submit(fts.IndexJob{
-			WS:      ws,
-			ID:      [16]byte(child.ID),
-			Concept: child.Concept,
-			Content: child.Content,
-			Tags:    child.Tags,
-		})
+		e.ftsWorker.Submit(keywordIndexJob(ws, child.ID, child))
 	}
 
 	if e.triggers != nil {

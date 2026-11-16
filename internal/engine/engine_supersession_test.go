@@ -50,6 +50,28 @@ func (h *supersedeTestHarness) supersede(newID, oldID string) {
 	}
 }
 
+// supersedeLegacy writes a supersedes edge at the store level, bypassing
+// Link's fork guard — the on-disk shape a pre-guard store can hold (a second
+// superseder of one engram). Only for fixtures that pin how recall treats
+// such legacy data.
+func (h *supersedeTestHarness) supersedeLegacy(newID, oldID string) {
+	h.t.Helper()
+	n, err := storage.ParseULID(newID)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	o, err := storage.ParseULID(oldID)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	ws := h.eng.store.ResolveVaultPrefix("default")
+	if err := h.eng.store.WriteAssociation(h.ctx, ws, n, o, &storage.Association{
+		TargetID: o, RelType: storage.RelSupersedes, Weight: 1, Confidence: 1, CreatedAt: time.Now(),
+	}); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
 func (h *supersedeTestHarness) softDelete(id string) {
 	h.t.Helper()
 	u, err := storage.ParseULID(id)
@@ -366,7 +388,7 @@ func TestApplySupersession_DiamondLeavesUnchanged(t *testing.T) {
 	b := h.write("superseder one", "b")
 	c := h.write("superseder two", "c")
 	h.supersede(b, x)
-	h.supersede(c, x) // x now has two active superseders
+	h.supersedeLegacy(c, x) // x now has two active superseders (legacy shape; Link refuses it)
 
 	got := h.apply(h.scored(x, 1.00))
 	xs, _ := scoreOf(got, x)

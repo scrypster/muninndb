@@ -175,6 +175,15 @@ func RawTagRangePrefix(ws [8]byte, tagKeyHash uint32) []byte {
 	return key
 }
 
+// rawTagRangeKeyFixedLen is the fixed part of a raw-tag-range key: prefix(1) +
+// ws(8) + Hash(tagKey)(4) + separator(1) + id(16).
+const rawTagRangeKeyFixedLen = 13 + 1 + 16
+
+// rawTagRangeKeyHintMaxValue bounds how much of a tag value's length is used as
+// an allocation hint. It is not a limit on tag values — longer values still
+// produce a correct key — only on the pre-sizing arithmetic.
+const rawTagRangeKeyHintMaxValue = 1 << 16
+
 // RawTagRangeKey constructs the ordered raw-tag-range secondary index key
 // (0x2B prefix, S1). Layout:
 //
@@ -185,7 +194,16 @@ func RawTagRangePrefix(ws [8]byte, tagKeyHash uint32) []byte {
 // because 0x00 < '-'). Callers (internal/storage's raw-tag-range write path)
 // reject values containing 0x00 before calling this.
 func RawTagRangeKey(ws [8]byte, tagKeyHash uint32, value []byte, id [16]byte) []byte {
-	key := make([]byte, 0, 13+len(value)+1+16)
+	// The capacity is only a hint. len(value) is caller-supplied (a tag value from
+	// any transport), so it stays out of the size arithmetic above a bound: the sum
+	// can then never overflow, and an oversized value simply grows the slice on
+	// append instead of being pre-sized. The key bytes are identical either way
+	// (pinned by TestRawTagRangeKey_BytesIndependentOfCapacityHint).
+	hint := rawTagRangeKeyFixedLen
+	if len(value) <= rawTagRangeKeyHintMaxValue {
+		hint += len(value)
+	}
+	key := make([]byte, 0, hint)
 	key = append(key, RawTagRangePrefix(ws, tagKeyHash)...)
 	key = append(key, value...)
 	key = append(key, 0x00)
@@ -997,11 +1015,89 @@ func ContentHashKey(ws [8]byte, hash [32]byte) []byte {
 // ULID (issue #573).
 // Key: 0x29 | wsPrefix(8) | eventID(16) = 25 bytes
 // Value: msgpack-encoded RecallEvent
+// Child rows (read-only header, labels) share the 25-byte prefix — see
+// RecallROHeaderKey / RecallLabelKey.
 func RecallEventKey(ws [8]byte, eventID [16]byte) []byte {
 	key := make([]byte, 1+8+16)
 	key[0] = prefix.RecallEvent
 	copy(key[1:9], ws[:])
 	copy(key[9:25], eventID[:])
+	return key
+}
+
+// Recall-event CHILD rows (label pipeline, slice 2a). No new prefix byte: a
+// label is a child of the 0x29 event it refers to, so it sorts immediately
+// after its parent, is covered by the same ClearVault range tombstone, and is
+// excluded from export and clone exactly as the parent is.
+//
+//	event (parent)    0x29 | ws(8) | E(16)                              = 25 B
+//	read-only header  0x29 | ws(8) | E(16) | 'H'                        = 26 B
+//	label             0x29 | ws(8) | E(16) | 'L' | engramID(16) | lc(8) = 50 B
+//	day marker        0x29 | ws(8) | D(16) | 'B' | engramID(16) | lc(8) = 50 B
+//
+// D is the "day event" id: a ULID whose 48-bit time is 00:00 UTC of the day
+// and whose 80 entropy bits are zero, so markers of one day form one group
+// that the 0x29 retention rules prune like any labelled event. No recall
+// event is ever written under D (a real event ULID carries random entropy).
+// 'H' (0x48) sorts before 'L' (0x4C), so a group reads header-then-labels.
+// Every reader that decodes 0x29 VALUES as RecallEvent must select keys of
+// exactly RecallEventKeyLen; the child shapes carry different value types.
+const (
+	RecallEventKeyLen    = 1 + 8 + 16                     // 25
+	RecallROHeaderKeyLen = RecallEventKeyLen + 1          // 26
+	RecallLabelKeyLen    = RecallEventKeyLen + 1 + 16 + 8 // 50
+
+	// RecallChildROHeader tags the read-only header child: written by
+	// muninn_feedback (never by the recall) the first time a read-only
+	// query id is labelled, standing in for the parent event a read-only
+	// recall never writes.
+	RecallChildROHeader byte = 'H'
+	// RecallChildLabel tags a label child: one row per (event, memory,
+	// labelling credential).
+	RecallChildLabel byte = 'L'
+	// RecallChildDayMarker tags a per-(memory, labelling credential, UTC day)
+	// marker under the day event D: the DURABLE record of that credential's
+	// feedback on that memory that day, and of whether it earned the day's
+	// access bump. Authorisation comes from this row, never from memory.
+	RecallChildDayMarker byte = 'B'
+)
+
+// RecallDayEventID is the 16-byte day-event id D for a UTC day (unix days).
+func RecallDayEventID(unixDay int64) [16]byte {
+	var d [16]byte
+	ms := uint64(unixDay) * 86400000
+	d[0], d[1], d[2], d[3], d[4], d[5] = byte(ms>>40), byte(ms>>32), byte(ms>>24), byte(ms>>16), byte(ms>>8), byte(ms)
+	return d
+}
+
+// RecallDayMarkerKey constructs a day-marker child key (50 bytes).
+func RecallDayMarkerKey(ws [8]byte, unixDay int64, engramID [16]byte, lc [8]byte) []byte {
+	key := RecallLabelKey(ws, RecallDayEventID(unixDay), engramID, lc)
+	key[25] = RecallChildDayMarker
+	return key
+}
+
+// RecallROHeaderKey constructs the read-only header child key (26 bytes).
+func RecallROHeaderKey(ws [8]byte, eventID [16]byte) []byte {
+	key := make([]byte, RecallROHeaderKeyLen)
+	key[0] = prefix.RecallEvent
+	copy(key[1:9], ws[:])
+	copy(key[9:25], eventID[:])
+	key[25] = RecallChildROHeader
+	return key
+}
+
+// RecallLabelKey constructs a label child key (50 bytes). lc is the
+// labelling credential hash (auth.QueryIDKey.CredHash), so one credential has
+// at most one label per (event, memory).
+func RecallLabelKey(ws [8]byte, eventID [16]byte, engramID [16]byte, lc [8]byte) []byte {
+	key := make([]byte, RecallLabelKeyLen)
+	key[0] = prefix.RecallEvent
+	copy(key[1:9], ws[:])
+	copy(key[9:25], eventID[:])
+	key[25] = RecallChildLabel
+	copy(key[26:42], engramID[:])
+	copy(key[42:50], lc[:])
 	return key
 }
 

@@ -220,9 +220,11 @@ func TestCachedEngramMutationCensus(t *testing.T) {
 // something vanished, not what; naming them makes a legitimate removal a diff a
 // reviewer can read.
 var cachedEngramKnownSources = map[string]string{
-	"internal/storage/batch.go:pebbleStoreBatch.mutateEngram": "#858 itself — the reported race, reached from " +
+	"internal/storage/batch.go:pebbleStoreBatch.mutateEngramOpt": "#858 itself (mutateEngram delegates here) — the reported race, reached from " +
 		"Engine.EvolveAt via SupersedeEngram and from UpdateEngramState",
-	"internal/storage/engram.go:PebbleStore.SoftDelete": "read-modify-write under casLocks; the stripe lock does " +
+	// SoftDelete's body moved to SoftDeleteLocked (Engine.Forget holds the
+	// lock across the state change and the posting removal); same read.
+	"internal/storage/engram.go:PebbleStore.SoftDeleteLocked": "read-modify-write under casLocks; the stripe lock does " +
 		"not cover recall's unlocked readers, demonstrated under -race",
 	"internal/storage/engram.go:PebbleStore.UpdateTagsLocked": "replaced eng.Tags on the shared struct, which is " +
 		"also the STO-18 removal-diff source",
@@ -230,10 +232,13 @@ var cachedEngramKnownSources = map[string]string{
 		"doing nothing but GetEngram in a loop",
 	"internal/storage/engram.go:PebbleStore.UpdateConfidenceWithContradiction": "the #559 lost-update path; same " +
 		"shape as UpdateConfidence",
-	"internal/storage/entity.go:PebbleStore.UpdateDigest": "the enrichment worker's write path — no stripe lock at " +
-		"all, and it aliased the caller's keyPoints slice into the cached struct",
-	"internal/engine/engine.go:Engine.Restore": "mutated the cached struct purely to shape its RETURN value, and " +
-		"returned the cache's own pointer to the caller",
+	// Removed from the floor (case (a)): PebbleStore.UpdateDigest no longer
+	// reads a cache-returned engram — it reads GetEngramUncached under the
+	// engram's stripe lock (item 2 of the storage-hardening pass), a private
+	// decode that shares nothing with the cache.
+	// Removed from the floor (case (a)): Engine.Restore no longer reads a
+	// cache-returned engram — it reads GetEngramUncached under LockEngram
+	// (item 4 of the storage-hardening pass), a private decode.
 }
 
 // cachedEngramExemptions maps "<relpath>:<func>" to the reason an in-place

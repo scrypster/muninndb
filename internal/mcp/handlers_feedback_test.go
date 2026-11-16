@@ -6,15 +6,25 @@ import (
 	"testing"
 )
 
-type feedbackEngine struct{ fakeEngine }
+type feedbackEngine struct {
+	fakeEngine
+	gotVault  string
+	gotUseful *bool
+}
 
-func (e *feedbackEngine) RecordFeedback(_ context.Context, _, _ string, _ bool) error {
+func (e *feedbackEngine) RecordFeedback(_ context.Context, vault, _ string, useful bool) error {
+	e.gotVault, e.gotUseful = vault, &useful
 	return nil
 }
 
+// TestHandleFeedback_HappyPath: the legacy form (engram_id, no query_id)
+// still works, passes useful through unchanged, and answers with the uniform
+// shape — plus a form-dependent (never outcome-dependent) note that it
+// recorded no label.
 func TestHandleFeedback_HappyPath(t *testing.T) {
-	srv := New(":0", &feedbackEngine{}, "", nil, nil, nil)
-	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_feedback","arguments":{"vault":"default","engram_id":"01HXYZ","useful":false}}}`)
+	fe := &feedbackEngine{}
+	srv := New(":0", fe, "", nil, nil, nil)
+	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_feedback","arguments":{"vault":"default","engram_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","useful":false}}}`)
 	if w.Code != 200 {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
@@ -26,33 +36,25 @@ func TestHandleFeedback_HappyPath(t *testing.T) {
 	if ok, _ := content["ok"].(bool); !ok {
 		t.Errorf("feedback response ok = %v, want true", content["ok"])
 	}
-	if content["engram_id"] != "01HXYZ" {
-		t.Errorf("feedback response engram_id = %v, want 01HXYZ", content["engram_id"])
+	if content["received_ids"] != float64(1) {
+		t.Errorf("received_ids = %v, want 1", content["received_ids"])
 	}
-	if useful, _ := content["useful"].(bool); useful != false {
-		t.Errorf("feedback response useful = %v, want false", content["useful"])
+	if fe.gotUseful == nil || *fe.gotUseful != false {
+		t.Errorf("engine got useful=%v, want false", fe.gotUseful)
 	}
 }
 
 func TestHandleFeedback_DefaultVault(t *testing.T) {
 	// Vault is optional — omitting it defaults to "default".
-	srv := New(":0", &feedbackEngine{}, "", nil, nil, nil)
-	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_feedback","arguments":{"engram_id":"01HXYZ"}}}`)
-	if w.Code != 200 {
-		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
-	}
+	fe := &feedbackEngine{}
+	srv := New(":0", fe, "", nil, nil, nil)
+	w := postRPC(t, srv, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"muninn_feedback","arguments":{"engram_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","useful":true}}}`)
 	resp := decodeResp(t, w.Body.String())
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
 	}
-	// Verify the response echoes back the engram_id so the caller can confirm which
-	// engram the feedback was recorded against, even when vault was omitted.
-	content := extractInnerJSON(t, resp)
-	if content["engram_id"] != "01HXYZ" {
-		t.Errorf("feedback response engram_id = %v, want 01HXYZ", content["engram_id"])
-	}
-	if ok, _ := content["ok"].(bool); !ok {
-		t.Errorf("feedback response ok = %v, want true", content["ok"])
+	if fe.gotVault != "default" {
+		t.Errorf("engine got vault %q, want default", fe.gotVault)
 	}
 }
 

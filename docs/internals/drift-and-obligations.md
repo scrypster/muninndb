@@ -77,8 +77,10 @@ and remain the reviewer's job.
    missing/unmatched checksum non-fatal, reopens the hole. Don't accept an executable-bit
    plus version-string check as "integrity" — that is what the gap was.
 
-7. **`proto/muninn/v1/service.proto`** → regenerate `proto/gen/go/...`. No CI step verifies
-   the generated code is current — the reviewer must confirm regen ran. 🪝
+7. **`proto/muninn/v1/service.proto`** → regenerate `proto/gen/go/...` via `make proto`.
+   CI gates this as of #873: the `proto-check` job runs `make proto-check` (back up
+   `proto/gen`, regenerate, diff) and fails on drift. The reviewer no longer has to
+   eyeball it. 🪝
 
 8. **A new Pebble prefix** → see `keyspace-registry.md`: disjoint, and added to
    `internal/prefix/prefix.All()` (the single source of truth). The disjointness tests in
@@ -122,7 +124,11 @@ and remain the reviewer's job.
     the startup window out of the stream its followers read, silently and permanently.
     Equally: anything that filters keys out of a snapshot (`skipFromSnapshot`) must keep
     replication METADATA flowing — dropping the seq counter restarts a promoted node's log
-    at 1.
+    at 1. And **anything that makes a node leader goes through `handlePromotion`**: its
+    `takeLeaderRole` raises the sequence counter to the node's applied position before the
+    role flips (STO-26). A second place that gave a node the leader role would promote with
+    a stale counter, and every follower would discard that leader's writes as already
+    applied while reporting no lag. `TestOnlyTakeLeaderRoleAssignsThePrimaryRole` fails on it.
 
 12. **A new async worker or fire-and-forget path on the write or scoring path**
     (`internal/engine`, `internal/engine/activation`, `internal/storage`) → give it a
@@ -145,7 +151,12 @@ and remain the reviewer's job.
 
 14. **A trial/measurement seam behind `//go:build cognitiontrial`**
     (`internal/storage/trial_clock_cognitiontrial.go`,
-    `internal/cognitive/replay_cognitiontrial.go`) → CI never passes this tag, so nothing
+    `internal/cognitive/replay_cognitiontrial.go`,
+    `internal/engine/activation/legacy_clock_cognitiontrial.go`,
+    `internal/rankorder/legacy_cognitiontrial.go` — the honest-clock A/B control,
+    `MUNINN_TRIAL_LEGACY_ACTR_CLOCK=1`;
+    `internal/index/hnsw/legacy_select_cognitiontrial.go` — the HNSW neighbour-selection
+    A/B control, `MUNINN_TRIAL_LEGACY_HNSW_SELECT=1`) → CI never passes this tag, so nothing
     checks these files compile. Build them explicitly when you touch the packages they
     reach into: `go build -tags 'localassets cognitiontrial' ./... && go vet -tags
     'localassets cognitiontrial' ./...`. The cognition-trial acceptance rule
@@ -154,6 +165,8 @@ and remain the reviewer's job.
     decides whether a subsystem lives must itself be tested.
 
 15. **A path that rewrites an ALREADY-indexed engram's FTS entries** (`internal/index/fts/`) → call `fts.ReindexEngram`, never `DeleteEngram` followed by `IndexEngram`. The pair is not statistics-neutral — `IndexEngram` bumps `TotalEngrams`/`AvgDocLen` and increments `df_t` for every term of the document, `DeleteEngram` decrements neither — so it silently decays the engram's own BM25 score on every call (COG-24; measured −82.6% over 100 retags, #720). **One carve-out, named by mechanism:** a FULL-VAULT rebuild that first range-tombstones the 0x08 global-stats and 0x09 per-term-stats prefixes via `store.ClearFTSKeys` may call `IndexEngram` on already-indexed engrams — `Engine.ReindexFTSVault` does (`internal/engine/engine_reindex_fts.go:67` clears, `:80` re-indexes), and it is correct precisely because the stats it would otherwise inflate no longer exist. Do **not** read this as "unless the stats are handled": if a path has not range-tombstoned 0x08/0x09, it is in violation. There is no automated check: nothing stops a new call site from pairing them, and nothing distinguishes a legitimate post-`ClearFTSKeys` rebuild from an illegitimate in-place one. 🪝
+
+16. **A write path that accepts inline edges to existing memories** (`associations` or `relationships` on `mbp.WriteRequest`, or any new field or writer that stores an edge at write time — a tree node that gains relationships, a proto field that carries them) → a `supersedes` among them is a declaration, not an edge (COG-38). A writer that creates a memory routes it through `commitNewEngramSuperseding` (or through `Engine.Write`, as `WriteBatch` does per item); never `Set` it with the engram. Gate it with `refuseInlineSupersedesForAppend` at the writer's own entry point if the writer can be reached without passing through `Engine.Write` (the upsert path is, from `WriteBatch`). Then add the writer to the per-writer tests in `internal/engine/engine_inline_supersedes_test.go` and its credential rows to the mode table, and say so in the surface's own description of the field (`inlineRelationshipsDescription` in `internal/mcp/tools.go`, `WriteRequest.relationships`/`associations` in `openapi.yaml`). Today's surfaces: MCP sends `relationships`; REST accepts both fields (`rest.WriteRequest` is `mbp.WriteRequest`), and the REST SDKs send `relationships`; gRPC carries `associations` only (the proto has no `relationships`); MBP carries both; `RememberTree`/`AddChild` carry neither. Nothing mechanical detects a new writer that skips this — a storage-level inline `Set` of a supersedes edge still works and is exactly the pre-COG-38 defect.
 
 ## Live drift found during the guardian audit (worth fixing)
 
@@ -188,12 +201,14 @@ wall-clock. Jobs (from `.github/workflows/ci.yml`, real recent timings):
 
 | Job | ~duration | Notes |
 |---|---|---|
-| `go` (build & test) | 3.5–4 min | gofmt gate, embed-asset cache, web build, `go build -tags localassets`, `go vet`, **`go test -race -tags localassets ./...`**, coverage |
+| `go` (build & test) | ~5 min on develop before the split (expect less after) | gofmt gate, embed-asset cache, web build, `go build -tags localassets`, `go vet`, **`go test -race -tags localassets` on every package except `internal/engine` and `internal/index/hnsw`**, coverage (`coverage` artifact, which no longer includes those two) |
+| `go-engine` (shards 0, 1) | ~2 and ~3 min (first CI run) | parallel to `go`. `internal/engine` under `-race -covermode=atomic -timeout 300s`, split in two by `scripts/go-test-shard.sh` (a test's shard is a hash of its own name, so adding a test never moves another). A `--check` step fails the job unless the shards partition the package's test list exactly. Coverage per shard as `coverage-engine-0`/`-1` |
+| `go-hnsw` | not yet measured in CI (~2.5 min of tests in a 4-CPU container) | parallel to `go`. `internal/index/hnsw` under `-race -timeout 300s` **without coverage**, then a separate uninstrumented `-covermode=set` run for the `coverage-hnsw` artifact. `-race` forces atomic coverage, and here the atomic counters sit inside the vector loops: one test took 99s with it and 30s without |
 | `windows` (build & smoke) | 2–3 min | parallel to `go`; now fetches the same bge-small-en-v1.5 the release ships |
 | `shellcheck` | 10–45s | lints scripts + runs `check-build-tags.sh` |
 | `api-spec-validation` | 15–20s | Redocly lint + informational route-count diff |
 | `vuln-check` | 15–60s | `govulncheck`, pinned to v1.6.0 |
-| `cli-integration` | 1.5–2 min | **runs after `go`** (sequential); this is where the MCP registry-parity smoke test runs |
+| `cli-integration` | 1.5–2 min | **runs after `go`, `go-engine` and `go-hnsw`** (sequential); this is where the MCP registry-parity smoke test runs |
 | `playwright-e2e` | 1.5–2 min | management-console E2E (thin: ~5 specs) |
 | `python-sdk` | 1–2 min | **serialized after `cli-integration`** "so integration jobs are sequential" — this coupling is not a real data dependency and costs ~1.5 min of avoidable critical path |
 | `node-sdk` | 15–20s | `npm ci` + `tsc` + vitest for `sdk/node`. Before it existed the SDK was first compiled by `publish-sdk.yml` at tag time |
@@ -237,10 +252,63 @@ from a measurement.
 there. The `go` job's reported duration is the cheapest proxy; watch it rather than
 inferring from a laptop.
 
-Critical path: `go` → (`cli-integration` ∥ `playwright-e2e`) → `python-sdk`. What's cached:
+**The engine split (2026-11).** The trunk that followed develop `34b505f` grew
+`internal/engine` from 720 to 876 top-level tests, and the new ones were heavy. The one
+real CI figure: develop's last run put `internal/engine` at **169.1s** (and `hnsw` at
+42.4s) under the `go` job's `-race -cover`; that job took 5m03s. On an 18-core machine
+under load 18–36 (one run each, so load accounts for much of the spread): develop's engine
+package took 192s under `-race`; the trunk's took **412s** under `-race` and 176s plain. Its
+`-race` CPU time was 3x develop's. A `GOMAXPROCS=4 -p 4` copy of the CI command put it at
+542s, and **`internal/index/hnsw` at 702s**: the trunk's SearchLive, migration and
+identical-vector suites took that package to 295s even on its own. Scaling develop's 169s
+CI figure says ~360s, so the 300s claim held, for two packages. Three changes, cheapest
+first:
+
+1. `testEnv`, `testEnvWithStore` and `testEnvWithAuth` (behind ~530 call sites) open Pebble
+   with `storage.DefaultOptions()` on `vfs.NewMem()`, through the new optional
+   `storage.Options.FS`. On disk each environment cost ~130ms under `-race` (the open alone
+   was 50–70ms of fsyncs on macOS, where Go's fsync is `F_FULLFSYNC`); in memory, ~3.5ms.
+   The code paths are unchanged; only the fsyncs are free. Linux fsync is cheaper, so expect
+   CI to gain less than the workstation did. One latent dependency on write latency
+   surfaced and was fixed (see `writeRRFThresholdFixture`). Engine 412s → 215s.
+2. `t.Parallel()` on the heaviest tests that are verifiably hermetic: six in
+   `internal/engine` (the two retired-set fixtures, the four `TestCognitionTrialRule_*`
+   bootstraps above) and twelve in `hnsw`. Engine 215s → **144s**; hnsw 295s → 125s.
+   Assertions, fixture sizes and resample counts are unchanged.
+3. The split: `internal/engine` moved out of the `go` job into `go-engine`, two shards.
+   At `GOMAXPROCS=4` with `-race -covermode=atomic` the shards took 69s and 79s. The
+   `go test -list` names of the two shards, combined, are identical to the unsharded
+   package's 876. No timeout was raised.
+
+**The first CI run (integration branch) and what it changed.** The engine shards passed
+in ~2 and ~3 minutes. `internal/index/hnsw` timed out at 300s, and two guard tests failed
+first with "repair never reached stage precommit". In a linux container pinned to 4 CPUs,
+running the CI command for that package: the package timed out both with and without
+the commit that added `t.Parallel()`; without it, a third guard test failed the same way.
+The guard tests run in the sequential phase, before any parallel test resumes, so that
+commit was not starving them. Two causes:
+
+- **The guard watchdog was 20s and a full repair took 15–27s** there under `-race -cover`.
+  The waits were already event-driven (a stage hook closes a channel). The watchdog is now
+  a 2-minute hang detector. The guard tests repair a 250-vector old-rule fixture instead of
+  400. They test the commit protocol, not repair quality, and they now assert the vault
+  still needs a *full* repair. Two bulk-insert tests closed their registries too late, so a
+  background repair kept running into later tests; they now close them before the
+  database. Each guard test: 15–27s → ~4s.
+- **Atomic coverage under `-race` tripled the package's cost.** Container figures for
+  `hnsw`, CI command: 300s+ timeout (two shards of it each timed out too). With `-race`
+  alone: 116s. Uninstrumented `-covermode=set`: 20s, 87.8%. So `go-hnsw` runs those two
+  steps, and every test still runs under `-race`.
+
+Still to confirm in CI: `go-hnsw`'s real duration, and `storage` (184s on a workstation, led
+by `TestRetiredSet_DigestRewriteRacingForget` at 46s), which stays in `go`. If a package
+nears the limit, split it the same way. Do not raise the timeout.
+
+Critical path: (`go` ∥ `go-engine` ∥ `go-hnsw`) → (`cli-integration` ∥ `playwright-e2e`) →
+`python-sdk`. What's cached:
 embed assets (~130MB, keyed by ORT+model+platform), Go module cache, and npm for the two
 lockfile-scoped jobs (`node-sdk`, `web-unit`). npm is **not** cached in the jobs that build
-the web bundle as a side effect. Race detector runs only in the `go` job.
+the web bundle as a side effect. The race detector runs in `go`, `go-engine` and `go-hnsw`.
 
 **When adding tests:** unit + invariant tests are nearly free — prefer them. Integration,
 Playwright, `-race`, and asset-gated tests cost real minutes. Reach for end-to-end

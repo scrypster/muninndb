@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine/activation"
@@ -17,21 +18,33 @@ import (
 // Returns the IDs of the 10 relevant engrams.
 func writeRRFThresholdFixture(t *testing.T, eng *Engine, ctx context.Context, vault string) []string {
 	t.Helper()
+	// Each write is stamped one millisecond after the previous one, so write
+	// order is a property of the data rather than of how long a write takes.
+	// The ten relevant engrams are lexically identical but for their number,
+	// so recency decides their order; with wall-clock stamps, two writes that
+	// land in the same millisecond tie, and the tie then falls to a ULID whose
+	// within-millisecond bits are random — a different order in each vault
+	// built from this fixture. An fsync-bound disk spaced writes past a
+	// millisecond and hid that; an in-memory store does not.
+	base := time.Now().Add(-time.Second)
+	stamp := func(i int) *time.Time { return timePtr(base.Add(time.Duration(i) * time.Millisecond)) }
 	relevant := make([]string, 0, 10)
 	for i := 0; i < 10; i++ {
 		resp, err := eng.Write(ctx, &mbp.WriteRequest{
-			Vault:   vault,
-			Concept: fmt.Sprintf("thermal calibration widget procedure %d", i),
-			Content: fmt.Sprintf("thermal calibration widget procedure step %d for device alignment; thermal calibration widget", i),
+			Vault:     vault,
+			Concept:   fmt.Sprintf("thermal calibration widget procedure %d", i),
+			Content:   fmt.Sprintf("thermal calibration widget procedure step %d for device alignment; thermal calibration widget", i),
+			CreatedAt: stamp(i),
 		})
 		require.NoError(t, err)
 		relevant = append(relevant, resp.ID)
 	}
 	for i := 0; i < 10; i++ {
 		_, err := eng.Write(ctx, &mbp.WriteRequest{
-			Vault:   vault,
-			Concept: fmt.Sprintf("gardening notes %d", i),
-			Content: fmt.Sprintf("unrelated gardening tips volume %d watering schedule notes", i),
+			Vault:     vault,
+			Concept:   fmt.Sprintf("gardening notes %d", i),
+			Content:   fmt.Sprintf("unrelated gardening tips volume %d watering schedule notes", i),
+			CreatedAt: stamp(10 + i),
 		})
 		require.NoError(t, err)
 	}
