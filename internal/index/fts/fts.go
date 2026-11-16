@@ -59,38 +59,23 @@ type PostingValue struct {
 	DocLen uint16
 }
 
-// idfKey is the composite cache key for the IDF value of a term within a vault.
-// Keying by (ws, term) prevents cross-vault IDF contamination.
-type idfKey struct {
-	ws   [8]byte
-	term string
-}
-
 // Index is the FTS inverted index backed by Pebble.
+//
+// It holds no derived scoring state: a search computes every IDF from the
+// committed corpus statistics it reads, so its scores are a function of the
+// index on disk and the query alone (see getIDF for why a memo is not kept).
 type Index struct {
 	db *pebble.DB
+	// mu serializes the read-modify-write of the document-frequency and corpus
+	// stats keys across writers. Searches do not take it.
 	mu sync.RWMutex
-	// In-memory IDF cache: (vault, term) → idf
-	idfCache map[idfKey]float64
 	// versionCache caches the FTS schema version per vault (0=legacy dual-path, 1=stemmed-only).
 	// Populated lazily on first Search() for each vault; FTSVersionKey is write-once.
 	versionCache sync.Map // key: [8]byte wsPrefix, value: byte
 }
 
 func New(db *pebble.DB) *Index {
-	return &Index{
-		db:       db,
-		idfCache: make(map[idfKey]float64, 1024),
-	}
-}
-
-// InvalidateIDFCache clears the in-memory IDF cache, forcing fresh recalculation
-// on the next search. Call this after a vault clear to prevent stale IDF values
-// from influencing BM25 scoring.
-func (idx *Index) InvalidateIDFCache() {
-	idx.mu.Lock()
-	idx.idfCache = make(map[idfKey]float64)
-	idx.mu.Unlock()
+	return &Index{db: db}
 }
 
 // tokenizeRaw applies lowercase, character normalization, length filtering,
@@ -315,9 +300,6 @@ func (idx *Index) IndexEngram(ws [8]byte, id [16]byte, concept, createdBy, conte
 		var dfBuf [8]byte
 		binary.BigEndian.PutUint32(dfBuf[:4], newDF)
 		batch.Set(tkey, dfBuf[:], nil)
-
-		// Invalidate IDF cache for this term so it's recalculated on next search.
-		delete(idx.idfCache, idfKey{ws, term})
 	}
 
 	// Commit single atomic batch: posting lists + DF updates land together.
@@ -359,9 +341,6 @@ func (idx *Index) DeleteEngram(ws [8]byte, id [16]byte, concept, createdBy, cont
 			tkey := keys.TrigramKey(ws, tri, id)
 			batch.Delete(tkey, nil)
 		}
-
-		// Invalidate IDF cache for this term — DF is now stale.
-		delete(idx.idfCache, idfKey{ws, term})
 	}
 
 	err := batch.Commit(pebble.Sync)
@@ -454,7 +433,6 @@ func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) er
 		for _, tri := range Trigrams(term) {
 			batch.Delete(keys.TrigramKey(ws, tri, id), nil)
 		}
-		delete(idx.idfCache, idfKey{ws, term})
 	}
 
 	// ...then write what the NEW document needs, at the new docLen.
@@ -470,7 +448,6 @@ func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) er
 		for _, tri := range Trigrams(term) {
 			batch.Set(keys.TrigramKey(ws, tri, id), nil, nil)
 		}
-		delete(idx.idfCache, idfKey{ws, term})
 	}
 
 	// DF adjustments: membership changes only.
@@ -508,6 +485,11 @@ func (idx *Index) ReindexEngram(ws [8]byte, id [16]byte, prev, next Document) er
 // becomes an active penalty against exactly the documents that hold it. Pinned by
 // TestAdjustDF_DecrementClampsAtZero, which asserts both df==0 and idf>0 so a
 // future change that bounds the DF but breaks the sign is still caught.
+//
+// (Those two figures predate getIDF clamping N up to df. With that clamp a
+// wrapped df gives an IDF of about 1e-10, not −20.79: the word would carry no
+// weight rather than be read as absent. Still wrong, still this clamp's job to
+// prevent, and the df==0 half of that test is what pins it now.)
 //
 // There are two distinct ways df_t can be off, and the clamp guards the second:
 //
@@ -889,34 +871,47 @@ func (idx *Index) readStats(ws [8]byte) FTSStats {
 	return decodeStats(val)
 }
 
+// getIDF returns term's IDF in the vault for a corpus of N documents, or 0 when
+// the vault has no term-stats entry for it — the one case that means "the corpus
+// has never seen this word" (scoreAll charges that at idfMax).
+//
+// It is computed on every call from the committed document frequency. It used
+// to be memoized per (vault, term), and that memo was the bug: an IDF is a
+// function of BOTH N and df, the memo was dropped only when a document holding
+// the term was indexed, and it was filled outside the lock from two unrelated
+// reads. So a value computed while a write was in flight outlived that write,
+// and a value computed in a small corpus was still served in a large one. The
+// memo saved one point read per query word, against a posting scan per word.
+//
+// N is clamped up to df. Every document counted in df is a document of the
+// corpus, so df > N can only mean N is behind — which a reader does see: N and
+// df are separate reads, and IndexEngram commits postings+df in one batch and N
+// in a second write. Unclamped, df = N+1 makes the logarithm negative for a term
+// every document holds, and a non-positive IDF is indistinguishable from "never
+// seen": the term's postings are not scanned and it is charged as absent. With
+// the clamp a term that has a stats entry always has a positive IDF, and for a
+// term in every document the clamped value is exactly the settled one.
+//
+// Measured on the build before this change, from an empty data directory, 40
+// invented memories per vault written over MCP with the first 8 sharing a tag:
+// the tag word ended with no full-text match in 5 of 520 vault builds and with
+// a stale positive IDF in 3 more. The on-disk index was complete in every one;
+// the state lasted until a restart, a reindex, or another write holding the word.
 func (idx *Index) getIDF(ws [8]byte, term string, N float64) float64 {
-	k := idfKey{ws, term}
-	idx.mu.RLock()
-	idf, ok := idx.idfCache[k]
-	idx.mu.RUnlock()
-	if ok {
-		return idf
-	}
-
-	key := keys.TermStatsKey(ws, term)
-	val, closer, err := idx.db.Get(key)
-	if err != nil || len(val) < 8 {
+	val, closer, err := idx.db.Get(keys.TermStatsKey(ws, term))
+	if err != nil {
 		return 0
 	}
 	defer closer.Close()
+	if len(val) < 8 {
+		return 0
+	}
 
 	df := float64(binary.BigEndian.Uint32(val[0:4]))
-	idf = math.Log((N-df+0.5)/(df+0.5) + 1)
-
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	// Double-check: another goroutine may have populated the cache while we
-	// held no lock (between RUnlock above and this Lock).
-	if cached, ok := idx.idfCache[k]; ok {
-		return cached
+	if N < df {
+		N = df
 	}
-	idx.idfCache[k] = idf
-	return idf
+	return math.Log((N-df+0.5)/(df+0.5) + 1)
 }
 
 // UpdateStats increments the engram count and recalculates avgdl.

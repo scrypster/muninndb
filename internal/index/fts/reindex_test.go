@@ -244,6 +244,9 @@ func TestReindexEngram_ScoreSurvivesRepeatedRetags(t *testing.T) {
 //	WITH clamp:     #1 df=0 | #2 df=0            getIDF(zarquon, N=3) =   2.0794
 //	WITHOUT clamp:  #1 df=0 | #2 df=4294967295   getIDF(zarquon, N=3) = -20.7944
 //
+// (Measured before getIDF clamped N up to df. With that clamp the wrapped value
+// gives about 1e-10, so the df assertion below is the one that pins this.)
+//
 // A NEGATIVE idf is worse than a worthless one: COG-24's numerator is
 // Σ idf_t'·cov_t, so a document that CONTAINS the term contributes a negative
 // term and ranks BELOW one that does not. The term stops being weak evidence and
@@ -293,7 +296,6 @@ func TestAdjustDF_DecrementClampsAtZero(t *testing.T) {
 	// And the consequence, stated in the units that matter: IDF must stay
 	// positive. At the wrapped value this is −20.7944, which makes a document
 	// holding the term rank BELOW one that does not.
-	idx.InvalidateIDFCache()
 	idf := idx.getIDF(ws, stemOf(t, "zarquon"), 3)
 	t.Logf("getIDF(zarquon, N=3) with df=%d → %.4f", df2, idf)
 	if idf <= 0 {

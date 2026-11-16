@@ -95,7 +95,7 @@ func (e *Engine) refuseAppend(ctx context.Context) error {
 }
 
 // ClearVault removes all memories from a vault. The vault name remains registered.
-// It evicts all in-memory state (HNSW, FTS IDF cache, novelty fingerprints, coherence
+// It evicts all in-memory state (HNSW, novelty fingerprints, coherence
 // counters, activity tracking) and adjusts the global engramCount.
 func (e *Engine) ClearVault(ctx context.Context, vaultName string) error {
 	if err := e.refuseWrite(ctx); err != nil {
@@ -212,9 +212,6 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 	// Runs inside the processors' clear boundary, so no embed hook can
 	// re-insert a pre-clear vector after this.
 	e.resetTwinVault(ws)
-	if e.fts != nil {
-		e.fts.InvalidateIDFCache()
-	}
 	if e.noveltyDet != nil {
 		e.noveltyDet.PurgeVault(binary.BigEndian.Uint32(ws[:4]))
 	}

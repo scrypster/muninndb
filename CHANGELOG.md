@@ -42,6 +42,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A word a memory holds can no longer score as if the vault had never seen it. Keyword
+  search kept each word's rarity (IDF) in memory, worked out from two numbers read at
+  different moments and refreshed only when another memory holding that word was indexed.
+  A search that overlapped the indexing of a memory could work out a rarity from a memory
+  count one behind the word's own count, which reads as "never seen", and keep it. The write
+  path does that search itself, for the tags of every tagged memory. From then on the word
+  matched nothing in that vault — `full_text_relevance` 0, the memory found by meaning alone
+  at a lower band, or not at all when no vector was available — until another memory holding
+  the word was written, a keyword reindex ran, or the server restarted. The index on disk was
+  complete throughout, so nothing reported it. Measured before this change, from an empty
+  data directory: of 520 identically built 40-memory vaults, 5 ended that way for the first
+  tag written and 3 more held a stale value that mis-weighted it. Rarity is now worked out on
+  every search from the committed counts, and a word that has postings always counts as
+  present. Keyword scores no longer depend on what the server searched earlier, so a vault
+  scores a query the same before and after a restart; on a long-running server some
+  multi-word keyword scores will therefore move once, on upgrade. Searches also no longer
+  wait on the keyword indexer: with one writer indexing continuously, median keyword search
+  time went from 17 ms to 0.17 ms. At rest a search does one more point read per query word.
+
 - After a cluster failover, replicas no longer discard the new leader's writes. A replica
   does not advance its own replication sequence counter while it follows, so a replica that
   was promoted numbered its writes from wherever that counter had been left. On a node that
@@ -92,6 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and does not change afterwards. Recall also stops loading a memory's whole provenance log to
   answer it. Known limit, unchanged here: every ordinary write is recorded as `human` whoever
   made it, so the field does not yet tell a person from an agent.
+
 - A connected follower no longer serves a memory that was soft-deleted on the leader.
   A follower applies replicated writes straight to storage, and nothing told its read caches,
   so a Lobe that stayed connected kept returning a deleted memory as active until it rejoined.

@@ -273,8 +273,6 @@ func TestFTS_DualPathSearch(t *testing.T) {
 		if err := db.Set(import_tkey, import_df, nil); err != nil {
 			t.Fatalf("db.Set term-stats for 'running': %v", err)
 		}
-		// Invalidate IDF cache so stale values are not returned.
-		idx.InvalidateIDFCache()
 	}
 
 	// Now search "running" — dual-path must include both stemmed "run" (→ id1)
@@ -466,10 +464,11 @@ func TestMultiFieldPostingNoOverwrite(t *testing.T) {
 	}
 }
 
-// TestIDFCacheVaultIsolation verifies that IDF values are cached per (vault, term)
-// pair, not globally by term. Before the fix, idfCache was keyed by term only:
-// vault A's cached IDF for "robot" would be returned for vault B's search,
-// producing incorrect BM25 scores in multi-vault setups.
+// TestIDFCacheVaultIsolation verifies that a term's IDF is per vault. It dates
+// from when IDF values were memoized and the memo was keyed by term only:
+// vault A's IDF for "robot" was returned for vault B's search, producing
+// incorrect BM25 scores in multi-vault setups. The memo is gone (see getIDF);
+// the property still has to hold.
 func TestIDFCacheVaultIsolation(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
