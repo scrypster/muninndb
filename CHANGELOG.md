@@ -119,6 +119,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only. Memories written before this release keep the gap until the vault's keyword index is
   rebuilt with `muninn vault reindex-fts`. Not changed here: the dream dedup pass merges tags
   into the surviving memory without updating the keyword index.
+- A replica that holds entries its leader never received is now refused instead of silently
+  skipping the leader's writes, and it stays refused until an operator acts. This happens when
+  a failover elects a replica that was behind another one, when a leader is rebuilt or
+  restored from an older state, or when the old leader was still writing while the role
+  moved. The new leader's first writes reuse the sequence numbers of the entries the other
+  replica already holds, and that replica used to drop them as already applied, with health
+  `ok` and lag 0. Each replica now keeps a checksum of the last entry it applied and sends it
+  when it joins. The leader compares it with its own entry at that position and refuses the
+  join when they differ, or when the replica's position is past the end of the leader's log
+  (STO-27).
+  - **What you see:** `GET /v1/cluster/health` on the refused replica answers 503 with a new
+    `reason` field, both nodes log `join: REFUSED`, and `muninn cluster status` prints the
+    reason. The replica keeps voting and serving reads.
+  - **The refusal is kept on the replica's disk.** Restarting the replica, restarting the
+    leader, electing another leader and the leader pruning its log do not clear it. The
+    replica answers 503 from the moment it starts. It is cleared when a leader confirms that
+    the replica's last entry is its own, when the replica itself becomes the leader, when a
+    snapshot's wipe replaces its store, or when you re-seed it. A record that cannot be read
+    counts as a refusal. There is no command that clears it. The reason names both choices: keep
+    the leader's history and re-seed the replica, or make the replica the leader and re-seed
+    every other node. The procedure is in `docs/cluster-operations.md` under "A replica the
+    leader refuses".
+  - **The re-seed procedure changed order.** Stop the replica you are re-seeding before you
+    stop the leader. A refused replica still stands in elections, and stopping the leader
+    starts one.
+  - **This can refuse a replica after a graceful failover under write load.** Writes are not
+    stopped during a handoff, so a replica can receive entries from the old leader that the
+    new leader never applied. That divergence was already happening. It is now reported.
+  - **A refused replica can still be elected.** A vote does not look at replication. If a
+    refused replica wins, its history becomes the cluster's and it logs one `ERROR` line that
+    begins `cluster: THE CLUSTER'S HISTORY HAS CHANGED LINE`. The leader it replaced is not
+    refused when it rejoins. It keeps the writes it had acknowledged on its own disk and
+    reports `ok`. That last part is true of any failover where the old leader returns, and
+    this release does not change it.
+  - **Still admitted, silently.** The leader refuses only when it can prove the difference.
+    It admits a replica that has never been refused when it has already pruned the entry at
+    the replica's position, when the replica has no checksum to send (an older version, or
+    nothing applied since its upgrade), when the leader itself runs an older version, and when
+    the difference lies below the position the leader had applied before it was promoted. It
+    also admits a replica holding an entry the deposed leader sent after the new leader took
+    the role, which the new leader applied and then numbered its own first write over.
+    After one such admission the replica's last entry is the leader's own and nothing is
+    detected again.
+  - **Rolling upgrades.** Re-seed or stop a refused replica before you restart the leader:
+    restarting the leader starts an election, and a refused replica can win it. A refused
+    replica stays at 503 whichever version the leader runs, until it is re-seeded or a leader
+    confirms its last entry. An older leader accepts its
+    join and the replica declines by itself. If the refused replica is put back on an older
+    version, that version ignores the record, follows and skips as before. It is refused
+    again as soon as it is upgraded.
+  - On-disk and wire format: the replica's applied-position record grows from 8 to 12 bytes.
+    An older version reads the first 8 and writes 8 back. A refused replica holds one new
+    record in its store. The join request and response gain optional fields. No protocol
+    version change and no migration.
+  - Not changed, and worth knowing: the web console's cluster page does not show a refusal
+    (it keeps its last banner when health answers 503), and keyword index entries are not
+    replicated, so a replica that is promoted finds by keyword only what it has written since.
+- `muninn cluster status` no longer reports "failed to reach server" for a node that answered
+  503 without a reason. It says the server answered, with the status code and the body.
+- The leader no longer logs `cluster: pruned replication log` on a prune tick that deleted
+  nothing.
 - Cluster: a data race between a failed send to a peer and the checks that ask whether that
   peer is connected. `PeerConn.Send` clears a connection's state under the peer's lock when a
   write fails, while `ConnManager.HasLivePeerAt` and `RegisterConnKind` read that state holding

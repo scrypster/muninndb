@@ -37,6 +37,9 @@ type clusterHealthResponse struct {
 	IsLeader       bool   `json:"is_leader,omitempty"`
 	Epoch          uint64 `json:"epoch,omitempty"`
 	ReplicationLag uint64 `json:"replication_lag,omitempty"`
+	// Reason says why the status is not ok when the lag thresholds alone would
+	// not explain it. Set only for a follower that has stopped replicating.
+	Reason string `json:"reason,omitempty"`
 }
 
 // clusterNodesResponse is the response for GET /v1/cluster/nodes.
@@ -83,12 +86,21 @@ func (s *Server) handleClusterHealth(w http.ResponseWriter, r *http.Request) {
 	lag := s.coordinator.ReplicationLag()
 
 	status := clusterStatus(role, lag)
+	// A follower that has refused to follow its leader is replicating nothing.
+	// The lag above cannot show that: it is measured against this node's own
+	// log, and reads 0. Report the node down, with the reason, so a probe stops
+	// routing reads to it and an operator sees why.
+	reason, halted := s.coordinator.ReplicationHalt()
+	if halted {
+		status = "down"
+	}
 	resp := clusterHealthResponse{
 		Status:         status,
 		Role:           role.String(),
 		IsLeader:       s.coordinator.IsLeader(),
 		Epoch:          s.coordinator.CurrentEpoch(),
 		ReplicationLag: lag,
+		Reason:         reason,
 	}
 
 	httpStatus := http.StatusOK

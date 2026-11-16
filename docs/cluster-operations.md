@@ -227,7 +227,9 @@ curl -H "Authorization: Bearer $MUNINN_CLUSTER_SECRET" \
   http://127.0.0.1:8475/v1/cluster/health
 ```
 
-Response: `status` (`ok` | `degraded` | `down`), `role`, `is_leader`, `epoch`, `replication_lag`.
+Response: `status` (`ok` | `degraded` | `down`), `role`, `is_leader`, `epoch`, `replication_lag`,
+and `reason` on a Lobe that has stopped replicating because its Cortex refused it (see
+[A replica the leader refuses](#a-replica-the-leader-refuses)). `down` is answered with HTTP 503.
 
 `replication_lag` on a Lobe is measured against the Lobe's own log, not the Cortex's, so it reads
 0 on a Lobe that is receiving nothing. Do not read `ok` with lag 0 as proof that a Lobe is
@@ -319,32 +321,197 @@ cluster: replication sequence continues from this node's applied position node=<
 ```
 
 What that does for a Lobe depends on where it stood when the old Cortex went away. Only the
-first of these three cases is repaired by the numbering. The other two are open defects, and
-neither is reported anywhere:
+first of these three cases is repaired by the numbering:
 
 | Where the Lobe stood | What happens | Visible? |
 |---|---|---|
 | **Level** with the node that won | It receives every write the new Cortex makes. | Nothing to see. |
-| **Ahead** of the node that won | It holds entries the new Cortex never received. The new Cortex's first writes reuse those sequence numbers, and the Lobe skips them as already applied. The two nodes then disagree about that range in both directions. | **No.** Its health reads `ok`, lag 0. |
-| **Behind** the node that won | It receives every write the new Cortex makes from then on, but not the entries between its own position and the new Cortex's position at promotion. The new Cortex applied those as a Lobe and has no log of them to send. | **No.** Its health reads `ok`, lag 0. |
+| **Ahead** of the node that won | It holds entries the new Cortex never received, and the new Cortex's first writes reuse those sequence numbers. The new Cortex refuses it, and the refusal stays until an operator acts. See [A replica the leader refuses](#a-replica-the-leader-refuses), including what is still admitted. | Yes, when refused: `503` from its `/v1/cluster/health`, `ERROR` lines on both nodes. |
+| **Behind** the node that won | It receives every write the new Cortex makes from then on, but not the entries between its own position and the new Cortex's position at promotion. The new Cortex applied those as a Lobe and has no log of them to send. | **No.** Its health reads `ok`, lag 0. This is an open defect. |
 
 The followers of a healthy, idle cluster are level. They stop being level when one of them is
 slow, disconnected or restarting at the moment the Cortex goes away, or when the old Cortex is
 still taking writes while the role moves.
 
-If you have reason to think a Lobe was not level at a failover, re-seed it from the Cortex:
+If a Lobe is refused, or you have reason to think it was behind at a failover, re-seed it from
+the Cortex:
 
-1. Stop the Cortex. This is a write outage for the length of the copy.
-2. Stop the Lobe.
+1. Stop the Lobe you are re-seeding. Do this first. A refused Lobe still takes part in
+   elections, and stopping the Cortex starts one.
+2. Stop the Cortex. This is a write outage for the length of the copy.
 3. Replace the Lobe's `pebble/` and `wal/` directories with copies of the Cortex's. Leave the
    Lobe's own `cluster.yaml` and `auth_secret` in place.
 4. Start the Lobe, then the Cortex.
+5. Check that the cluster has a leader: `muninn cluster status`, or `is_leader` in
+   `GET /v1/cluster/health` on each node.
 
-Anything the Lobe held that the Cortex did not is discarded by the copy. Deleting the Lobe's data
-directory and restarting it is not a substitute: no snapshot is sent to a joining Lobe (see the
-list below), so it would come back holding only what the Cortex's log still has.
+Step 5 matters because the node you stopped may not take the lead back by itself. A Cortex
+configured `role: primary` does, as soon as it starts and finds no other leader. A Cortex that
+got the role through a failover is configured `role: replica`, and no node is then configured to
+lead. The nodes elect one by themselves when failure detection reports a configured peer down,
+which took about three seconds in a three-node cluster whose original Cortex was gone. If no
+node reports `is_leader` after ten heartbeats, start an election on the node that was the
+Cortex with `POST /v1/replication/promote`. Either of the two nodes may win. After the copy
+they hold the same data.
 
-**Other gaps on the failover path.** None of these is changed by the numbering fix:
+Anything the Lobe held that the Cortex did not is discarded by the copy. So is the Lobe's
+refusal record, which lives in `pebble/`. Deleting the Lobe's data directory and restarting it
+is not a substitute: no snapshot is sent to a joining Lobe (see the list below), so it would
+come back holding only what the Cortex's log still has.
+
+### A replica the leader refuses
+
+A Cortex refuses a Lobe that holds an entry the Cortex does not. There are two ways it can
+tell. The Lobe's applied position is past the end of the Cortex's log. Or the Lobe's last
+applied entry is not the entry the Cortex holds at that sequence number: every Lobe keeps a
+checksum of the last entry it applied and sends it when it joins. The second is the one that
+matters after a failover, because a new Cortex that is taking writes passes the Lobe's position
+within seconds and the two positions then look fine.
+
+On the Cortex:
+
+```
+join: REFUSED: the joining replica holds an entry this Cortex does not lobe=<id> lobe_last_applied=<a> cortex_head=<h> why="..."
+```
+
+On the Lobe:
+
+```
+join: REFUSED: this node holds an entry the Cortex does not node=<lobe> cortex=<id> cortex_epoch=<n> last_applied=<a> cortex_head=<h> why="..."
+```
+
+and `GET /v1/cluster/health` on the Lobe answers **503** with `"status":"down"` and a `reason`
+that says the same and names both things an operator can do. `muninn cluster status` prints
+that reason. The Lobe's `replication_lag` still reads 0.
+
+The Lobe stays a member. It heartbeats and votes, so quorum does not depend on it replicating.
+It keeps answering reads from the data it has. It applies nothing further.
+
+**The refusal is kept on the Lobe's disk.** The Cortex proved the difference by reading its
+own log, and a Cortex prunes its log. Asked again later, the same Cortex can often only say
+that it cannot compare. So the Lobe writes the refusal down, and from then on it follows a
+Cortex only when that Cortex confirms that the Lobe's last entry is its own. Being unable to
+compare is not that. This means:
+
+- Restarting the Lobe does not clear it. The Lobe answers 503 with the recorded reason from the
+  moment it starts, before it has reached any Cortex.
+- Restarting the Cortex, or electing a different one, does not clear it. The Lobe asks the new
+  term once. The answer is logged on both nodes:
+  `join: REFUSED: the joining replica was refused by a Cortex before, and this Cortex cannot confirm that its last entry is its own`.
+- A Cortex running an older version does not clear it. Such a Cortex accepts every join. The
+  Lobe declines by itself and stays at 503.
+
+Four things remove it:
+
+- A Cortex that does hold the Lobe's last entry confirms it. The Lobe logs
+  `join: the refusal this node held is lifted` and follows. This is what happens when the
+  cluster ends up led by a node from the Lobe's own side of the split.
+- The Lobe becomes the Cortex. See "A refused Lobe can be elected" below. The record is
+  removed before the node takes the role, in the same step, and none is recorded while it
+  leads, even from a refusal that was on its way when it was elected.
+- The re-seed above, which replaces the Lobe's `pebble/` directory.
+- A snapshot from the Cortex replaces the Lobe's state. The receiving node wipes its store
+  before the snapshot is written, and that wipe removes the record. No Lobe is sent a snapshot
+  today.
+
+There is no command that clears it. A refused Lobe that followed anyway would skip every write
+the Cortex numbered at or below the Lobe's position, which is the failure the refusal exists to
+stop.
+
+A backup or a copy of a refused Lobe's data directory contains the record. A node started
+from that copy is refused too, which is correct: it holds the same history. If you rebuild the
+whole cluster from such a backup, every node starts refused. Whichever is elected removes its
+own record and logs `cluster: THE CLUSTER'S HISTORY HAS CHANGED LINE`. In that case the line is
+not true: every node holds the same history. The others are then confirmed by the new Cortex
+and their records are lifted.
+
+**What it means.** Over some range of sequence numbers the Lobe and the Cortex followed
+different leaders. There are three ways to get here:
+
+- a failover elected a Lobe that was behind this one
+- the Cortex was rebuilt, or restored from a backup older than what its Lobes had applied
+- the old Cortex was still writing while the role moved (a graceful failover or a manual
+  promotion under write load), and this Lobe received entries the new Cortex did not
+
+**What to do.** Decide which history is the cluster's. There are two choices.
+
+- *Keep the Cortex's.* This is the usual choice, because the Cortex is the one taking writes.
+  The Lobe's extra entries are discarded. If any of them matter, read them off the Lobe first,
+  while it still serves reads. Then re-seed the Lobe from the Cortex with the copy procedure in
+  [What a failover does to replication](#what-a-failover-does-to-replication).
+- *Keep the Lobe's.* Only sensible when the Cortex is the node that is wrong, for example
+  rebuilt or restored by mistake. Everything the Cortex accepted that the Lobe does not hold
+  is given up. Stop writes to the cluster. Make the Lobe the Cortex with
+  `POST /v1/replication/promote` on the Lobe, and confirm it with `is_leader` in its health.
+  Then re-seed **every** other node from it with the same copy procedure, the previous Cortex
+  first. Do not leave the previous Cortex running: nothing refuses it (see the next heading).
+
+Do not delete the Lobe's data directory and restart it.
+
+**A refused Lobe can be elected.** A vote looks at the epoch and nothing else, so a refused
+Lobe can stand in an election and win it. It stands by itself when failure detection reports
+the Cortex down, and it stands when you call promote on it. If it wins:
+
+- It leads from its own position. Its history is the cluster's from then on, and its refusal
+  record is removed.
+- It logs one `ERROR` line that begins `cluster: THE CLUSTER'S HISTORY HAS CHANGED LINE` and
+  names the Cortex that had refused it and the position.
+- Every write the previous Cortex acknowledged that this node never applied is on the previous
+  Cortex only.
+- **The previous Cortex is not refused when it comes back.** It rejoins as a Lobe, keeps those
+  writes on its own disk, serves them to anyone who reads from it, and reports health `ok` with
+  lag 0. It is also in the "Behind" row of the table above: the new Cortex has no log of the
+  entries it had applied past the previous Cortex's position. Compare the two nodes and re-seed
+  one of them.
+
+This is why the re-seed procedure stops the refused Lobe before it stops the Cortex.
+
+**What is still admitted although the histories differ.** The Cortex refuses only when it can
+prove the difference, because a wrong refusal takes a healthy replica out of service until it
+is re-seeded. Each of these is silent: health `ok`, lag 0.
+
+- *The entry was pruned before the Lobe first asked.* The Cortex has already deleted the entry
+  at the Lobe's position, so there is nothing to compare, and this Lobe has no refusal on
+  record. Pruning takes another replica having acknowledged past that position, or the Cortex
+  being more than `max_log_backlog` entries (default 5000) past it, and a prune interval
+  passing. Once a Lobe has been refused, pruning no longer matters.
+- *The Lobe has no checksum yet.* It runs a version from before this check, or it has applied
+  nothing since it was upgraded. Only the position is compared then, and that comparison stops
+  failing once the Cortex has written past the Lobe.
+- *The Cortex runs a version from before this check.* It compares nothing. It does not release
+  a Lobe that already holds a refusal.
+- *The difference is below the Cortex's own applied position.* The Lobe's position lies in the
+  range the Cortex applied while it was itself a Lobe. The Cortex kept no log of that range.
+- *After one wrong admission.* A Lobe admitted in one of the cases above applies the Cortex's
+  later entries. Its last entry is then the Cortex's own, every later comparison matches, and
+  the entries it skipped are never looked at again.
+- *An entry the deposed Cortex sent after the new one took the role.* The new Cortex applies
+  it, and its own first write then gets the same number. A Lobe that holds the deposed
+  Cortex's entry at that number is compared with the entry the new Cortex applied there, which
+  is the same entry, and is admitted. It never receives the new Cortex's own entry at that
+  number.
+- *A Cortex that was deposed.* When it rejoins it asks from the position it had applied up to
+  when it was promoted, not from the end of the log it wrote as Cortex. Nothing it wrote in its
+  term is compared with anything. This is how the previous Cortex gets back in after a refused
+  Lobe is elected, and it is equally true of any Cortex that returns after an ordinary
+  failover.
+- *A checksum collision.* One in four billion.
+
+**Upgrading and downgrading with a refused Lobe in the cluster.** Re-seed or stop a refused
+Lobe before you restart the Cortex. Restarting the Cortex starts an election, and a refused
+Lobe can win it (see "A refused Lobe can be elected" above). During a rolling upgrade a
+refused Lobe stays at 503 whichever version the Cortex runs, until it is re-seeded or a Cortex
+confirms its last entry. If the refused Lobe itself is put back on an older version, that
+version does not read the record. It joins, skips as described above and reports `ok`. When it
+is upgraded again the record is still there and the node is refused from the moment it starts.
+Re-seed it.
+
+**The web console does not show a refusal.** Its cluster page asks for the same health
+endpoint, treats the 503 as a failed request and keeps whatever it showed last. Use
+`muninn cluster status` or the endpoint itself.
+
+**Other gaps on the failover path.** None of these is changed by the numbering fix or by the
+refusal:
 
 - **After a graceful failover, the other Lobes do not switch by themselves.** The handoff target
   becomes the Cortex and the old Cortex rejoins it as a Lobe, but any other Lobe keeps reading
@@ -363,6 +530,12 @@ list below), so it would come back holding only what the Cortex's log still has.
 - **The old Cortex's unshipped writes.** Anything the old Cortex had accepted but not yet
   shipped when it went away stays on its disk and is in nobody else's history. Nothing detects
   that when it rejoins.
+- **Keyword index entries are not replicated.** The full-text index writes its postings
+  straight to the local store, outside the replication log. A Lobe holds the memories and not
+  their postings. After a failover the new Cortex has postings only for what it has written
+  since it took the role, so a keyword search does not find older memories there.
+  `POST /api/admin/vaults/{name}/reindex-fts` on the Cortex rebuilds a vault's keyword index
+  from the stored memories.
 - **No Lobe is sent a snapshot.** Other sections of this guide say a joining Lobe receives one.
   In a running server it does not. A Lobe that joins, or reattaches, after the Cortex has
   pruned its log is sent only what the log still holds.
@@ -557,6 +730,7 @@ Manual reconciliation (if needed) is available via internal APIs; the coordinato
 | "protocol version not supported" | Upgrade the Cortex first if Lobe binary is newer. Upgrade the Lobe if it's older than `MinSupportedProtocolVersion`. |
 | Connection refused | Ensure `bind_addr` is reachable (firewall, security groups). Seeds must use the same port as cluster traffic (typically 8474). |
 | "epoch 0" rejections | Cortex has not completed bootstrap. Wait for Cortex to elect itself, then retry join. |
+| "lobe cannot follow this cortex", or `join: REFUSED: this node holds an entry the Cortex does not` | The Lobe holds entries the Cortex never received. It will not join until an operator chooses a history. See [A replica the leader refuses](#a-replica-the-leader-refuses). |
 
 ### Replica Falling Behind
 

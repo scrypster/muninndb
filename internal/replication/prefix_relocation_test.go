@@ -45,6 +45,7 @@ func TestReplicationKeys_NeverCollideWithIdempotency(t *testing.T) {
 		"clusterEpoch":   clusterEpochKey(),
 		"nodeRole":       nodeRoleKey(),
 		"snapComplete":   snapCompleteKey,
+		"replHalt":       replHaltKey(),
 		"entryRangeLow":  entryRangeLower(),
 		"entryRangeHigh": entryRangeUpper(),
 	}
@@ -65,11 +66,24 @@ func TestReplicationKeys_NeverCollideWithIdempotency(t *testing.T) {
 	// Every metadata key must sort OUTSIDE the entry range, so a prune whose
 	// bounds are entry keys can never reach one.
 	lo, hi := entryRangeLower(), entryRangeUpper()
-	for _, name := range []string{"seqCounter", "lastApplied", "schemaVersion", "clusterEpoch", "nodeRole", "snapComplete"} {
+	metadata := []string{"seqCounter", "lastApplied", "schemaVersion", "clusterEpoch", "nodeRole", "snapComplete", "replHalt"}
+	for _, name := range metadata {
 		k := all[name]
 		if bytes.Compare(k, lo) >= 0 && bytes.Compare(k, hi) < 0 {
 			t.Errorf("metadata key %s = % x lies inside the entry range [% x, % x) — a Prune could delete it",
 				name, k, lo, hi)
+		}
+	}
+
+	// Metadata keys are addressed by exact key, and one of them must survive
+	// what removes the rest (WipeForResnapshot keeps cluster_epoch) while
+	// another must not be shipped with the rest (the snapshot filter drops
+	// repl_halt). Neither is safe if one name is a byte prefix of another.
+	for _, a := range metadata {
+		for _, b := range metadata {
+			if a != b && bytes.HasPrefix(all[b], all[a]) {
+				t.Errorf("metadata key %s = %q is a prefix of %s = %q", a, all[a], b, all[b])
+			}
 		}
 	}
 
@@ -173,11 +187,17 @@ func TestPrune_LeavesReplicationMetadataAlone(t *testing.T) {
 		t.Fatalf("seed epoch: %v", err)
 	}
 
+	// A refusal record: losing it to a prune would let a refused node follow
+	// again after a restart.
+	if err := db.Set(replHaltKey(), []byte("invented record"), pebble.Sync); err != nil {
+		t.Fatalf("seed refusal record: %v", err)
+	}
+
 	if err := log.Prune(9); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
-	for name, k := range map[string][]byte{"seqCounter": seqCounterKey(), "clusterEpoch": clusterEpochKey()} {
+	for name, k := range map[string][]byte{"seqCounter": seqCounterKey(), "clusterEpoch": clusterEpochKey(), "replHalt": replHaltKey()} {
 		_, closer, err := db.Get(k)
 		if err != nil {
 			t.Fatalf("%s deleted by Prune: %v", name, err)
