@@ -99,3 +99,10 @@ See `drift-and-obligations.md` obligation 12: any new async worker or fire-and-f
 on the write or scoring path needs a `WaitIdle`/`Flush` seam, folded into
 `waitWriteTimeIdle()` (or documented here as its own drain), and any test asserting on its
 output must drain it deterministically — never `time.Sleep`.
+
+## No default addresses, no real home
+
+No test may use a daemon's default address (ports 8474, 8475, 8476, 8477, 8750), the network,
+or the real home directory, and in `cmd/muninn` the package's `TestMain` (`hermetic_test.go`)
+enforces this by pointing every CLI address at a refusing port and `HOME` at a temp directory,
+and fails the run if any test dials a default port or a non-loopback host.

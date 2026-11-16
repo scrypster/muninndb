@@ -60,6 +60,7 @@ func TestOverallStateEdgeCases(t *testing.T) {
 
 func TestProbeServicesReturnsThreeServices(t *testing.T) {
 	// probeServices always returns exactly 3 entries (even if all down)
+	withNoServer(t)
 	svcs := probeServices()
 	if len(svcs) != 3 {
 		t.Errorf("expected 3 services, got %d", len(svcs))
@@ -76,19 +77,19 @@ func TestProbeServicesReturnsThreeServices(t *testing.T) {
 }
 
 func TestPrintStatusDisplayReturnsStopped(t *testing.T) {
-	// With no real server running, should return stateStopped or stateDegraded
-	// (not stateRunning, unless muninn happens to be running in test env)
-	state := stateStopped
+	// No server answers, so every probe fails and the state is stopped.
+	withNoServer(t)
+	state := stateRunning
 	captureStdout(func() {
 		state = printStatusDisplay(false)
 	})
-	// State should be one of the valid values
-	if state != stateRunning && state != stateStopped && state != stateDegraded {
-		t.Errorf("unexpected state: %v", state)
+	if state != stateStopped {
+		t.Errorf("state = %v with no server answering, want stateStopped", state)
 	}
 }
 
 func TestPrintStatusDisplayOutputContainsName(t *testing.T) {
+	withNoServer(t)
 	out := captureStdout(func() {
 		printStatusDisplay(false)
 	})
@@ -98,6 +99,10 @@ func TestPrintStatusDisplayOutputContainsName(t *testing.T) {
 }
 
 func TestProbeServicesWithAddrs_CustomPorts(t *testing.T) {
+	// The probe URLs must come from addrs, not the address variables.
+	for _, k := range []string{"MUNINNDB_ADMIN_URL", "MUNINNDB_MCP_URL", "MUNINNDB_UI_URL"} {
+		t.Setenv(k, "")
+	}
 	srv := newHealthServer()
 	defer srv.Close()
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
@@ -120,6 +125,9 @@ func TestProbeServicesWithAddrs_CustomPorts(t *testing.T) {
 
 func TestProbeServicesWithAddrs_EmptyUsesDefaults(t *testing.T) {
 	// Empty addrs → hardcoded defaults. All down (no server running), but ports must match.
+	// The reported ports come from the empty addrs; the probes themselves go to
+	// the no-server address, never to the default ports.
+	withNoServer(t)
 	svcs := probeServicesWithAddrs(daemonAddrs{})
 	ports := map[string]int{"database": 8475, "mcp": 8750, "web ui": 8476}
 	for _, s := range svcs {
@@ -131,6 +139,10 @@ func TestProbeServicesWithAddrs_EmptyUsesDefaults(t *testing.T) {
 }
 
 func TestProbeServicesWithAddrs_ColonOnlyPort(t *testing.T) {
+	// The probe URLs must come from addrs, not the address variables.
+	for _, k := range []string{"MUNINNDB_ADMIN_URL", "MUNINNDB_MCP_URL", "MUNINNDB_UI_URL"} {
+		t.Setenv(k, "")
+	}
 	// ":8760" style (no host) — common when user passes --mcp-addr :8760
 	srv := newHealthServer()
 	defer srv.Close()
@@ -151,6 +163,7 @@ func TestProbeServicesWithAddrs_ColonOnlyPort(t *testing.T) {
 
 func TestPrintStatusDisplayCompactVsNonCompact(t *testing.T) {
 	// Non-compact output should include service names
+	withNoServer(t)
 	outFull := captureStdout(func() {
 		printStatusDisplay(false)
 	})
@@ -374,6 +387,7 @@ func TestPrintStatusDisplay_WebUISchemeFromProbe(t *testing.T) {
 
 func TestProbeServicesWithAddrs_PreservesOrder(t *testing.T) {
 	// Concurrent probing must keep the result order [database, mcp, web ui].
+	withNoServer(t)
 	svcs := probeServicesWithAddrs(daemonAddrs{})
 	want := []string{"database", "mcp", "web ui"}
 	if len(svcs) != len(want) {
