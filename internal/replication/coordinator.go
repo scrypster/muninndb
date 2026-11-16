@@ -121,6 +121,18 @@ type ClusterCoordinator struct {
 	// Per-Lobe streamers (Cortex only): lobeID -> cancel func
 	streamers   map[string]context.CancelFunc
 	streamersMu sync.Mutex
+	// streamerWG counts live streamer goroutines so Stop can join them. A
+	// cancel func only asks a streamer to exit; a streamer already past its
+	// context check still performs one more replication-log read, and the
+	// caller of Stop closes the store next.
+	streamerWG sync.WaitGroup
+	// streamersStopped latches in Stop (guarded by streamersMu). Once set,
+	// startStreamerForLobe starts nothing: a streamer started after Stop has
+	// begun its join would be neither cancelled nor waited for.
+	streamersStopped bool
+	// streamerBeforeRead is handed to every NetworkStreamer this coordinator
+	// starts (NetworkStreamer.beforeRead). Test seam; nil in production.
+	streamerBeforeRead func()
 
 	// quorumLostSince is the time when this Cortex first noticed it could not
 	// reach a quorum of live peers. Zero value means quorum is healthy.
@@ -1580,18 +1592,42 @@ func (c *ClusterCoordinator) HandleIncomingFrame(fromNodeID string, frameType ui
 	}
 }
 
-// Stop performs a graceful shutdown: stops streamers, stops MSP, closes connections.
+// Stop shuts the replication streamers down and closes every peer connection.
+// It is terminal: no streamer starts on this coordinator afterwards.
+//
+// Stop returns only after every streamer goroutine has exited, because its
+// caller closes the store next (cmd/muninn/server.go) and a streamer reads the
+// replication log straight from Pebble, which panics on a read after Close.
+// Cancelling is not enough on its own: Stream checks its context and then
+// reads, so a streamer already past the check reads once more.
+//
+// The wait is short: a cancelled streamer exits at its next context check, and
+// between two checks it does one log read (at most 1000 entries) or one frame
+// send, which the connection close below fails.
+//
+// Only the streamers are joined. The other goroutines this coordinator starts
+// are not: they end with Run's context, with their connection, or on their
+// own, and nothing waits for them. Some of those use the store as well (the
+// periodic prune, the post-join snapshot sender, the frame readers that apply
+// entries), so "Stop returned" does not yet mean nothing in this package can
+// touch the store.
 func (c *ClusterCoordinator) Stop() error {
-	// Stop all streamers
+	// Cancel all streamers and refuse new ones.
 	c.streamersMu.Lock()
+	c.streamersStopped = true
 	for id, cancel := range c.streamers {
 		cancel()
 		delete(c.streamers, id)
 	}
 	c.streamersMu.Unlock()
 
-	// Close all peer connections
-	return c.mgr.Close()
+	// Close all peer connections. Before the join, not after: a streamer in
+	// the middle of a frame write to a slow peer sees its context only once
+	// that write returns.
+	err := c.mgr.Close()
+
+	c.streamerWG.Wait()
+	return err
 }
 
 // handlePromotion is called when this node wins an election.
@@ -1723,11 +1759,21 @@ func (c *ClusterCoordinator) startStreamerForLobe(info NodeInfo) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.streamersMu.Lock()
+	if c.streamersStopped {
+		// Stop has run (see streamersStopped). A Lobe can still get here: Stop
+		// drops its connection, it rejoins, and the join handler calls this.
+		c.streamersMu.Unlock()
+		cancel()
+		return
+	}
 	// Cancel any existing streamer for this lobe
 	if existing, ok := c.streamers[info.NodeID]; ok {
 		existing()
 	}
 	c.streamers[info.NodeID] = cancel
+	// Counted under the same lock as the streamersStopped check, so Stop's
+	// Wait cannot begin between that check and this Add.
+	c.streamerWG.Add(1)
 	c.streamersMu.Unlock()
 
 	startSeq := c.streamStartSeq(info.NodeID)
@@ -1736,7 +1782,9 @@ func (c *ClusterCoordinator) startStreamerForLobe(info NodeInfo) {
 		"lobe", info.NodeID, "from_seq", startSeq, "log_seq", logSeq, "backlog", logSeq-min(logSeq, startSeq))
 
 	go func() {
+		defer c.streamerWG.Done()
 		s := NewNetworkStreamer(c.repLog, peer, startSeq)
+		s.beforeRead = c.streamerBeforeRead
 		if err := s.Stream(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			// Report where the stream got to. Without this a streamer that died
 			// mid-catch-up was indistinguishable in the log from a healthy idle
