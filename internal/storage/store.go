@@ -70,7 +70,8 @@ type StoreBatch interface {
 	// how a supersedes link retires its target (state stays active, UpdatedAt
 	// is not moved). With onlyIfOpen an already-closed window is left as it is.
 	// It lets a writer commit an engram, its supersedes edge and the target's
-	// retirement as one atomic batch.
+	// retirement as one atomic batch — the inline-supersedes write path
+	// (COG-38).
 	StampValidUntil(ctx context.Context, ws [8]byte, id ULID, until time.Time, onlyIfOpen bool) error
 	// WriteEntityEngramLink queues the 0x20 forward and 0x23 reverse entity-link
 	// keys into the batch. Like PebbleStore.WriteEntityEngramLink, it does not

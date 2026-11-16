@@ -783,10 +783,39 @@ func (s *Server) handleCreateEngram(w http.ResponseWriter, r *http.Request) {
 			s.sendError(r, w, http.StatusUnprocessableEntity, ErrInvalidEngram, err.Error())
 			return
 		}
+		if status, code, ok := inlineSupersedesRefusal(err); ok {
+			s.sendError(r, w, status, code, err.Error())
+			return
+		}
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return
 	}
 	s.sendJSON(w, http.StatusCreated, resp)
+}
+
+// inlineSupersedesRefusal classifies a write the engine refused because of the
+// supersedes declaration it carries inline (COG-38). These are the caller's to
+// act on, and the message is the whole point — it says what was and was not
+// stored, why, and for a target that already has a successor, which memory is
+// the current one. REST has no hint channel to report a partial result, so the
+// write is refused; and it must not fall through to the 500 branch, because
+// sendError replaces every 5xx message with "an internal error occurred".
+//
+//	403  an append-mode credential (retiring a memory modifies existing state)
+//	409  the target already has a successor, or is forgotten/archived
+//
+// A missing or malformed target is ErrInvalidID (400) and a declaration that is
+// self-contradictory is ErrInvalidRequest (422); both are matched before this.
+func inlineSupersedesRefusal(err error) (status int, code ErrorCode, ok bool) {
+	switch {
+	case errors.Is(err, engine.ErrAppendForbidden):
+		return http.StatusForbidden, ErrVaultForbidden, true
+	case errors.Is(err, engine.ErrEvolveTargetSuperseded),
+		errors.Is(err, engine.ErrEngramSoftDeleted),
+		errors.Is(err, engine.ErrEngramArchived):
+		return http.StatusConflict, ErrInvalidAssociation, true
+	}
+	return 0, 0, false
 }
 
 func (s *Server) handleBatchCreate(w http.ResponseWriter, r *http.Request) {

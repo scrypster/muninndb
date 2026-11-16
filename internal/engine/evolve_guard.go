@@ -18,12 +18,17 @@ import (
 // 15 such forks.
 var ErrEvolveTargetSuperseded = errors.New("evolve target is already superseded")
 
-// evolveLock returns the stripe mutex for (vault, target id).
-func (e *Engine) evolveLock(ws [8]byte, id storage.ULID) *sync.Mutex {
+// evolveStripe is the evolveLocks stripe index for (vault, target id).
+func evolveStripe(ws [8]byte, id storage.ULID) uint32 {
 	h := fnv.New32a()
 	h.Write(ws[:])
 	h.Write(id[:])
-	return &e.evolveLocks[h.Sum32()%upsertKeyStripes]
+	return h.Sum32() % upsertKeyStripes
+}
+
+// evolveLock returns the stripe mutex for (vault, target id).
+func (e *Engine) evolveLock(ws [8]byte, id storage.ULID) *sync.Mutex {
+	return &e.evolveLocks[evolveStripe(ws, id)]
 }
 
 // distinctSuperseders returns the distinct engrams holding a RelSupersedes

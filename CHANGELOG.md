@@ -42,6 +42,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cluster: stopping the coordinator now ends and waits for the periodic replication-log prune.
+  It used to end only when the process's run context was cancelled, so a prune still running
+  when the store was closed next panicked with "pebble: closed". Seen killing a test run under
+  the race detector, and possible at server shutdown.
+- Declaring `supersedes` inline on a new memory now retires the old one, exactly as
+  `muninn_link` does. A write can carry links to existing memories: the `relationships`
+  parameter of `muninn_remember` and `muninn_remember_batch`, and the `relationships` /
+  `associations` fields of the REST, gRPC and MBP writes. **Before:** a `supersedes` among them
+  was stored as an edge and nothing else. The old memory stayed valid and kept coming back as
+  a current fact (demoted one step below the new one, but present), and a second such write
+  gave it two successors — a fork, which recall refuses to resolve; 15 forked memories were
+  found in a copy of production data. **Now**, on a write that creates a memory, it does what
+  `muninn_link(relation="supersedes")` does. The old memory's `valid_until` is stamped in the
+  same atomic commit as the new memory and the link, so default recall answers with the new
+  memory even for the old wording, and the old one appears only under `as_of` /
+  `include_invalid`, marked expired and `superseded_by`. (As with `muninn_link`, a
+  `valid_until` the old memory already had is kept: one set in the future stays current until
+  then.)
+  **A write can now be refused where it used to succeed.** Nothing is stored, and the error
+  says why, when the memory named as superseded:
+  - already has a successor — the error names its current version, which is the one to
+    supersede or evolve (REST: 409);
+  - is forgotten or archived (REST: 409);
+  - does not exist in the vault (REST: 400, as before);
+  - is also the target of another relation at the same weight in the same write, because
+    the two links would occupy one storage key (422) — give them different weights between
+    0 and 1 (weights at or above 1 all count as 1, and at or below 0 as 0);
+
+  or when the vault's `inline_enrichment` is `background_only`, which ignores `relationships`
+  and would have dropped the declaration (422; send it in `associations`, or link after the
+  write); or when the credential is append-mode (403; see Security). In a batch only that
+  item fails and the rest are stored. gRPC and MBP return the same message as the error text.
+  Two things change for a batch that contains a superseding item: that item is stored after
+  the others, so its id sorts after theirs whatever the order of the request, and the batch
+  is no longer one all-or-nothing commit.
+  Two more consequences of the old memory now being retired. If the new memory is later
+  forgotten, neither of the two is in default recall: the old one stays retired (it is still
+  returned under `as_of` / `include_invalid`), exactly as after `muninn_link` and a forget.
+  Before, the old memory had never been retired, so it was simply still there. And each
+  memory named as superseded is locked for the length of the write's commit, so a single
+  write that names hundreds of them makes most other evolves and supersedes links wait for
+  it (one write naming 500 took 4 to 6 ms and held about 220 of the 256 locks).
+  **Not changed yet:** a write that resolves to a memory that already exists. If the text is
+  identical to a stored memory the write still returns that memory with `duplicate_content`
+  and does not apply the declaration, and `upsert_mode` still stores the link as a plain edge
+  when it creates and ignores it afterwards. A retry with the same `op_id` returns the
+  original as before. Every other inline relation behaves as before. Memories superseded
+  inline before this release are not changed by the upgrade: where the old memory has one
+  successor, recall still demotes and annotates it, and declaring the same supersession once
+  with `muninn_link` retires it; an old memory that was given two successors stays ambiguous
+  until one branch is removed (`muninn_forget` with `hard=true`), as before. (COG-38)
+
 - Memories written by evolve and by tree writes are put in the keyword index in full.
   `muninn_evolve`, and an `upsert_mode` re-sync with changed content, gave the new version its
   predecessor's tags but left them out of the keyword index. Recall still reached the current
@@ -305,6 +357,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its daemon and runs under a temporary home directory.
 
 ### Security
+
+- An append-mode key can no longer supersede another memory by writing. Append keys may
+  create memories and read; they may not modify existing ones, and `muninn_link`, evolve and
+  forget were already refused. But a `supersedes` link sent inline on `muninn_remember` (or
+  on a REST, gRPC or MBP write) was accepted: it attached a successor to any memory in the
+  key's vault, which made recall demote that memory and mark it superseded, and could fork
+  one that already had a successor. Such a write is now refused with "append-mode credential
+  cannot modify or delete existing memories" (REST: 403) and stores nothing — on every write
+  path, including `upsert_mode` and a write whose text already exists. Append keys can still
+  write memories that carry any other inline relation. (SEC-15, COG-38)
 
 - A blank session-secret file no longer turns admin authentication off or lets a session
   cookie be forged. If `auth_secret` in the data directory was empty (a first-run write that

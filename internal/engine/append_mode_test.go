@@ -13,6 +13,14 @@ import (
 )
 
 // appendAdditive: exported *Engine methods that only CREATE new state (allowed for append).
+//
+// Write and WriteBatch are additive with ONE exception that this census cannot
+// express, because it classifies methods and the exception is a property of the
+// request: a write that declares an inline `supersedes` retires the memory it
+// names, and is refused for append inside the method (COG-38,
+// refuseInlineSupersedesForAppend). That refusal is pinned behaviourally, per
+// writer and per field, by TestInlineSupersedes_AppendModeIsRefusedOnEveryWriter
+// and TestInlineSupersedes_AppendBatchUpsertItemIsRefused.
 var appendAdditive = map[string]bool{
 	"Write": true, "WriteBatch": true, "WriteIdempotency": true,
 	"RememberTree": true, "AddChild": true, "RegisterVaultName": true,
