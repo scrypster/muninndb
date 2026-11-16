@@ -97,6 +97,11 @@ type recordingEngine struct {
 	mbp.EngineAPI
 	mu    sync.Mutex
 	calls []string
+
+	// writeEntered and writeHold, when set, make Write announce itself and
+	// then wait: a test uses them to keep a handler running.
+	writeEntered chan struct{}
+	writeHold    chan struct{}
 }
 
 func (r *recordingEngine) note(name string) {
@@ -116,6 +121,10 @@ func (r *recordingEngine) take() []string {
 
 func (r *recordingEngine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteResponse, error) {
 	r.note("Write")
+	if r.writeHold != nil {
+		r.writeEntered <- struct{}{}
+		<-r.writeHold
+	}
 	return r.EngineAPI.Write(ctx, req)
 }
 
@@ -166,6 +175,13 @@ type matrixEnv struct {
 // by a real engine and auth store on an in-memory filesystem.
 func newMatrixEnv(t *testing.T) *matrixEnv {
 	t.Helper()
+	return newMatrixEnvWith(t, nil)
+}
+
+// newMatrixEnvWith is newMatrixEnv with the server handed to configure before
+// it serves anything.
+func newMatrixEnvWith(t *testing.T, configure func(*mbp.Server)) *matrixEnv {
+	t.Helper()
 	opts := storage.DefaultOptions()
 	opts.FS = vfs.NewMem()
 	db, err := storage.OpenPebble("mbp-mode-matrix", opts)
@@ -200,6 +216,9 @@ func newMatrixEnv(t *testing.T) *matrixEnv {
 
 	rec := &recordingEngine{EngineAPI: eng}
 	srv := mbp.NewServer(addr, rec, authStore, nil)
+	if configure != nil {
+		configure(srv)
+	}
 	served := make(chan error, 1)
 	go func() { served <- srv.ServeListener(context.Background(), ln) }()
 	t.Cleanup(func() {
@@ -272,8 +291,14 @@ func (r reply) isError() bool { return r.frameType == mbp.TypeError }
 // send writes one frame with a raw payload and reads the one frame answering it.
 func (c *mbpClient) send(frameType uint8, payload []byte) reply {
 	c.t.Helper()
+	return c.sendFlags(frameType, 0, payload)
+}
+
+// sendFlags is send with the frame's flag bits set by the caller.
+func (c *mbpClient) sendFlags(frameType uint8, flags uint16, payload []byte) reply {
+	c.t.Helper()
 	c.next++
-	if err := mbp.WriteFrame(c.conn, &mbp.Frame{Version: 0x01, Type: frameType, CorrelationID: c.next, Payload: payload}); err != nil {
+	if err := mbp.WriteFrame(c.conn, &mbp.Frame{Version: 0x01, Type: frameType, Flags: flags, CorrelationID: c.next, Payload: payload}); err != nil {
 		c.t.Fatalf("write frame 0x%02x: %v", frameType, err)
 	}
 	f, err := mbp.ReadFrame(c.conn)

@@ -197,6 +197,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of session against every request type, so one cannot be added without that decision
   (SEC-20).
 
+- MBP no longer decodes a compressed request before checking how large it is
+  (decompression bomb). A compressed frame was decoded in full and only then compared with
+  a 100 MB limit, so the decoder allocated whatever the frame's header claimed: a frame of
+  a few kilobytes cost tens of megabytes, and one a little larger cost gigabytes, before
+  the server answered. The frame could be a PING, which every session may send.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
+  trust, in every release from v0.2.0 to v0.11.0. No key is needed when any vault is
+  public, and the `default` vault is public out of the box; with no public vault, any
+  valid key of any mode is enough.
+  **What a client could do:** exhaust the server's memory with a handful of small frames.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port.
+  **What changed:** a compressed frame may decode to at most 16 MB — what an uncompressed
+  frame may carry; it was 100 MB — and the limit is enforced while decoding, so refusing a
+  frame costs memory in proportion to the limit, not to what the frame claims. A compressed
+  payload must be exactly one zstd frame. One connection may have at most 32 MB of decoded
+  payload in flight; a frame past that waits for the ones ahead of it. A refusal is error
+  `5005` with a message beginning "decompression failed". No request the server accepts is
+  near these limits (an engram's content is at most 16 KB), but a client that concatenated
+  several zstd frames into one payload, compressed with a window over 16 MB (`--ultra` or
+  `--long` modes), or sent more than 16 MB decoded will now get that error (SEC-21).
+
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
   v0.60.0, clearing all 23 reachable govulncheck findings. Notable ones:

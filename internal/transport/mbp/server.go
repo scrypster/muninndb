@@ -38,6 +38,10 @@ type Server struct {
 	wg        sync.WaitGroup
 	shutdownM sync.Mutex
 	tlsConfig *tls.Config // nil = plain TCP
+
+	// decodeBudget overrides connDecodeBudget when positive. Tests set it to
+	// watch the budget work without megabyte payloads.
+	decodeBudget int64
 }
 
 // NewServer creates a new MBP server.
@@ -222,6 +226,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	}
 	connCtx = withVaultScope(connCtx, scope)
 	connCtx = context.WithValue(connCtx, auth.ContextMode, connMode)
+	connCtx = withDecodeBudget(connCtx, s.connDecodeBudget())
 
 	// Resolve and validate the HELLO vault under the new scope, then pin the
 	// request to it so the engine registers (and the response advertises) the
@@ -339,14 +344,19 @@ func (s *Server) dispatchFrame(ctx context.Context, frame *Frame, writeCh chan *
 		return
 	}
 
-	// Check if payload should be decompressed
+	// Decompress only now, for a frame that was admitted, into at most what a
+	// frame may carry, and charged to this connection's budget until the
+	// handler is done with it (compress.go, decode_budget.go).
 	var payload []byte = frame.Payload
 	if (frame.Flags & FlagCompressed) != 0 {
-		decompressed, err := DecompressPayload(frame.Payload)
+		decompressed, release, err := decodeCharged(ctx, frame.Payload)
 		if err != nil {
-			s.queueErrorFrame(writeCh, frame.CorrelationID, ErrInternal, "decompression failed")
+			if ctx.Err() == nil {
+				s.queueErrorFrame(writeCh, frame.CorrelationID, ErrInternal, decompressionFailure(err))
+			}
 			return
 		}
+		defer release()
 		payload = decompressed
 	}
 

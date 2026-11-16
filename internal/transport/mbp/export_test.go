@@ -15,3 +15,8 @@ func DispatchedFrameClasses() map[uint8]string {
 	}
 	return out
 }
+
+// SetDecodeBudgetForTest replaces the per-connection decoded-bytes budget for
+// connections accepted after the call, so a test can watch the budget hold a
+// frame back without megabyte payloads.
+func (s *Server) SetDecodeBudgetForTest(bytes int64) { s.decodeBudget = bytes }
