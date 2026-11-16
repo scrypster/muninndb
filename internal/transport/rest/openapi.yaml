@@ -126,7 +126,7 @@ components:
         upsert_mode:
           type: boolean
           default: false
-          description: "When true with idempotent_id set, keep one stable memory per key: created on first use, evolved (superseding the previous version, which stays retrievable as history) when the content changes, and a no-op when the content is identical. Requires idempotent_id. On the evolve step content always comes from the request, and tags, memory type and type label are always inherited from the previous version; concept, importance, trust and confidence are inherited too unless the request supplies them, in which case the request's value is honored (trust=verified still requires a write or full credential)."
+          description: "When true with idempotent_id set, keep one stable memory per key: created on first use, evolved (superseding the previous version, which stays retrievable as history) when the content changes, and a no-op when the content is identical. Requires idempotent_id. On the evolve step content always comes from the request, and tags, memory type and type label are always inherited from the previous version; concept, importance and trust are inherited too unless the request supplies them, in which case the request's value is honored (trust=verified still requires a write or full credential). Confidence is not inherited: a confidence on the request is applied, otherwise the new version is stored at 1.0."
         memory_type:
           type: integer
           format: uint8

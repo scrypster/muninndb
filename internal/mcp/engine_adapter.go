@@ -186,9 +186,9 @@ func (a *mcpEngineAdapter) Evolve(ctx context.Context, vault, oldID, newContent,
 					"muninn_evolve with 'concept' — concept-surfacing views show the label, not the content.",
 				eng.Concept))
 		}
-		// #872: evolve now INHERITS the record's standing (trust, confidence)
-		// instead of resetting it to inferred/1.0 — an evolve replaces CONTENT,
-		// it does not re-adjudicate standing. That is the right default, but it
+		// #872: evolve now INHERITS the record's trust level instead of
+		// resetting it to inferred — an evolve replaces CONTENT, it does not
+		// re-adjudicate who vouched for it. That is the right default, but it
 		// is the same dilemma #769 settled for `concept`: "verified" means a
 		// human confirmed THIS content, and the content just changed. #769's
 		// residual was never the inheritance, it was that nothing SAID the

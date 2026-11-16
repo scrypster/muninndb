@@ -12,8 +12,13 @@ import (
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 )
 
-// Standing = the record's trust and confidence. #872: evolve INHERITS standing
-// and REPLACES content. The verb never manufactures either field.
+// #872: evolve carries a record's TRUST and replaces its content. The verb never
+// manufactures a trust level.
+//
+// Confidence is deliberately NOT carried: the successor is written at 1.0 unless
+// the caller supplies a value. Carrying it was built and measured for #872 and
+// held back; TestEvolve_PinnedDecision_DoesNotCarryConfidence pins that decision
+// and COG-37 records why. (The file keeps its original name.)
 //
 // Fixture domain throughout this file: a fictional alpine trail-maintenance
 // cooperative. Nothing here is derived from any real vault.
@@ -201,12 +206,21 @@ func TestEvolve_VerifiedSuccessorSurvivesPruneVault(t *testing.T) {
 	}
 }
 
-// TestEvolve_InheritsConfidence: 1.0 is not a neutral default, it is a
-// manufactured assertion of maximum belief. A caller that stored a fact at 0.4
-// and then sharpened its wording must not find the engine has decided the fact
-// is now certain — confidence multiplies straight into the recall score, so the
-// reset was a 2.5x score inflation on every evolve of a low-confidence memory.
-func TestEvolve_InheritsConfidence(t *testing.T) {
+// TestEvolve_PinnedDecision_DoesNotCarryConfidence is a PINNED DECISION: it
+// passes while evolve writes the successor at confidence 1.0 and FAILS WHEN
+// EVOLVE STARTS CARRYING CONFIDENCE, so that change cannot land without the
+// invariant and the docs moving with it.
+//
+// This is not the behaviour anyone would design. 1.0 is not a neutral default:
+// a caller who stored a fact at 0.4 and then sharpened its wording finds the
+// engine has decided the fact is certain. Carrying confidence was built for
+// #872 and held back for one measured reason: it also carries a contradiction
+// penalty onto the text that RESOLVED the conflict, and that penalty is small
+// only from a prior of exactly 1.0 (0.975). From 0.9 one penalty leaves 0.5, a
+// second conflict on a lineage that started at 1.0 leaves 0.797 — and nothing on
+// MCP or REST can set a confidence back afterwards (#901). So confidence is
+// carried only by a change that also provides that route.
+func TestEvolve_PinnedDecision_DoesNotCarryConfidence(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -230,37 +244,15 @@ func TestEvolve_InheritsConfidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evolve: %v", err)
 	}
-	if got := readEngram(t, eng, "trailwork", newID.String()).Confidence; got < 0.399 || got > 0.401 {
-		t.Errorf("successor confidence = %v, want 0.4 (inherited): evolve manufactured a "+
-			"belief the caller never asserted", got)
-	}
-}
-
-// TestEvolve_LegacyZeroConfidenceStaysOne pins the normalization edge: storage
-// decodes a stored 0 confidence as 1.0, so a legacy record that never carried
-// the field lands on exactly the value it has today. Inheritance must not turn
-// that into a stored 0.
-func TestEvolve_LegacyZeroConfidenceStaysOne(t *testing.T) {
-	eng, cleanup := testEnv(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	resp, err := eng.Write(ctx, &mbp.WriteRequest{
-		Vault:   "trailwork",
-		Concept: "Signpost paint colour",
-		Content: "Trail signposts are painted ochre.",
-		// Confidence omitted entirely.
-	})
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	newID, err := eng.Evolve(ctx, "trailwork", resp.ID,
-		"Trail signposts are painted ochre with a white cap band.", "added the band", nil, "")
-	if err != nil {
-		t.Fatalf("Evolve: %v", err)
-	}
 	if got := readEngram(t, eng, "trailwork", newID.String()).Confidence; got < 0.999 || got > 1.001 {
-		t.Errorf("successor confidence = %v, want 1.0", got)
+		t.Fatalf("PINNED DECISION CHANGED: the successor of a 0.4-confidence memory has confidence %v, "+
+			"not the 1.0 evolve writes when the caller supplies none — evolve is now carrying or "+
+			"deriving confidence. That was held out of #872 on purpose: a carried confidence also "+
+			"carries a contradiction penalty onto the text that resolved the conflict, and no MCP "+
+			"or REST route can set it back (#901). If this is the change that provides that route, "+
+			"replace this test with one that pins the new rule, move Confidence out of the census's "+
+			"reset bucket, and amend COG-37, the COG-10 amendment, the upsert_mode descriptions "+
+			"(internal/mcp/tools.go, openapi.yaml), the guide and CHANGELOG. Otherwise revert.", got)
 	}
 }
 
@@ -362,7 +354,9 @@ func TestUpsertEvolve_HonorsExplicitTrust(t *testing.T) {
 }
 
 // TestUpsertEvolve_NoExplicitTrustInherits: with no trust on the request the
-// upsert-evolve branch falls back to inheritance, exactly like a plain evolve.
+// upsert-evolve branch falls back to inheritance, exactly like a plain evolve —
+// and, exactly like a plain evolve, it does NOT carry confidence: with none on
+// the request the successor is written at 1.0 (the pinned decision above).
 func TestUpsertEvolve_NoExplicitTrustInherits(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
@@ -397,8 +391,10 @@ func TestUpsertEvolve_NoExplicitTrustInherits(t *testing.T) {
 	if got.Trust != storage.TrustUntrusted {
 		t.Errorf("trust = %v, want untrusted (inherited)", got.Trust)
 	}
-	if got.Confidence < 0.299 || got.Confidence > 0.301 {
-		t.Errorf("confidence = %v, want 0.3 (inherited)", got.Confidence)
+	if got.Confidence < 0.999 || got.Confidence > 1.001 {
+		t.Errorf("confidence = %v, want 1.0: the predecessor held 0.3 and the request supplied "+
+			"none, and confidence is not carried (see "+
+			"TestEvolve_PinnedDecision_DoesNotCarryConfidence before changing this)", got.Confidence)
 	}
 }
 
@@ -431,14 +427,15 @@ func TestUpsertEvolve_VerifiedStillGated(t *testing.T) {
 	}
 }
 
-// TestUpsertEvolve_ExplicitStandingOverridesInherited is the discriminating
-// half of TestUpsertEvolve_HonorsExplicitTrust. That test re-syncs with the
-// SAME trust and confidence the predecessor already holds, so once inheritance
-// exists it passes whether or not writeUpsert forwards the caller's values —
+// TestUpsertEvolve_ExplicitTrustAndConfidenceAreApplied is the discriminating
+// half of TestUpsertEvolve_HonorsExplicitTrust. That test re-syncs with the SAME
+// trust the predecessor already holds, so with trust inherited its trust
+// assertion passes whether or not writeUpsert forwards the caller's value —
 // carried and honored are indistinguishable there (shown by deleting the
-// pass-through: it stays green). Here the re-sync asserts values that DIFFER
-// from the predecessor's, so only the forwarded request can produce them.
-func TestUpsertEvolve_ExplicitStandingOverridesInherited(t *testing.T) {
+// pass-through: only its confidence assertion notices). Here the re-sync asserts
+// a trust and a confidence that both DIFFER from the predecessor's, so only the
+// forwarded request can produce them.
+func TestUpsertEvolve_ExplicitTrustAndConfidenceAreApplied(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 	ctx := withMode(auth.ModeWrite)
@@ -481,8 +478,8 @@ func TestUpsertEvolve_ExplicitStandingOverridesInherited(t *testing.T) {
 			"to the predecessor's inherited level", got.Trust, got.Trust.String())
 	}
 	if got.Confidence < 0.599 || got.Confidence > 0.601 {
-		t.Errorf("upsert-evolve confidence = %v, want 0.6: the request's explicit confidence lost "+
-			"to the predecessor's inherited value", got.Confidence)
+		t.Errorf("upsert-evolve confidence = %v, want 0.6: the request's explicit confidence was "+
+			"not applied on the content-change branch", got.Confidence)
 	}
 }
 
@@ -495,31 +492,35 @@ func TestUpsertEvolve_ExplicitStandingOverridesInherited(t *testing.T) {
 // WHY. TestEvolve_FieldCensus fails on any field that is not listed, so adding
 // a field to storage.Engram forces the author to make this decision explicitly
 // rather than inheriting whatever the struct literal happens to omit — which is
-// the exact way #653 (MemoryType) and #872 (Trust, Confidence) were introduced.
+// the exact way #653 (MemoryType) and #872 (Trust) were introduced.
 //
 // Each entry carries its reason. A future field dropped into a bucket without
 // one is the failure mode this census cannot catch by itself.
 var evolveFieldBuckets = map[string]map[string]string{
 	// Carried from the predecessor. The successor is the same RECORD with new
-	// text, so its standing and its classification travel with it.
+	// text, so its trust and its classification travel with it.
 	"inherited": {
 		"Concept":    "the label of the thing being described; caller may override, else carried (#769 announces the carry)",
 		"Tags":       "curation state, not content; muninn_update_tags is the way to change it",
 		"MemoryType": "what kind of memory this is does not change because the wording did (#653)",
 		"TypeLabel":  "free-form companion to MemoryType, same reasoning (#653)",
 		"Importance": "caller-asserted priority; explicit override wins, unset stays unset so the type-table default keeps deriving",
-		"Trust":      "standing, not content (#872). TrustUnset normalizes to TrustInferred on carry",
-		"Confidence": "standing, not content (#872). 1.0 would be a manufactured assertion of maximum belief",
+		"Trust":      "who vouched for the record, not content (#872). TrustUnset normalizes to TrustInferred on carry",
 	},
 	// Deliberately NOT carried: the successor starts these fresh.
 	"reset": {
+		// NOT CARRIED, BY DECISION (#872) — not by omission and not because 1.0
+		// is right. It belongs with Trust in "inherited" and moves there only
+		// in a change that also lets a caller set confidence back (#901).
+		// Pinned by TestEvolve_PinnedDecision_DoesNotCarryConfidence.
+		"Confidence":  "NOT carried, by decision: written at 1.0 unless the caller supplies one. Carrying it also carries a contradiction penalty onto the text that resolved the conflict, with no MCP/REST route to set it back (#901)",
 		"Stability":   "decay resistance restarts with the new text; the successor has its own forgetting curve",
 		"LastAccess":  "use history belongs to the revision that was used, not to the new one",
 		"AccessCount": "same: the successor has been accessed zero times",
 		"Relevance":   "recomputed at read time from the decay curve; never meaningful as a carried literal",
 		// TODO(#872 follow-up): both of these SHOULD arguably be inherited and
 		// are recorded here honestly rather than quietly fixed in this
-		// increment, which is about standing.
+		// increment, which is about trust.
 		"CreatedBy":      "TODO: dropped today, which drops the successor out of the creator index. Inert in practice — no transport populates it (mbp.WriteRequest has no such field) — which is exactly why it must be written down",
 		"Classification": "TODO: concept-cluster id, dropped today. Re-derivable by the clustering pass, but nothing re-runs it on evolve",
 	},
@@ -603,7 +604,6 @@ func TestEvolve_FieldCensus(t *testing.T) {
 		TypeLabel:  "maintenance_routine",
 		Importance: &imp,
 		Trust:      "verified",
-		Confidence: 0.55,
 	})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
@@ -628,36 +628,33 @@ func TestEvolve_FieldCensus(t *testing.T) {
 		}
 	}
 	// Guard against a fixture that would pass vacuously.
-	if pre.Trust == storage.TrustInferred || pre.Confidence == 1.0 {
-		t.Fatalf("fixture is not discriminating: predecessor trust=%v confidence=%v are the "+
-			"values the old hardcodes produced, so this test would pass either way",
-			pre.Trust, pre.Confidence)
+	if pre.Trust == storage.TrustInferred {
+		t.Fatalf("fixture is not discriminating: predecessor trust=%v is the value the old "+
+			"hardcode produced, so this test would pass either way", pre.Trust)
 	}
 }
 
-// TestConsolidate_KnownResidual_DoesNotCarryStanding is a PINNED KNOWN RESIDUAL:
+// TestConsolidate_KnownResidual_DoesNotCarryTrust is a PINNED KNOWN RESIDUAL:
 // it passes while the gap exists and FAILS WHEN IT IS FIXED, so the fix has to
 // amend COG-37 with it.
 //
 // COG-37's rule is written for every content-replacing verb. Engine.Consolidate
 // is one (#779), and it does not obey the rule yet: it builds the merged memory
-// through Engine.Write with no trust and no confidence, so the result is
-// inferred/1.0 whatever its sources held. Merging a memory flagged untrusted
-// therefore still clears the flag — the laundering #872 closed on evolve, by the
-// neighbouring verb. Deliberately not fixed with evolve: a many-to-one join
-// needs its own rule (which source's standing wins?) and that is a design
-// decision, not a carry.
-func TestConsolidate_KnownResidual_DoesNotCarryStanding(t *testing.T) {
+// through Engine.Write with no trust, so the result is inferred whatever its
+// sources held. Merging a memory flagged untrusted therefore still clears the
+// flag — the laundering #872 closed on evolve, by the neighbouring verb.
+// Deliberately not fixed with evolve: a many-to-one join needs its own rule
+// (which source's trust wins?) and that is a design decision, not a carry.
+func TestConsolidate_KnownResidual_DoesNotCarryTrust(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 	ctx := withMode(auth.ModeWrite)
 
 	flagged, err := eng.Write(ctx, &mbp.WriteRequest{
-		Vault:      "trailwork",
-		Concept:    "Footbridge load rating",
-		Content:    "Someone said the Larkspur footbridge is rated for pack animals.",
-		Trust:      "untrusted",
-		Confidence: 0.4,
+		Vault:   "trailwork",
+		Concept: "Footbridge load rating",
+		Content: "Someone said the Larkspur footbridge is rated for pack animals.",
+		Trust:   "untrusted",
 	})
 	if err != nil {
 		t.Fatalf("Write flagged: %v", err)
@@ -670,10 +667,8 @@ func TestConsolidate_KnownResidual_DoesNotCarryStanding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write other: %v", err)
 	}
-	if pre := readEngram(t, eng, "trailwork", flagged.ID); pre.Trust != storage.TrustUntrusted ||
-		pre.Confidence < 0.399 || pre.Confidence > 0.401 {
-		t.Fatalf("premise not reproduced: source trust=%v confidence=%v, want untrusted/0.4",
-			pre.Trust, pre.Confidence)
+	if pre := readEngram(t, eng, "trailwork", flagged.ID); pre.Trust != storage.TrustUntrusted {
+		t.Fatalf("premise not reproduced: source trust = %d (%s), want untrusted", pre.Trust, pre.Trust.String())
 	}
 
 	res, err := eng.Consolidate(ctx, "trailwork", []string{flagged.ID, other.ID},
@@ -683,122 +678,10 @@ func TestConsolidate_KnownResidual_DoesNotCarryStanding(t *testing.T) {
 	}
 	merged := readEngram(t, eng, "trailwork", res.MergedID.String())
 
-	if merged.Trust != storage.TrustInferred || merged.Confidence < 0.999 {
-		t.Fatalf("KNOWN RESIDUAL APPEARS FIXED: the merged memory has trust=%d (%s) confidence=%v, "+
-			"no longer the inferred/1.0 Consolidate used to mint. Replace this test with one that "+
-			"pins the new join rule and remove the Consolidate residual from COG-37.",
-			merged.Trust, merged.Trust.String(), merged.Confidence)
+	if merged.Trust != storage.TrustInferred {
+		t.Fatalf("KNOWN RESIDUAL APPEARS FIXED: the merged memory has trust=%d (%s), no longer the "+
+			"inferred Consolidate used to mint whatever its sources held. Replace this test with "+
+			"one that pins the new join rule and remove the Consolidate residual from COG-37.",
+			merged.Trust, merged.Trust.String())
 	}
-}
-
-// ---------------------------------------------------------------------------
-// The kill condition (design §6): does inheriting a contradiction-penalised
-// confidence measurably suppress a RESOLVED memory?
-// ---------------------------------------------------------------------------
-
-// TestEvolve_ResolvedConflictSuccessorScoreWithinKillLine measures the accepted
-// cost of confidence inheritance. Under COG-29, evolving one endpoint of a
-// declared contradiction IS a resolution (the predecessor is soft-deleted, so
-// clause 2 no longer holds). Today's reset also cleared the contradiction
-// penalty as a side effect; inheritance carries it onto a successor whose
-// conflict just ended.
-//
-// The design pre-committed the kill line: drop confidence inheritance if a
-// resolved-conflict successor's recall score sits MORE THAN 5% below its
-// pre-conflict score. One penalty application is 1.0 -> 0.975 by construction
-// (cognitive.BayesianUpdate with EvidenceContradiction), a 2.5% haircut, and the
-// penalty is fire-once per newly-flagged pair. >5% would mean it compounds
-// across evolves — i.e. that inheritance re-opens the compounding bug #764
-// closed.
-//
-// Confidence multiplies straight into AbsoluteScore, so the score ratio is
-// measured on AbsoluteScore (Final is per-query normalized and would move for
-// reasons that have nothing to do with this).
-func TestEvolve_ResolvedConflictSuccessorScoreWithinKillLine(t *testing.T) {
-	eng, cleanup := testEnv(t)
-	defer cleanup()
-	ctx := withMode(auth.ModeWrite)
-
-	const vault = "trailwork"
-	const query = "chainsaw certification requirement for volunteers"
-
-	resp, err := eng.Write(ctx, &mbp.WriteRequest{
-		Vault:   vault,
-		Concept: "Chainsaw certification requirement",
-		Content: "Volunteers need a chainsaw certification requirement before felling.",
-	})
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	eng.WaitWriteTimeIdle()
-	preScore := absoluteScoreFor(t, eng, vault, query, resp.ID)
-	if preScore <= 0 {
-		t.Fatalf("premise not reproduced: pre-conflict absolute score %v; the fixture is not "+
-			"recallable and no ratio can be measured", preScore)
-	}
-
-	// Apply exactly one contradiction penalty, at the magnitude the worker
-	// applies: BayesianUpdate(1.0, EvidenceContradiction) = 0.975.
-	target, err := storage.ParseULID(resp.ID)
-	if err != nil {
-		t.Fatalf("ParseULID: %v", err)
-	}
-	if _, err := eng.AdjustConfidence(ctx, vault, target, -0.025, storage.ULID{}, false,
-		"contradiction_detected", "test"); err != nil {
-		t.Fatalf("AdjustConfidence: %v", err)
-	}
-	if got := readEngram(t, eng, vault, resp.ID).Confidence; got < 0.974 || got > 0.976 {
-		t.Fatalf("premise not reproduced: penalised confidence = %v, want ~0.975", got)
-	}
-
-	// Resolve by evolving the endpoint, three hops. Confidence must stay FLAT:
-	// the penalty is applied by the worker, never by the carry.
-	id := resp.ID
-	for hop := 1; hop <= 3; hop++ {
-		newID, err := eng.Evolve(ctx, vault, id,
-			fmt.Sprintf("Volunteers need a chainsaw certification requirement before felling (rev %d).", hop),
-			"resolution", nil, "")
-		if err != nil {
-			t.Fatalf("Evolve hop %d: %v", hop, err)
-		}
-		id = newID.String()
-		eng.WaitWriteTimeIdle()
-		conf := readEngram(t, eng, vault, id).Confidence
-		if conf < 0.974 || conf > 0.976 {
-			t.Fatalf("hop %d: confidence = %v, want ~0.975 flat — the carried penalty is "+
-				"COMPOUNDING across a supersede chain, which is exactly the #764 shape", hop, conf)
-		}
-	}
-
-	postScore := absoluteScoreFor(t, eng, vault, query, id)
-	if postScore <= 0 {
-		t.Fatalf("successor not recallable at all (absolute score %v)", postScore)
-	}
-	drop := (preScore - postScore) / preScore
-	t.Logf("pre-conflict absolute score %.6f, resolved successor %.6f, drop %.4f%%",
-		preScore, postScore, drop*100)
-	if drop > 0.05 {
-		t.Fatalf("KILL CONDITION MET: resolved-conflict successor scores %.2f%% below "+
-			"pre-conflict (kill line 5%%). Confidence inheritance must be dropped from this "+
-			"increment; trust inheritance stands on its own.", drop*100)
-	}
-}
-
-// absoluteScoreFor recalls a query and returns the AbsoluteScore of the row with
-// the given id, or 0 if it is absent. AbsoluteScore is the component confidence
-// multiplies into directly; Final is per-query normalized.
-func absoluteScoreFor(t *testing.T, eng *Engine, vault, query, id string) float64 {
-	t.Helper()
-	resp, err := eng.Activate(context.Background(), &mbp.ActivateRequest{
-		Vault: vault, Context: []string{query}, MaxResults: 20, Threshold: 0.0, ReadOnly: true,
-	})
-	if err != nil {
-		t.Fatalf("Activate: %v", err)
-	}
-	for _, it := range resp.Activations {
-		if it.ID == id {
-			return float64(it.ScoreComponents.AbsoluteScore)
-		}
-	}
-	return 0
 }

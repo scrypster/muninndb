@@ -11,14 +11,14 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Issue #872 — a content-replacing verb must DECLARE what standing it carried.
+// Issue #872 — a content-replacing verb must DECLARE what trust it carried.
 //
-// Evolve now inherits trust and confidence instead of resetting them to
-// inferred/1.0. Inheriting is the right default (§2 of the design), but it is
-// exactly the #769 dilemma: "verified" means a human confirmed THIS content, and
-// an evolve replaces the content. #769's residual was never the inheritance, it
-// was that "nothing SAID the label had been inherited". The announcement is what
-// pays the honesty debt here too.
+// Evolve now inherits the trust level instead of resetting it to inferred.
+// Inheriting is the right default, but it is exactly the #769 dilemma:
+// "verified" means a human confirmed THIS content, and an evolve replaces the
+// content. #769's residual was never the inheritance, it was that "nothing SAID
+// the label had been inherited". The announcement is what pays the honesty debt
+// here too.
 //
 // Deliberately narrow: only `verified` and `untrusted` warn. `inferred` and
 // `external` are silent — a warning on every evolve is a warning on none.

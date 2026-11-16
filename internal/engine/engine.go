@@ -2141,9 +2141,10 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	// sync job stamping trust=verified on every run produced a verified record
 	// on first sync and an inferred one on every re-sync, with no error and no
 	// warning — principle #1. nil (field omitted) falls through to
-	// evolveAtInternal's inheritance. resolveTrust keeps the SEC-14 gate on
-	// trust=verified attached to this path: an observe credential is REJECTED,
-	// never silently downgraded.
+	// evolveAtInternal's defaults, which differ by field: trust is inherited
+	// from the head, confidence is NOT (the successor is written at 1.0).
+	// resolveTrust keeps the SEC-14 gate on trust=verified attached to this
+	// path: an observe credential is REJECTED, never silently downgraded.
 	var trustPtr *storage.TrustLevel
 	if req.Trust != "" {
 		lvl, tErr := resolveTrust(ctx, req.Trust)
@@ -4656,21 +4657,22 @@ func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason 
 }
 
 // evolveAtInternal is EvolveAt with an optional upsert key hash and optional
-// caller-asserted standing. When upsertKeyHash is non-nil, the 0x30 upsert-key
-// forward index for (wsPrefix, *upsertKeyHash) is re-pointed to the successor
-// ULID INSIDE the evolve's atomic batch — so a content-change upsert never
-// leaves the durable pointer aimed at the soft-deleted predecessor (#556,
-// scrypster's #1 trap: the re-point must be crash-atomic with the evolve, never
-// a separate commit).
+// caller-asserted trust and confidence. When upsertKeyHash is non-nil, the
+// 0x30 upsert-key forward index for (wsPrefix, *upsertKeyHash) is re-pointed to
+// the successor ULID INSIDE the evolve's atomic batch — so a content-change
+// upsert never leaves the durable pointer aimed at the soft-deleted predecessor
+// (#556, scrypster's #1 trap: the re-point must be crash-atomic with the
+// evolve, never a separate commit).
 //
-// trustOverride/confOverride are the standing equivalents of the importance
-// override in the public signature: nil = inherit from the predecessor, non-nil
-// = the caller asserted a value on THIS write. Public Evolve/EvolveAt pass nil
-// for all three (their surfaces expose no trust or confidence argument — see
-// #872 §4 deferral 1); only Engine.writeUpsert, whose request DOES carry trust
-// and confidence, passes them. Containing the extra parameters in the unexported
-// method is the same containment upsertKeyHash uses: no embedded-library, MCP or
-// REST signature moves.
+// trustOverride/confOverride carry a value the caller asserted on THIS write;
+// non-nil wins. nil means different things for the two, on purpose: a nil
+// trustOverride INHERITS the predecessor's trust, a nil confOverride writes the
+// successor at 1.0 — confidence is not carried (see the successor literal).
+// Public Evolve/EvolveAt pass nil for all three (their surfaces expose no trust
+// or confidence argument; adding one is deferred); only Engine.writeUpsert,
+// whose request DOES carry trust and confidence, passes them. Containing the
+// extra parameters in the unexported method is the same containment
+// upsertKeyHash uses: no embedded-library, MCP or REST signature moves.
 //
 // trustOverride must already have been through resolveTrust — the SEC-14 gate on
 // trust=verified lives there, and evolveAtInternal does not re-check it.
@@ -4753,11 +4755,11 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 	if importance != nil {
 		newImportance = importanceFromRequest(importance)
 	}
-	// STANDING (trust + confidence) is inherited, never manufactured by the
-	// verb (#872, COG-37). An evolve replaces a record's CONTENT; it does not
-	// re-adjudicate how much that record is believed or who vouched for it.
+	// TRUST is inherited, never manufactured by the verb (#872, COG-37). An
+	// evolve replaces a record's CONTENT; it does not re-adjudicate who vouched
+	// for it.
 	//
-	// Trust: the old hardcoded TrustInferred laundered an "untrusted" marking
+	// The old hardcoded TrustInferred laundered an "untrusted" marking
 	// off any record simply by rewording it, and demoted a human-verified one on
 	// every routine curation — which, for a Decision/Goal/Constraint/Identity
 	// with no explicit importance, silently moved it from EffectiveImportance
@@ -4776,14 +4778,16 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 	if trustOverride != nil {
 		newTrust = *trustOverride
 	}
-	// Confidence: the old hardcoded 1.0 was not a neutral default, it was a
-	// manufactured assertion of MAXIMUM belief in text nothing had gathered
-	// evidence about — a caller-asserted 0.4 came back as 1.0, a 2.5x inflation
-	// of the recall score (confidence multiplies straight into AbsoluteScore) on
-	// every evolve of a low-confidence memory. A stored 0 decodes as 1.0
-	// (storage/impl.go, batch.go), so a legacy record with no confidence lands
-	// on exactly the value it does today.
-	newConfidence := oldEng.Confidence
+	// CONFIDENCE is NOT carried from the predecessor: the successor is written
+	// at 1.0 unless the caller supplied a value on this write. That is a
+	// decision (#872), not an omission, and 1.0 is not a neutral default — a
+	// memory stored at 0.4 still comes back at 1.0 after an evolve.
+	// Reason: carrying it would also carry a contradiction penalty onto the text
+	// that resolved the conflict, and nothing on MCP or REST can set a
+	// confidence back afterwards (#901). Carrying is held for a change that also
+	// adds that route. Pinned by TestEvolve_PinnedDecision_DoesNotCarryConfidence,
+	// which fails when this changes; COG-37 has the measurements.
+	newConfidence := float32(1.0)
 	if confOverride != nil && *confOverride > 0 {
 		newConfidence = *confOverride
 	}
@@ -4795,7 +4799,7 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 		MemoryType: oldEng.MemoryType,
 		TypeLabel:  oldEng.TypeLabel,
 		Importance: newImportance,
-		Confidence: newConfidence,
+		Confidence: newConfidence, // 1.0 or the caller's value; never the predecessor's (#872, #901)
 		Stability:  30.0,
 		State:      storage.StateActive,
 		CreatedAt:  now,

@@ -307,7 +307,7 @@ JSON-RPC over HTTP. Implements the Model Context Protocol for direct integration
 | `contradictions` | List contradiction pairs |
 | `status` | Vault health and statistics |
 | `guide` | Vault-aware usage instructions for AI onboarding |
-| `evolve` | Update engram content or confidence |
+| `evolve` | Replace an engram's content with a new version; the old one is kept as history |
 | `consolidate` | Merge similar engrams |
 | `session` | Session context management |
 | `decide` | Record a decision with confidence |
