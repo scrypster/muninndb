@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cluster: a data race between a failed send to a peer and the checks that ask whether that
+  peer is connected. `PeerConn.Send` clears a connection's state under the peer's lock when a
+  write fails, while `ConnManager.HasLivePeerAt` and `RegisterConnKind` read that state holding
+  only the manager's lock. It was reached when a frame was sent to a node that had just stopped
+  while peer discovery or a second handshake from that node was in progress. Both reads now take
+  the peer's lock.
 - A word a memory holds can no longer score as if the vault had never seen it because of
   what the server searched earlier. Keyword search kept each word's rarity (IDF) in memory,
   worked out from two numbers read at different moments and refreshed only when another
