@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `embedder_busy` or `embed_timeout`. `muninn twin-replay` checks a vault (read-only, on a
   backup) before you enable it; `muninn twin-audit` measures unresolved near-twins
   afterwards. Per-vault `write_twin_threshold` overrides the model hint (bge-small: 0.93).
+- A metric for memories stored without a summary:
+  `muninndb_engine_writes_missing_field_total{vault,field}` counts writes that stored with an
+  empty `summary` at write time. Divided by `muninndb_engine_writes_total` it shows how fast a
+  vault accumulates them, which is otherwise silent on a deployment with no summarize stage.
+  Vaults with `inline_enrichment: background_only` are not counted, since a background stage
+  owns the summary there. Tree writes and the upsert-evolve path are not covered.
 
 ### Fixed
 
