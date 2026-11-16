@@ -13,6 +13,7 @@ import (
 type countingHandler struct {
 	mu       sync.Mutex
 	records  int
+	loud     int // records above DEBUG
 	longest  int // longest "vault" attribute seen, in bytes
 	messages map[string]int
 }
@@ -24,6 +25,9 @@ func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.records++
+	if r.Level > slog.LevelDebug {
+		h.loud++
+	}
 	if h.messages == nil {
 		h.messages = make(map[string]int)
 	}
@@ -43,8 +47,8 @@ func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
 // vaults that have no configuration costs the server a bounded amount, however
 // many names are asked about and however long they are.
 //
-// GetVaultConfig warns once for each vault it finds unconfigured, and to warn
-// once it has to remember the name. It is reached with a name the CALLER chose,
+// GetVaultConfig notes once in the log each vault it finds unconfigured, and to
+// do it once it has to remember the name. It is reached with a name the CALLER chose,
 // before the caller has shown any credential: an unauthenticated request on any
 // transport names a vault, and the name goes here to find out whether the vault
 // is public. Remembering every such name, and logging each, handed any caller a
@@ -92,12 +96,16 @@ func TestUnconfiguredVaultNamesAreNotRememberedWithoutLimit(t *testing.T) {
 	if logged.messages[msgUnconfiguredVaultLimit] != 1 {
 		t.Errorf("the notice that no more names will be logged was written %d times; want once", logged.messages[msgUnconfiguredVaultLimit])
 	}
+	// Every one of these lines can be caused by a caller with no key. None of
+	// them is above DEBUG, the notice that the set is full included.
+	if logged.loud != 0 {
+		t.Errorf("%d lines were logged above DEBUG; anyone can cause them, so they are not warnings", logged.loud)
+	}
 }
 
-// TestUnconfiguredVaultIsStillWarnedAboutOnce pins what the warning is for: an
-// operator's own vault that has no explicit configuration is named in the log,
-// once.
-func TestUnconfiguredVaultIsStillWarnedAboutOnce(t *testing.T) {
+// TestUnconfiguredVaultIsStillNotedOnce pins what the line is for: a vault that
+// has no explicit configuration is named in the log, once, at DEBUG.
+func TestUnconfiguredVaultIsStillNotedOnce(t *testing.T) {
 	store := openKeyStore(t)
 	resetUnconfiguredVaultWarnings()
 	t.Cleanup(resetUnconfiguredVaultWarnings)
@@ -118,7 +126,7 @@ func TestUnconfiguredVaultIsStillWarnedAboutOnce(t *testing.T) {
 	if _, err := store.GetVaultConfig("harbour-notices"); err != nil {
 		t.Fatal(err)
 	}
-	if logged.records != 1 {
-		t.Errorf("%d log lines; want exactly one, for the one unconfigured vault", logged.records)
+	if logged.records != 1 || logged.loud != 0 {
+		t.Errorf("%d log lines, %d above DEBUG; want exactly one, at DEBUG, for the one unconfigured vault", logged.records, logged.loud)
 	}
 }

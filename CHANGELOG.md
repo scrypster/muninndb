@@ -33,8 +33,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that total, so the ratio reads low on a server that has such vaults. Tree writes and the
   upsert-evolve path are not covered.
 
+### Changed
+
+- Vaults with no explicit access policy are reported in one startup line, with the count and
+  the names, instead of one `WARN` per vault on every start. Such a vault is locked and requires
+  an API key, which is the secure default and not a fault, so the line is `INFO`; the per-vault
+  line is now `DEBUG`. A failure to build the list is still a `WARN`. Behaviour is unchanged.
+
 ### Fixed
 
+- After a cluster failover, replicas no longer discard the new leader's writes. A replica
+  does not advance its own replication sequence counter while it follows, so a replica that
+  was promoted numbered its writes from wherever that counter had been left. On a node that
+  had never led, that is 1. Every other replica had already applied entries up to the old
+  leader's position and treats anything numbered at or below that as already applied, so it
+  dropped the new leader's writes one after another until the new leader's counter passed
+  the old position. Its health read `ok` and its lag 0 the whole time. On a three-node test
+  cluster, with no log pruning involved, 0 of 10 writes accepted after a failover reached the
+  surviving replica. This affected every failover of a cluster with more than one replica,
+  automatic or operator-triggered. A promoted node now continues the numbering from the last
+  entry it applied (STO-26).
+  - **Already affected:** a replica that followed a promoted leader on an earlier version may
+    be missing the writes that leader accepted first. Upgrading does not put them back.
+    Re-seed such a replica from its leader. The procedure is in `docs/cluster-operations.md`
+    under "What a failover does to replication".
+  - **Upgrade order matters:** the fix runs on the node that is promoted. A promoted node on
+    an older version still restarts the numbering, whatever its replicas run. Upgrade
+    replicas first and fail over to an upgraded one, as the rolling-upgrade procedure already
+    says.
+  - **Still open, and silent unless noted.** This fixes replicas that were level with the
+    node that won. It does not fix these:
+    - A replica that was *ahead* of the node that won holds entries the new leader never
+      received. The new leader's first writes reuse those numbers and that replica skips
+      them.
+    - A replica that was *behind* the node that won misses the entries in between.
+    - A replica that is behind can win an election, because votes do not compare positions.
+    - Entries the old leader still streams after the new one has been promoted are applied
+      by whoever receives them.
+    - Writes the old leader accepted but had not shipped when it went away stay on its disk
+      only.
+    - After a *graceful* failover, replicas other than the handoff target keep reading from
+      the old leader and receive nothing from the new one until the old leader is stopped or
+      restarted. Restart it promptly.
+    - `POST /api/admin/cluster/failover` can answer 500 although the handoff took effect
+      (the old leader's log says "HANDOFF_ACK timeout"). This one is not silent, but it is
+      wrong.
+    - A node can keep a `seed-<addr>` placeholder in its voter list next to the same peer's
+      real id, which raises the quorum by one until that node restarts.
+    - Draining is not enforced, so the old leader keeps accepting writes during a graceful
+      failover.
+    - No replica is sent a snapshot. One that joins after the leader has pruned its log gets
+      only what the log still holds.
+
+- `source_type` on a recall row is the memory's origin again. It was read from the newest
+  provenance entry, and the first read or feedback appends an update entry recorded as
+  `inferred`, so the field flipped from the writer's source to `inferred` after one access: it
+  reported who touched the memory last. It is now read from the entry that created the memory
+  and does not change afterwards. Recall also stops loading a memory's whole provenance log to
+  answer it. Known limit, unchanged here: every ordinary write is recorded as `human` whoever
+  made it, so the field does not yet tell a person from an agent.
 - A connected follower no longer serves a memory that was soft-deleted on the leader.
   A follower applies replicated writes straight to storage, and nothing told its read caches,
   so a Lobe that stayed connected kept returning a deleted memory as active until it rejoined.
@@ -341,8 +398,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **What changed:** two things. A name that no vault can have (anything other than 1 to
   64 lowercase letters, digits, hyphens and underscores) is now refused before it is
   looked up, and the refusal no longer repeats the name. And the server remembers at
-  most 256 unrecognised names, each cut to 64 characters, and after that logs once that
-  it has stopped.
+  most 256 unrecognised names, each cut to 64 characters. The log line for each, and the
+  one line saying it has stopped remembering, are written at DEBUG, because a caller
+  with no key can cause them.
   **What a client will notice:** a request without a key that names a vault with an
   invalid name used to be answered "vault ... requires an API key". The message is now
   "invalid vault name". The status is unchanged: HTTP 401 with code `VAULT_LOCKED` on
@@ -350,9 +408,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a key that names some other vault with an invalid name gets the same message, also
   under the status it had before. Requests naming a well-formed vault are answered
   exactly as before.
-  **What an operator will notice:** once 256 different unconfigured vaults have been
-  asked about, a vault of your own that has no explicit configuration is no longer named
-  in the log the first time it is used. It is still treated as locked (SEC-27).
+  **What an operator will notice:** nothing at the default log level. The startup line
+  that lists vaults with no explicit configuration is built from the vaults the server
+  stores, so it does not depend on what callers have asked about (SEC-27).
 
 - The MBP listener now limits how many connections it holds. There was no limit. A
   client that could reach the port could open connections until the server ran out of
