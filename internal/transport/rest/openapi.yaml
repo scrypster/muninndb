@@ -207,16 +207,32 @@ components:
 
     BatchWriteResponse:
       type: object
+      required: [results]
       properties:
         results:
           type: array
+          description: >-
+            One entry per item sent, in the same order. A refused item does not
+            stop the others from being stored.
           items:
-            $ref: "#/components/schemas/WriteResponse"
-        errors:
-          type: array
-          items:
-            type: string
-            nullable: true
+            $ref: "#/components/schemas/BatchWriteItemResult"
+
+    BatchWriteItemResult:
+      type: object
+      required: [index, status]
+      properties:
+        index:
+          type: integer
+          description: Position of the item in the request.
+        id:
+          type: string
+          description: Id of the stored memory. Present when status is ok.
+        status:
+          type: string
+          enum: [ok, error]
+        error:
+          type: string
+          description: Why the item was refused. Present when status is error.
 
     ReadResponse:
       type: object
