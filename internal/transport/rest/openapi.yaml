@@ -516,7 +516,8 @@ components:
             does not change their order; ties occur on keyword-only vaults. A row injected by association has score 0 and follows
             every matched row; the first N rows do not depend on max_results
             (COG-35). On rrf and weighted_sum vaults it is RELATIVE to this
-            query's best candidate. Judge relevance by relevance_band.
+            query's best candidate. Judge each row by relevance_band, which
+            reports evidence, not whether the row answers the query.
         confidence:
           type: number
           format: float
@@ -530,14 +531,25 @@ components:
           enum: [strong, moderate, weak, filter_match, uncalibrated]
           description: >-
             #773 score-presentation honesty. The ABSOLUTE relevance band for
-            this row, derived from score_components.absolute_score against THIS
-            VAULT's own calibration — its resolved default gate (which COG-26
-            deliberately placed just above the embed model's measured
-            out-of-domain noise ceiling) and its resolved content-channel
-            ceiling. strong = at or above half the ceiling (near-verbatim
-            evidence); moderate = clear of the noise band; weak = within one
-            doubling of the noise floor, i.e. a NEIGHBOUR rather than
-            necessarily an ANSWER; filter_match = admitted below the relevance
+            this row, derived from score_components.absolute_score against fixed
+            band edges — twice the default gate (0.2 on ACT-R vaults; the gate
+            sits just above the embedding model's measured out-of-domain noise
+            ceiling, COG-26, and the semantic floor is a per-model value an
+            operator can override) and half the vault's content-channel
+            ceiling. Nothing is measured per vault. The band measures evidence, not answerability: it does not
+            report whether the memory answers the query, and nothing in
+            MuninnDB computes that. strong = at or above half the ceiling —
+            a close match, the band most likely to answer
+            directly; moderate = at or above the weak edge — evidence above the
+            noise floor, a candidate to verify, not an established answer: often on topic
+            without answering, and a fluent question the vault cannot answer
+            often produces moderate rows, because a moderate score can come
+            almost entirely from semantic similarity to the vault's general
+            subject matter with little of the query's wording matched; weak =
+            within one doubling of the noise floor — hard to tell from noise
+            and usually not the answer, though a real match can band this low
+            (for example while its embedding is still pending);
+            filter_match = admitted below the relevance
             bar by an explicit tag filter (COG-5 S1) — the filter defined the
             set, not relevance; uncalibrated = this row's absolute score is not
             on a bandable scale, with relevance_band_basis naming why.
@@ -864,10 +876,12 @@ components:
           type: string
           enum: [no_candidates, below_threshold, filtered, superseded_only, ambiguous_version, weak_only]
           description: >-
-            weak_only: the response was calibrated (the vault has a measured
-            noise floor) and every row it would have returned was band weak, so
+            weak_only: the response was calibrated (the embedding model in use
+            has a noise floor on record, or the operator set one) and every row it would have returned was band weak, so
             the rows were withheld; weak_available says how many, and
-            include_weak returns them.
+            include_weak returns them. abstained false does not mean the vault
+            holds an answer: an unanswerable but fluent question often returns
+            moderate rows.
         weak_available:
           type: integer
           description: >-

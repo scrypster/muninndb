@@ -1372,6 +1372,18 @@ unchanged. On a 300-memory synthetic fixture (real bge-small): 40 made-up querie
 28 → 31 (102 → 90 rows; the rest carry at least one moderate row, which this rule
 deliberately does not trim); 40 topical queries: 0 responses changed.
 
+**Correction (2026-11-15, honest relevance labels): the converse does not hold.** An all-weak
+response is in practice a query the vault cannot answer; a query the vault cannot answer is
+NOT in practice an all-weak response. Made-up words mostly abstain: in the project's
+acceptance kit, 57 of 60 single-phrase random-word queries (about 95%) returned nothing. A
+fluent question about something the vault does not hold mostly does not: in a cross-vault
+replay (a real query from one product sent to an unrelated product's vault), the engine
+returned nothing 14 of 60 times at one phrase and 1–2 of 60 at two or more phrases; in the
+graded gate-open replay only 3 of 60 would have been withheld as weak-only, and of the 300
+top rows graded, 263 were banded `moderate` and none was on topic. Both are read-only
+measurements on production vaults, 2026-11-15. No product text may describe a response
+that was not withheld as evidence that the vault holds an answer (COG-30 (d)).
+
 **Invariant number collision.** COG-34 is the next number after the highest invariant on
 this branch (COG-33). Other unmerged designs (#872 among them) also claim COG-34; whichever
 merges second renumbers.
@@ -2261,3 +2273,59 @@ the 60th-nearest fixture, and an opt-in latency harness: p50 at 12,000 memories
 29.2 ms old rule / 31.0 at 200 / 43.3 at 500 / 57.0 at 1,000) is kept on the
 local branch `exp/candidate-budget`.
 
+### Honest relevance labels: the band claims evidence, not an answer (2026-11-15)
+
+**What the bands claimed, and what the data shows.** The `muninn_recall` tool description
+opened "Returns the most relevant memories. Judge each result by its `relevance_band`" and
+never said what `moderate` means; the guide glossed it as "real evidence" in a section about
+how well a memory matched. An agent reading `moderate` reads "moderately relevant". Blind
+grading of real recalls on three production vaults (1,590 rows, one rater, self-agreement
+κ 0.91 on 80 re-graded items) found:
+
+- `strong` rows: directly useful 76%, on topic but not answering 22%, unrelated 2% (n=149);
+  directly useful 71–85% per vault.
+- `moderate` rows — most of what recall returns: directly useful 23%, on topic but not
+  answering 49%, unrelated 28% (n=1,042); directly useful 17–31% and unrelated 24–36% per
+  vault.
+- Another product's fluent questions sent to an unrelated vault: 0 of 300 graded rows on
+  topic, 263 of them banded `moderate` (random-word top rows median 0.12–0.20 absolute;
+  cross-vault rows 0.24–0.31). Their score is almost all SEMANTIC: the lexical component of a
+  cross-vault row has a median of 0.056 (10th percentile 0.000), so a moderate score can come
+  almost entirely from similarity to the vault's general subject matter with little of the
+  query's wording matched. The lexical component is what separates them from reworded true
+  answers (AUC 0.91) — a hypothesis for a second signal, not a shipped rule.
+
+These numbers are from production vaults graded by one rater. They are recorded here and
+deliberately NOT shipped in product text (principle #11): another vault's subject matter could
+make them wrong. An earlier draft of this increment said moderate "measures shared
+vocabulary"; the lexical figures above show the opposite, and it was corrected before merge. Shipped text uses only mechanism claims (true by construction) and ordinal
+claims that held on every vault measured ("strong is the band most likely to answer";
+"moderate is often on topic without answering").
+
+**No threshold fixes it.** A reworded question whose true answer was returned scores a
+median absolute 0.31–0.35 — `moderate`, as low as an unrelated row. Moving the moderate edge
+to 0.35–0.40 withholds 50–63% of those. A leave-one-out null is not a null (the best OTHER
+memory for a memory's own title was on topic 84% of the time), so a vault cannot self-derive
+a better edge from its own contents.
+
+**Decision: redefine the text, keep every wire value.** The predicate was always honest
+("real absolute evidence, clear of the noise band"); the implication of answerability lived
+in the surrounding text. So the change is wording only: one source of band text in
+`internal/mcp/band_claims.go`, rendered into the tool description and the guide, mirrored in
+`openapi.yaml`, pinned by `TestRelevanceBandWording_NoAnswerClaim` (COG-30 (d)). Rejected:
+renaming `moderate` (to `candidate`/`unverified`) — the enum is on three wire surfaces and an
+external parser comparing against `"moderate"` would misclassify silently, with no evidence a
+new token moves agents more than a correct definition (deferred, triggered only by a
+no-effect result in the paired wording test). Rejected: a response-level "no strong match"
+field — it equals `not any(band == "strong")`, which every client can compute, and its
+variants failed a pre-committed rule twice for the same reason, firing on reworded true
+answers (#773 `relevance_summary`: A(moderate) 10% > 0%; L3 "nothing strong and coverage < ½":
+18% > 15% of reworded questions whose answer was returned). `related` was rejected as a band
+name and as wording for the same reason the evidence gives: 28% of moderate rows were
+unrelated.
+
+**Cost.** The always-loaded `muninn_recall` description grew from 1,702 to 2,186 characters
+(+86 words); the server instructions are unchanged (1,220). A paired wording test (old vs new
+text on byte-identical frozen recall responses, invented corpus) is pre-registered in the
+design and prepared but not run; its HARM branch (correct use of a moderate gold row falls
+10 points or more) would revert the tool and guide wording and leave the doc corrections.
