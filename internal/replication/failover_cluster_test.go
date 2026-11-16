@@ -48,8 +48,12 @@ type clusterNode struct {
 
 	// accepted holds every connection the listener handed out, so stop can
 	// close them all the way a dying process closes its sockets.
-	acceptedMu sync.Mutex
-	accepted   []net.Conn
+	// acceptClosed is set by stop under the same lock, so a connection the
+	// listener returned just before it closed is not served after the node
+	// has stopped.
+	acceptedMu   sync.Mutex
+	accepted     []net.Conn
+	acceptClosed bool
 }
 
 // newCluster builds one node per id on loopback, each seeded with the others.
@@ -160,6 +164,11 @@ func (n *clusterNode) start() {
 				return // listener closed
 			}
 			n.acceptedMu.Lock()
+			if n.acceptClosed {
+				n.acceptedMu.Unlock()
+				_ = conn.Close()
+				return
+			}
 			n.accepted = append(n.accepted, conn)
 			n.acceptedMu.Unlock()
 			n.serveWG.Add(1)
@@ -190,6 +199,7 @@ func (n *clusterNode) stop() {
 	// loop serving it would read its pings until the peer itself stopped. A
 	// killed process leaves no such connection behind, so neither does this.
 	n.acceptedMu.Lock()
+	n.acceptClosed = true
 	for _, conn := range n.accepted {
 		_ = conn.Close()
 	}
