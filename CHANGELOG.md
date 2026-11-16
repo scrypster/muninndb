@@ -42,6 +42,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Memories written by evolve and by tree writes are put in the keyword index in full.
+  `muninn_evolve`, and an `upsert_mode` re-sync with changed content, gave the new version its
+  predecessor's tags but left them out of the keyword index. Recall still reached the current
+  version through the retired one, whose index entries are kept. The miss showed once the
+  retired version was pruned or hard-deleted, and in the tag search that links a new memory to
+  related ones, which could not see the current version. `muninn_remember_tree` has submitted
+  nothing to the keyword index since it moved to a single batch write in March 2026, so a
+  tree's memories could not be found by keyword, and a vault that had only ever received trees
+  was missing from the vault list. Every path that stores a new memory now builds its index job
+  in one place. Measured on a copy of real production data: in three production vaults, 36 of
+  1,143, 116 of 1,181 and 454 of 8,462 live memories carried tags with no keyword index entry.
+  Every missing entry was in the tags field, and every tagged live memory whose history records
+  an evolve was affected (29 of 29, 103 of 103, 422 of 422). History records that verb from
+  v0.10.0 on. Those vaults held no tree-written memories, so the tree half is shown by test
+  only. Memories written before this release keep the gap until the vault's keyword index is
+  rebuilt with `muninn vault reindex-fts`. Not changed here: the dream dedup pass merges tags
+  into the surviving memory without updating the keyword index.
 - Cluster: a data race between a failed send to a peer and the checks that ask whether that
   peer is connected. `PeerConn.Send` clears a connection's state under the peer's lock when a
   write fails, while `ConnManager.HasLivePeerAt` and `RegisterConnKind` read that state holding
