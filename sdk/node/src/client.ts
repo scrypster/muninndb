@@ -35,6 +35,7 @@ import type {
   WriteOptions,
   WriteResponse,
 } from "./types.js";
+import { stripTrailingSlashes } from "./url.js";
 
 const DEFAULT_BASE_URL = "http://localhost:8476";
 const DEFAULT_TIMEOUT = 30_000;
@@ -68,7 +69,7 @@ export class MuninnClient {
   private activeAbortControllers = new Set<AbortController>();
 
   constructor(options: MuninnClientOptions) {
-    this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+    this.baseUrl = stripTrailingSlashes(options.baseUrl ?? DEFAULT_BASE_URL);
     this.token = options.token;
     this.timeout = options.timeout ?? DEFAULT_TIMEOUT;
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;

@@ -18,6 +18,8 @@ import (
 
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine"
+	"github.com/scrypster/muninndb/internal/engine/activation"
+	"github.com/scrypster/muninndb/internal/metrics"
 	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 	"golang.org/x/text/unicode/norm"
@@ -231,6 +233,11 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 		req.UpsertMode = true
 		req.IdempotentID = opID // the durable upsert key (0x2F forward index)
 	}
+	// Descriptive writer facts for the write-time twin shadow log (COG-36);
+	// nothing is allocated when the check is off.
+	if s.writeTwinOn() {
+		ctx = engine.WithWriteTwinCaller(ctx, twinCallerFor(authFromContext(ctx), opID != ""))
+	}
 	resp, err := s.engine.Write(ctx, req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
@@ -269,6 +276,13 @@ func (s *MCPServer) handleRemember(ctx context.Context, w http.ResponseWriter, i
 	// entities; the created engram is the self-echo guard. Inert unless
 	// MUNINN_PROSPECTIVE=1.
 	result.Notices = s.rememberNotices(ctx, vault, req.Entities, resp.ID)
+	// Write-time twin block (COG-36): AFTER the commit, bounded, panic-safe,
+	// and absent unless mode 1 + an opted-in vault + a full-mode credential.
+	// A client-supplied embedding is never fed to the twin ring (it may come
+	// from another model), so there is nothing to wait for.
+	if len(req.Embedding) == 0 && s.writeTwinOn() {
+		result.Related = s.rememberRelated(ctx, vault, resp.ID, resp.Hint, upsertMode)
+	}
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 
@@ -357,6 +371,12 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		enrichReports = append(enrichReports, rep)
 	}
 
+	// Batch items are shadow-checked only (COG-36): no inline block, ever —
+	// the whole batch's embed would hold the lane for seconds. The caller
+	// description only enriches the shadow log.
+	if s.writeTwinOn() {
+		ctx = engine.WithWriteTwinCaller(ctx, twinCallerFor(authFromContext(ctx), false))
+	}
 	responses, errs := s.engine.WriteBatch(ctx, reqs)
 
 	type batchItemResult struct {
@@ -366,6 +386,10 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 		Status  string `json:"status"`
 		Error   string `json:"error,omitempty"`
 		Hint    string `json:"hint,omitempty"`
+		// DuplicateOf names the existing memory this item's content was
+		// deduplicated against (no new engram was written). Status stays
+		// "ok" for compatibility; this field is the signal.
+		DuplicateOf string `json:"duplicate_of,omitempty"`
 	}
 	results := make([]batchItemResult, len(reqs))
 	for i := range reqs {
@@ -373,10 +397,15 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 			results[i] = batchItemResult{Index: i, Status: "error", Error: errs[i].Error()}
 		} else {
 			results[i] = batchItemResult{Index: i, ID: responses[i].ID, Concept: reqs[i].Concept, Status: "ok"}
+			// The engine's per-item hint (e.g. "duplicate_content") was
+			// dropped here, so a deduplicated item read as a fresh write.
+			// Carry it exactly as muninn_remember does.
+			results[i].Hint = responses[i].Hint
+			if responses[i].Hint == "duplicate_content" {
+				results[i].DuplicateOf = responses[i].ID
+			}
 		}
-		if h := enrichReports[i].hint(); h != "" {
-			results[i].Hint = h
-		}
+		results[i].Hint = joinHints(results[i].Hint, enrichReports[i].hint())
 		if h := unknownTypeHint(unknownTypes[i]); h != "" {
 			if results[i].Hint != "" {
 				results[i].Hint += " "
@@ -391,34 +420,44 @@ func (s *MCPServer) handleRememberBatch(ctx context.Context, w http.ResponseWrit
 }
 
 func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
-	raw, exists := args["context"]
-	if !exists {
-		sendError(w, id, -32602, "invalid params: 'context' is required")
-		return
-	}
-	var ctxArr []any
-	switch v := raw.(type) {
-	case string:
-		// LLM clients sometimes send a bare string instead of a single-element array — coerce it.
-		ctxArr = []any{v}
-	case []any:
-		ctxArr = v
-	default:
-		sendError(w, id, -32602, fmt.Sprintf("invalid params: 'context' must be a string or array of strings, got %T", raw))
-		return
-	}
-	if len(ctxArr) == 0 {
-		sendError(w, id, -32602, "invalid params: 'context' must not be empty")
-		return
-	}
+	// The query text arrives as `query` (one plain string — the easy shape to
+	// emit; a malformed `context` array is the commonest way a recall dies
+	// inside the client before reaching us) and/or `context` (string or array
+	// of strings). At least one non-empty phrase is required; when both are
+	// given, query is one more context phrase.
+	const recallInputHelp = `pass 'query' (a string, e.g. {"query":"what we decided about caching"}) or 'context' (an array of phrases)`
 	var contexts []string
-	for _, c := range ctxArr {
-		if str, ok := c.(string); ok {
-			contexts = append(contexts, str)
+	// A JSON null is "absent" for both optional fields.
+	if raw, exists := args["context"]; exists && raw != nil {
+		var ctxArr []any
+		switch v := raw.(type) {
+		case string:
+			// LLM clients sometimes send a bare string instead of a single-element array — coerce it.
+			ctxArr = []any{v}
+		case []any:
+			ctxArr = v
+		default:
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: 'context' must be a string or array of strings, got %T — or %s", raw, recallInputHelp))
+			return
+		}
+		for _, c := range ctxArr {
+			if str, ok := c.(string); ok && strings.TrimSpace(str) != "" {
+				contexts = append(contexts, str)
+			}
+		}
+	}
+	if rawQ, exists := args["query"]; exists && rawQ != nil {
+		q, ok := rawQ.(string)
+		if !ok {
+			sendError(w, id, -32602, fmt.Sprintf("invalid params: 'query' must be a string, got %T — %s", rawQ, recallInputHelp))
+			return
+		}
+		if strings.TrimSpace(q) != "" {
+			contexts = append(contexts, q)
 		}
 	}
 	if len(contexts) == 0 {
-		sendError(w, id, -32602, "invalid params: 'context' must contain at least one string")
+		sendArgError(w, id, argRejectMissingField, "invalid params: no recall text given — "+recallInputHelp)
 		return
 	}
 
@@ -471,14 +510,26 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		return
 	}
 
+	includeWeak, _ := args["include_weak"].(bool)
+	// include_associated defaults to true: only an explicit false suppresses
+	// the response's associated block (COG-35).
+	excludeAssociated := false
+	if v, ok := args["include_associated"].(bool); ok && !v {
+		excludeAssociated = true
+	}
 	req := &mbp.ActivateRequest{
-		Vault:      vault,
-		Context:    contexts,
-		Mode:       mode,
-		Threshold:  threshold,
-		MaxResults: limit,
-		Profile:    profile,
-		ReadOnly:   readOnly,
+		ExcludeAssociated: excludeAssociated,
+		Vault:             vault,
+		Context:           contexts,
+		Mode:              mode,
+		Threshold:         threshold,
+		// weak_only abstention never overrides an explicit threshold — and
+		// the wire cannot tell an explicit 0 from "unset", so an explicit
+		// threshold argument (any value) opts out here.
+		IncludeWeak: includeWeak || thresholdSet,
+		MaxResults:  limit,
+		Profile:     profile,
+		ReadOnly:    readOnly,
 	}
 
 	// Ownership-lease work-queue visibility (#548).
@@ -585,7 +636,9 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 
 	annotate, _ := args["annotate"].(bool)
 
-	resp, err := s.engine.Activate(ctx, req)
+	// muninn_recall returns the associated block (below), so the engine may
+	// build it and record its ids as served (COG-35).
+	resp, err := s.engine.Activate(mbp.WithAssociatedRendered(ctx), req)
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
@@ -614,6 +667,14 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	result := map[string]any{
 		"memories": memories,
 		"total":    resp.TotalFound,
+		// Label pipeline: the query id is on EVERY recall response, empty and
+		// read-only included. This map is hand-built, not a mirror of
+		// mbp.ActivateResponse — TestRecallOverMCP_QueryIDAndFeedbackBlockPresent
+		// pins that it survives here.
+		"query_id": resp.QueryID,
+	}
+	if len(memories) > 0 {
+		result["feedback"] = recallFeedbackBlock(resp.QueryID, vault)
 	}
 	// SemanticDegraded: the vector signal for this recall could not be
 	// trusted (embed backend unreachable, an all-zero embedding, or a
@@ -622,6 +683,9 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	// was compromised rather than silently trusting it (principle #2).
 	if resp.SemanticDegraded {
 		result["semantic_degraded"] = true
+		if resp.SemanticDegradedReason != "" {
+			result["semantic_degraded_reason"] = resp.SemanticDegradedReason
+		}
 	}
 	// COG-29 (#764): at least two returned memories are declared to
 	// contradict each other with the conflict unresolved, so neither is
@@ -631,6 +695,16 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 	// TestRecallOverMCP_ConflictBlockAndAnnotations exists to catch.
 	if resp.Conflict != nil {
 		result["conflict"] = resp.Conflict
+	}
+	// COG-35 associated channel: association-only memories that did not make
+	// the cut, compact and bounded, NOT counted in `total` or against `limit`.
+	// Hand-built map again — a field added to mbp.ActivateResponse alone would
+	// vanish here (TestRecallOverMCP_AssociatedBlock). Absent when empty.
+	if len(resp.Associated) > 0 {
+		result["associated"] = resp.Associated
+	}
+	if resp.AssociatedOmitted > 0 {
+		result["associated_omitted"] = resp.AssociatedOmitted
 	}
 	// COG-29 amendment: the vault-wide unresolved-contradiction debt readout,
 	// on mode="recent" ONLY. That condition is not a heuristic guess at "is this
@@ -658,15 +732,55 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		result["abstained"] = true
 		result["abstained_reason"] = resp.AbstainedReason
 	}
+	if resp.AbstainedReason == activation.AbstainWeakOnly && len(memories) == 0 {
+		// weak_only is a deliberate, counted withholding, not "nothing
+		// matched": say how many and exactly how to see them.
+		result["weak_available"] = resp.WeakAvailable
+		result["hint"] = fmt.Sprintf("Every memory that came close to this query is relevance_band \"weak\" — within one doubling of "+
+			"the embedding model's noise floor, hard to tell from noise — so the %d were withheld. To see them anyway, repeat this call with "+
+			"include_weak: true and verify each one before relying on it.", resp.WeakAvailable)
+		sendResult(w, id, textContent(mustJSON(result)))
+		return
+	}
 	if len(memories) == 0 {
 		// The hint names the threshold because it is the lever that actually
-		// changes the outcome — evaluators called the old advice wrong for
-		// suggesting mode='recent' while omitting it.
-		hint := "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording. For session continuity try mode='recent', or use muninn_where_left_off."
+		// changes the outcome. It never suggests mode='recent': recent is an
+		// alias of balanced (COG-6), so it cannot rescue an empty result —
+		// and telling a mode='recent' caller to "try mode='recent'" was
+		// circular. Continuity routes to the tools that can provide it — and
+		// never to a tag filter the caller ALREADY applied: an explicit tag
+		// filter defines the candidate set and floors its rows at the default
+		// bar (COG-5 S1), so an empty tag-filtered recall most likely means
+		// nothing carrying that tag exists yet (a new user's first session).
+		const hintBase = "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording."
+		const recentNote = " mode='recent' scores exactly like mode='balanced' (engine defaults) — it cannot rescue an empty result."
+		tagFiltered := false
+		for _, f := range req.Filters {
+			if f.Field == "tags_any" || f.Field == "tags_all" || f.Field == "tag_prefix" {
+				tagFiltered = true
+			}
+		}
+		continuity := " For session continuity use muninn_where_left_off."
 		p, pErr := s.engine.GetVaultPlasticity(ctx, vault)
 		if pErr == nil && p != nil && p.MultiUser {
-			hint = "No results cleared the relevance threshold. If you expected a match, retry with a lower 'threshold' (e.g. 0.05) or rephrase closer to the stored wording. For session continuity try mode='recent' scoped to your per-user tag (this vault is shared; muninn_where_left_off is vault-global)."
+			continuity = " For session continuity recall with tags_any=[\"<your per-user tag>\"] (this vault is shared; muninn_where_left_off is vault-global)."
 		}
+		if tagFiltered {
+			// Single-user vaults keep the where_left_off route (it is not the
+			// filter the caller used); shared vaults get no route, because the
+			// only scoped one is the call that just came back empty.
+			note := " Your tag filter already scopes this recall and returns tag matches even without a content match at the default bar, so most likely nothing carrying that tag has been stored yet (expected on a first session in this vault)."
+			if pErr == nil && p != nil && p.MultiUser {
+				continuity = note
+			} else {
+				continuity = note + continuity
+			}
+		}
+		hint := hintBase
+		if mode == "recent" {
+			hint += recentNote
+		}
+		hint += continuity
 		// COG-6: never clobber an explicit threshold — only hint. An rrf vault's
 		// blended finals rarely exceed ~0.15, so a caller-supplied threshold at
 		// or above 0.01 can silently filter every result. Only fires when the
@@ -860,9 +974,32 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 	status := VaultStatus{
 		Vault:          vault,
 		TotalMemories:  resp.EngramCount,
-		Health:         "good",
+		Health:         "unknown",
+		HealthReasons:  []string{"this engine does not report embedder or worker state"},
 		EnrichmentMode: enrichMode,
 		// Plugins: populated in a future task when plugin registry is accessible via handleStatus.
+	}
+	if hr, ok := s.engine.(healthReporter); ok {
+		snap := hr.HealthSnapshot(ctx)
+		status.Storage = "unknown"
+		if s.storageWritable != nil {
+			ok := s.storageWritable()
+			snap.StorageWritable = &ok
+			status.Storage = map[bool]string{true: "writable", false: "not_writable"}[ok]
+		}
+		health, reasons, emb, workers := deriveHealth(snap)
+		status.Health = health
+		status.HealthReasons = reasons
+		status.Embedder = &emb
+		status.Workers = workers
+		status.EmbeddingsPending = snap.EmbeddingsPending
+	}
+	if lr, ok := s.engine.(labelStatsReporter); ok {
+		if ls, err := lr.LabelStats(ctx, vault); err == nil {
+			status.Labels = ls
+		} else {
+			slog.Warn("handleStatus: label stats failed", "err", err)
+		}
 	}
 	sendResult(w, id, textContent(mustJSON(status)))
 }
@@ -881,6 +1018,23 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	engramID, ok1 := args["id"].(string)
 	newContent, ok2 := args["new_content"].(string)
 	reason, ok3 := args["reason"].(string)
+	// `content` is accepted as an alias for `new_content`: it is the field name
+	// muninn_remember uses, and sending it here was the single largest cause of
+	// failed evolves in measured agent traffic (33 of 43 failures in 30 days).
+	// Accepted only when new_content is absent, and always said in the
+	// response; if BOTH are given and differ there is no safe choice, so refuse.
+	var notes []string
+	if alias, hasAlias := args["content"].(string); hasAlias && alias != "" {
+		switch {
+		case !ok2 || newContent == "":
+			newContent, ok2 = alias, true
+			notes = append(notes, "accepted `content` as `new_content` (muninn_evolve's field is `new_content`)")
+		case alias != newContent:
+			sendArgError(w, id, argRejectConflictingAlias,
+				"invalid params: 'new_content' and 'content' were both given and differ — muninn_evolve takes the replacement text in 'new_content' only; send one of them")
+			return
+		}
+	}
 	if !ok1 || !ok2 || !ok3 || engramID == "" || newContent == "" || reason == "" {
 		var missing []string
 		if !ok1 || engramID == "" {
@@ -892,7 +1046,9 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 		if !ok3 || reason == "" {
 			missing = append(missing, "'reason' (why the memory changed)")
 		}
-		sendError(w, id, -32602, fmt.Sprintf("invalid params: missing required field(s): %s", strings.Join(missing, ", ")))
+		sendArgError(w, id, argRejectMissingField, fmt.Sprintf(
+			"invalid params: missing required field(s): %s. Example: {\"id\":\"<memory id>\",\"new_content\":\"<full replacement text>\",\"reason\":\"<why it changed>\"}",
+			strings.Join(missing, ", ")))
 		return
 	}
 	var evolveEmb []float32
@@ -1007,6 +1163,7 @@ func (s *MCPServer) handleEvolve(ctx context.Context, w http.ResponseWriter, id 
 	if markupOnlyWarning != "" {
 		result.Warnings = append(result.Warnings, markupOnlyWarning)
 	}
+	result.Notes = append(notes, result.Notes...)
 	sendResult(w, id, textContent(mustJSON(result)))
 }
 
@@ -1054,12 +1211,54 @@ func (s *MCPServer) handleSession(ctx context.Context, w http.ResponseWriter, id
 		sendError(w, id, -32602, "invalid params: 'since' must be ISO 8601 (e.g. 2024-01-01T00:00:00Z)")
 		return
 	}
-	result, err := s.engine.Session(ctx, vault, since)
+	offset, okOff, errOff := intArg(args, "offset")
+	if errOff != "" || (okOff && offset < 0) {
+		sendError(w, id, -32602, "invalid params: 'offset' must be an integer >= 0")
+		return
+	}
+	limit, okLim, errLim := intArg(args, "limit")
+	if errLim != "" || (okLim && limit < 1) {
+		sendError(w, id, -32602, "invalid params: 'limit' must be an integer >= 1")
+		return
+	}
+	before, _ := args["before"].(string)
+	if raw, present := args["before"]; present && raw != nil {
+		if _, isStr := raw.(string); !isStr {
+			sendError(w, id, -32602, "invalid params: 'before' must be a string (the next_before of a previous page)")
+			return
+		}
+	}
+	result, err := s.engine.Session(ctx, vault, SessionRequest{Since: since, Before: before, Offset: offset, Limit: limit})
 	if err != nil {
 		sendError(w, id, -32000, "tool error: "+err.Error())
 		return
 	}
 	sendResult(w, id, textContent(mustJSON(result)))
+}
+
+// intArg reads an optional integer argument. JSON numbers and numeric
+// strings ("2") are accepted; null/absent is (0, false, ""); anything else is
+// an error message — never silently ignored.
+func intArg(args map[string]any, key string) (int, bool, string) {
+	raw, present := args[key]
+	if !present || raw == nil {
+		return 0, false, ""
+	}
+	switch v := raw.(type) {
+	case float64:
+		if v != float64(int(v)) {
+			return 0, false, key + " must be an integer"
+		}
+		return int(v), true, ""
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0, false, key + " must be an integer"
+		}
+		return n, true, ""
+	default:
+		return 0, false, key + " must be an integer"
+	}
 }
 
 func (s *MCPServer) handleDecide(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
@@ -1359,6 +1558,9 @@ func (s *MCPServer) handleGuide(ctx context.Context, w http.ResponseWriter, id j
 		debtSection = "\n**This vault's unresolved-contradiction state could not be read.** It is UNKNOWN, not zero — `muninn_contradictions` reads the same data directly.\n"
 	}
 	guide := generateGuide(vault, *plasticity, stats, debtSection)
+	if s.writeTwinOn() {
+		guide = strings.Replace(guide, "\n## Tips\n", writeTwinGuideSection+"\n## Tips\n", 1)
+	}
 	sendResult(w, id, textContent(guide))
 }
 
@@ -2654,18 +2856,296 @@ func stringArg(args map[string]any, key string) string {
 	return v
 }
 
+// Feedback limits (label pipeline): at most 50 groups, 20 ids per group and
+// 200 ids per call.
+const (
+	feedbackMaxGroups      = 50
+	feedbackMaxIDsPerGroup = 20
+	feedbackMaxIDsPerCall  = 200
+	// feedbackIDPlaceholder is the placeholder the recall response's
+	// copyable call carries; sent verbatim it is a clear error, never a
+	// silent no-op.
+	feedbackIDPlaceholder = "<ids that helped>"
+)
+
+// feedbackUsefulHelp is the -32602 message for a missing or non-boolean
+// `useful` — it shows the exact call, because the old handler silently turned
+// an omitted field (or the string "true") into a NEGATIVE.
+const feedbackUsefulHelp = `useful is required and must be a JSON boolean: true if the memory helped, false if it did not. Example: {"query_id":"<from muninn_recall>","engram_ids":["<id>"],"useful":true}`
+
+// handleFeedback records which recalled memories were useful. Exactly one of
+// three forms: query_id+engram_ids (recommended), groups (batch, e.g. a
+// harness drain), or engram_id (legacy — records no label). Validation is
+// SYNTACTIC only and every rule is a -32602; semantic outcomes (unknown
+// event, id not in that recall, bad MAC, repeats) are never reported — the
+// response is identical for every credential and every outcome.
 func (s *MCPServer) handleFeedback(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {
-	engramID, ok := args["engram_id"].(string)
-	if !ok || engramID == "" {
-		sendError(w, id, -32602, "engram_id is required")
+	invalid := func(field, msg string) {
+		metrics.FeedbackInvalidTotal.WithLabelValues(field).Inc()
+		sendArgError(w, id, argRejectInvalidParams, msg)
+	}
+	// A JSON null, an empty string or an empty array is ABSENT (the rule
+	// recall applies to query/context): legacy callers that send
+	// "query_id": null alongside engram_id must not be told they sent two
+	// forms.
+	hasQ, hasIDs, hasGroups, hasLegacy := presentArg(args, "query_id"), presentArg(args, "engram_ids") || presentArg(args, "ids"), presentArg(args, "groups"), presentArg(args, "engram_id")
+	forms := 0
+	for _, f := range []bool{hasQ || hasIDs, hasGroups, hasLegacy} {
+		if f {
+			forms++
+		}
+	}
+	if forms != 1 {
+		invalid("form", "send exactly one of: query_id+engram_ids, groups, or engram_id")
 		return
 	}
-	useful, _ := args["useful"].(bool)
-	if err := s.engine.RecordFeedback(ctx, vault, engramID, useful); err != nil {
-		sendError(w, id, -32000, "tool error: "+err.Error())
+	source := FeedbackSourceDirect
+	if raw, ok := args["source"]; ok && raw != nil {
+		v, isStr := raw.(string)
+		if !isStr || (v != FeedbackSourceDirect && v != FeedbackSourceHandoff) {
+			invalid("source", `source must be "direct" (the default) or "handoff"`)
+			return
+		}
+		source = v
+	}
+
+	if hasLegacy {
+		useful, ok := args["useful"].(bool)
+		if !ok {
+			invalid("useful", feedbackUsefulHelp)
+			return
+		}
+		engramID, isStr := args["engram_id"].(string)
+		if !isStr || !isMemoryID(engramID) {
+			invalid("id", "engram_id is not a memory id")
+			return
+		}
+		if err := s.engine.RecordFeedback(ctx, vault, engramID, useful); err != nil {
+			sendFeedbackError(w, id, err)
+			return
+		}
+		// The legacy echo fields (engram_id, useful) are kept: callers that
+		// read the old response must see nothing change.
+		sendResult(w, id, textContent(mustJSON(map[string]any{
+			"ok": true, "engram_id": engramID, "useful": useful,
+			"received_groups": 0, "received_ids": 1,
+			"note": "engram_id without a query_id records no label. To label, send the recall's vault and query_id with engram_ids.",
+		})))
 		return
 	}
-	sendResult(w, id, textContent(mustJSON(map[string]any{"ok": true, "engram_id": engramID, "useful": useful})))
+
+	var groups []FeedbackGroup
+	if hasGroups {
+		rawGroups, ok := args["groups"].([]any)
+		if !ok || len(rawGroups) == 0 {
+			invalid("form", "groups must be a non-empty array of groups, e.g. "+feedbackBatchShape)
+			return
+		}
+		if len(rawGroups) > feedbackMaxGroups {
+			invalid("limit", fmt.Sprintf("too many groups in one feedback call (max %d); split into several calls", feedbackMaxGroups))
+			return
+		}
+		for gi, rg := range rawGroups {
+			g, ok := rg.(map[string]any)
+			if !ok {
+				invalid("form", fmt.Sprintf("groups[%d]: must be an object like the one in %s", gi, feedbackBatchShape))
+				return
+			}
+			fg, field, msg := parseFeedbackGroup(g, fmt.Sprintf("groups[%d]: ", gi), fmt.Sprintf("groups[%d].", gi), feedbackBatchShape)
+			if msg != "" {
+				invalid(field, msg)
+				return
+			}
+			groups = append(groups, fg)
+		}
+	} else {
+		fg, field, msg := parseFeedbackGroup(args, "", "", feedbackSingleShape)
+		if msg != "" {
+			invalid(field, msg)
+			return
+		}
+		groups = []FeedbackGroup{fg}
+	}
+	total := 0
+	for _, g := range groups {
+		total += len(g.IDs)
+	}
+	if total > feedbackMaxIDsPerCall {
+		invalid("limit", fmt.Sprintf("too many ids in one feedback call (max %d); split into several calls", feedbackMaxIDsPerCall))
+		return
+	}
+	access := feedbackAccessFrom(ctx)
+	outcomes, err := s.engine.RecordFeedbackLabels(ctx, vault, groups, source, access.canRead && access.allVaults)
+	if err != nil {
+		sendFeedbackError(w, id, err)
+		return
+	}
+	resp := map[string]any{"ok": true, "received_groups": len(groups), "received_ids": total}
+	if access.canRead {
+		// A caller that can recall in this vault gains nothing from a
+		// uniform answer and needs the outcome to self-correct. A write-mode
+		// key (cannot read) keeps the uniform body above.
+		recorded, rejected := 0, 0
+		for i := range outcomes {
+			outcomes[i].Hint = feedbackHint(outcomes[i])
+			switch outcomes[i].Outcome {
+			case "recorded", "repeat":
+				recorded++
+			case "rejected":
+				rejected++
+			}
+		}
+		if outcomes == nil {
+			outcomes = []FeedbackOutcome{}
+		}
+		resp["vault"] = vault
+		resp["labelled"] = recorded
+		resp["rejected"] = rejected
+		resp["results"] = outcomes
+	}
+	sendResult(w, id, textContent(mustJSON(resp)))
+}
+
+// presentArg reports whether args[key] is present and non-empty: null, "",
+// and [] are absent.
+func presentArg(args map[string]any, key string) bool {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return false
+	}
+	switch x := v.(type) {
+	case string:
+		return x != ""
+	case []any:
+		return len(x) > 0
+	}
+	return true
+}
+
+// Feedback sources (muninn_feedback's `source`).
+const (
+	FeedbackSourceDirect  = "direct"
+	FeedbackSourceHandoff = "handoff"
+)
+
+// The exact shape of each form, quoted in id-field errors so a caller sees
+// the call it should have made. engram_ids is the canonical name everywhere;
+// ids is accepted as an alias in both forms.
+const (
+	feedbackSingleShape = `{"vault":"<vault>","query_id":"<from muninn_recall>","engram_ids":["<id>"],"useful":true}`
+	feedbackBatchShape  = `{"groups":[{"query_id":"<from muninn_recall>","engram_ids":["<id>"],"useful":true}]}`
+)
+
+// parseFeedbackGroup validates one group's shape (the single form's top-level
+// arguments, or one batch group). prefix is prepended to the useful and
+// query_id messages; idsPrefix ("" or "groups[i].") prefixes the id field in
+// id messages; shape is the form's exact example. Returns the metric field
+// and message on error.
+func parseFeedbackGroup(g map[string]any, prefix, idsPrefix, shape string) (FeedbackGroup, string, string) {
+	useful, ok := g["useful"].(bool)
+	if !ok {
+		return FeedbackGroup{}, "useful", prefix + feedbackUsefulHelp
+	}
+	qid, ok := g["query_id"].(string)
+	if !ok || !isQueryIDShape(qid) {
+		return FeedbackGroup{}, "query_id", prefix + "query_id must be the query_id returned by muninn_recall"
+	}
+	rawIDs, field, msg := feedbackIDsArg(g, idsPrefix, shape)
+	if msg != "" {
+		return FeedbackGroup{}, field, msg
+	}
+	idsPath := idsPrefix + "engram_ids"
+	if len(rawIDs) > feedbackMaxIDsPerGroup {
+		return FeedbackGroup{}, "limit", fmt.Sprintf("too many ids in %s (max %d per recall); split into several groups", idsPath, feedbackMaxIDsPerGroup)
+	}
+	ids := make([]string, 0, len(rawIDs))
+	for i, r := range rawIDs {
+		v, isStr := r.(string)
+		if isStr && v == feedbackIDPlaceholder {
+			return FeedbackGroup{}, "id", fmt.Sprintf("%s[%d] is the placeholder — replace it with the ids of the memories that actually helped", idsPath, i)
+		}
+		if !isStr || !isMemoryID(v) {
+			// Index only, never echoing the value.
+			return FeedbackGroup{}, "id", fmt.Sprintf("%s[%d] is not a memory id", idsPath, i)
+		}
+		ids = append(ids, v)
+	}
+	return FeedbackGroup{QueryID: qid, IDs: ids, Useful: useful}, "", ""
+}
+
+// feedbackIDsArg reads the memory ids from engram_ids (canonical) or ids
+// (alias). Both given and equal → accepted; both given and different → a
+// clear error. A bare string is an array of one (the tolerance recall gives
+// `context`).
+func feedbackIDsArg(g map[string]any, idsPrefix, shape string) ([]any, string, string) {
+	norm := func(key string) ([]any, bool, bool) { // value, present, wellTyped
+		v, ok := g[key]
+		if !ok || v == nil {
+			return nil, false, true
+		}
+		switch x := v.(type) {
+		case string:
+			if x == "" {
+				return nil, false, true
+			}
+			return []any{x}, true, true
+		case []any:
+			return x, len(x) > 0, true
+		}
+		return nil, true, false
+	}
+	canon, hasCanon, okCanon := norm("engram_ids")
+	alias, hasAlias, okAlias := norm("ids")
+	if !okCanon || !okAlias {
+		return nil, "id", fmt.Sprintf("%sengram_ids (or ids) must be an array of memory ids, e.g. %s", idsPrefix, shape)
+	}
+	if hasCanon && hasAlias && !sameIDList(canon, alias) {
+		return nil, "id", fmt.Sprintf("%sengram_ids and ids were both given and differ — send the memory ids once, in engram_ids, e.g. %s", idsPrefix, shape)
+	}
+	if hasCanon {
+		return canon, "", ""
+	}
+	if hasAlias {
+		return alias, "", ""
+	}
+	return nil, "id", fmt.Sprintf("%sengram_ids (or ids) is required: the ids of the memories that helped (or did not), e.g. %s", idsPrefix, shape)
+}
+
+func sameIDList(a, b []any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func isMemoryID(s string) bool {
+	_, err := storage.ParseULID(s)
+	return err == nil
+}
+
+// isQueryIDShape reports whether s is SHAPED like a recall query id (an event
+// ULID, ro2. or the legacy ro1., or ro0.). Shape only: a malformed MAC is a semantic outcome,
+// reported only in aggregate.
+func isQueryIDShape(s string) bool {
+	kind, p := auth.ClassifyQueryID(s)
+	return kind != auth.QueryIDInvalid && isMemoryID(p.ULID)
+}
+
+// sendFeedbackError maps an engine refusal without per-id detail.
+func sendFeedbackError(w http.ResponseWriter, id json.RawMessage, err error) {
+	switch {
+	case errors.Is(err, engine.ErrObserveForbidden):
+		sendError(w, id, -32001, "forbidden: observe-mode credential cannot record feedback")
+	case errors.Is(err, engine.ErrInvalidRequest):
+		sendError(w, id, -32602, err.Error())
+	default:
+		sendError(w, id, -32000, "tool error: feedback could not be recorded")
+	}
 }
 
 func (s *MCPServer) handleEntity(ctx context.Context, w http.ResponseWriter, id json.RawMessage, vault string, args map[string]any) {

@@ -64,10 +64,21 @@ type WriteResult struct {
 	Concept  string   `json:"concept"`
 	Hint     string   `json:"hint,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// Notes record how the server interpreted the call when that differs from
+	// the literal arguments — an accepted alias, a derived concept — so a
+	// tolerant write is never a silent one. Omitted when empty.
+	Notes []string `json:"notes,omitempty"`
 	// Notices are prospective-memory deliveries (THE PUSH): armed intentions
 	// whose cue entity is focal in this write's inline entities. Omitted when
 	// empty (zero token cost) and inert unless MUNINN_PROSPECTIVE=1.
 	Notices []engine.Notice `json:"notices,omitempty"`
+	// Related is the write-time twin block (COG-36): earlier memories, written
+	// in this vault within the last hour, whose vectors are very close to
+	// this one. Present only when the server runs MUNINN_WRITE_RELATED=1, the
+	// vault opted in (write_twin_inline), the credential is full-mode, and
+	// the write created a new memory. Omitted otherwise — off and shadow
+	// responses are byte-identical to a plain write.
+	Related *RelatedBlock `json:"related,omitempty"`
 }
 
 type Memory struct {
@@ -82,7 +93,20 @@ type Memory struct {
 	// SemanticSimilarityRaw). Lets an operator see the raw signal for a match
 	// that a low VectorScore made look weak or that abstained entirely.
 	VectorScoreRaw float64 `json:"vector_score_raw,omitempty"`
-	EntityBoost    float64 `json:"entity_boost,omitempty"`
+	// EntityBoost / HebbianBoost / TransitionBoost are ASSOCIATION evidence,
+	// not match strength: a rare named entity shared with a top match, a
+	// learned co-activation edge to a recently recalled memory, and a
+	// predictive-activation transition from the last recall. Under the
+	// default (ACT-R) scoring they do not change the order except to break an
+	// exact content tie (COG-35) — with a real embedder matched rows practically
+	// never tie exactly (0 in 27,000 adjacent top-10 pairs measured), so there
+	// they do not change the order of matched rows; a row whose score is 0 was
+	// injected by that
+	// association, after every matched row. HebbianBoost and TransitionBoost
+	// were computed on every row and dropped here until COG-35.
+	EntityBoost     float64 `json:"entity_boost,omitempty"`
+	HebbianBoost    float64 `json:"hebbian_boost,omitempty"`
+	TransitionBoost float64 `json:"transition_boost,omitempty"`
 	// AbsoluteScore and ContentMatch are #773. Both already existed on
 	// activation.ScoreComponents and on the MBP/REST wire, and BOTH were
 	// structurally invisible to every MCP agent — reachable only inside
@@ -100,10 +124,15 @@ type Memory struct {
 	// RelevanceBand is #773's ABSOLUTE relevance band for this row:
 	// strong | moderate | weak | filter_match | uncalibrated. Recall always
 	// sets it; muninn_read never does (this struct is shared, hence omitempty).
+	// It reports evidence against the embedding model's noise floor, not
+	// whether the row answers the query; what each band claims to a reader lives in
+	// band_claims.go (COG-30 (d)).
 	//
-	// Read it, NOT `score`: score is renormalized against this query's own best
-	// candidate, so the top row is near 1.0 on EVERY query, including one whose
-	// answer this vault does not contain. And NOT `confidence`: that is belief
+	// Read it, NOT `score` alone: on rrf/weighted_sum vaults score is relative
+	// to this query's own best candidate; on default (ACT-R) vaults it is the
+	// absolute content score that orders the rows (COG-35), but a number is
+	// not a judgement against the noise floor — the band is. And NOT
+	// `confidence`: that is belief
 	// that the stored fact is TRUE (COG-10), not a measure of how well it
 	// matched. `relevance` below is a third thing again — the engram's stored
 	// decay/pruning strength.
@@ -332,12 +361,57 @@ type ContradictionsReport struct {
 type VaultStatus struct {
 	Vault         string `json:"vault"`
 	TotalMemories int64  `json:"total_memories"`
-	Health        string `json:"health"`
+	// Health is derived, never a constant: "good" when the embedder is up (or
+	// not yet exercised) and no cognitive worker is erroring or stopped,
+	// "degraded" otherwise with one entry per cause in HealthReasons, and
+	// "unknown" when the engine cannot report health at all.
+	Health        string   `json:"health"`
+	HealthReasons []string `json:"health_reasons"`
+	// Storage: writable | not_writable | unknown (probe not wired).
+	Storage string `json:"storage,omitempty"`
+
+	Embedder *EmbedderStatus         `json:"embedder,omitempty"`
+	Workers  map[string]WorkerHealth `json:"workers,omitempty"`
+	// EmbeddingsPending is the embed backfill backlog while one is running;
+	// omitted when none is running.
+	EmbeddingsPending *int64 `json:"embeddings_pending,omitempty"`
 
 	// Enrichment capability
 	EnrichmentMode string                `json:"enrichment_mode"` // "none", "inline", "plugin:<name>"
 	Plugins        []PluginStatusSummary `json:"plugins,omitempty"`
+
+	// Labels is the label pipeline's outcome block (slice 2a): counts only,
+	// never ids. muninn_feedback's response is uniform, so this is where an
+	// operator sees whether labels are landing.
+	Labels *LabelsStatus `json:"labels,omitempty"`
 }
+
+// LabelsStatus is muninn_status's `labels` block.
+type LabelsStatus struct {
+	WindowDays int `json:"window_days"`
+	// Feedback POSTS in the window (persisted, from the day markers).
+	// verified: labels checked against the recall event; token: labels
+	// checked against a read-only query id's row tags; legacy: engram_id
+	// posts, which record no label.
+	Verified int `json:"verified"`
+	Token    int `json:"token"`
+	Legacy   int `json:"legacy"`
+	Positive int `json:"positive"`
+	Negative int `json:"negative"`
+	// memory_credential_days: distinct (memory, credential, UTC day) with
+	// feedback; bumps: how many of those earned the day's access bump.
+	MemoryCredentialDays int `json:"memory_credential_days"`
+	Bumps                int `json:"bumps"`
+	// Rejected per-reason counts are process-local (rejections store
+	// nothing): counted since rejected_since, at most window_days back.
+	Rejected      map[string]int64 `json:"rejected"`
+	RejectedSince string           `json:"rejected_since,omitempty"`
+	Note          string           `json:"note"`
+}
+
+// labelsStatusNote states what the labels block is and is not.
+const labelsStatusNote = "Feedback labels recorded by muninn_feedback, for measurement. They do not change ranking yet. " +
+	"Post counts are persisted; rejection counts are since this server process started."
 
 // PluginStatusSummary is a brief health summary for one plugin.
 type PluginStatusSummary struct {
@@ -352,10 +426,36 @@ type SessionEntry struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// SessionSummary is the muninn_session response. Writes are live memories
+// (soft-deleted ones excluded) created since Since, NEWEST first, one page of
+// them: Total counts the whole window, Returned this page, and Truncated is
+// true whenever Offset+Returned < Total — so a partial list never reads as the
+// complete answer.
+// SessionRequest is one muninn_session page request. Before (exclusive, an
+// engram ID) is the stable cursor: pass the previous page's NextBefore.
+type SessionRequest struct {
+	Since  time.Time
+	Before string
+	Offset int
+	Limit  int
+}
+
 type SessionSummary struct {
-	Writes      []SessionEntry `json:"writes"`
-	Activations int            `json:"activations"`
-	Since       time.Time      `json:"since"`
+	Writes []SessionEntry `json:"writes"`
+	// Activations counts recalls since Since that returned at least one result
+	// (read-only recalls and empty recalls leave no record; records are kept 90
+	// days). It is a measured count, not every recall call.
+	Activations int       `json:"activations"`
+	Since       time.Time `json:"since"`
+	Total       int       `json:"total"`
+	Returned    int       `json:"returned"`
+	Truncated   bool      `json:"truncated"`
+	Offset      int       `json:"offset"`
+	Limit       int       `json:"limit"`
+	// NextBefore is the ID of the last write returned, set when more remain:
+	// pass it as `before` (with the same since) for the next page. Unlike
+	// offset it is stable when new writes land between page requests.
+	NextBefore string `json:"next_before,omitempty"`
 }
 
 type ConsolidateResult struct {
@@ -430,7 +530,12 @@ type ExplainComponents struct {
 	SemanticSimilarityRaw *float64 `json:"semantic_similarity_raw"`
 	DecayFactor           *float64 `json:"decay_factor"`
 	HebbianBoost          *float64 `json:"hebbian_boost"`
-	AccessFrequency       *float64 `json:"access_frequency"`
+	// TransitionBoost / EntityBoost complete the row's ASSOCIATION evidence
+	// (COG-35): reported beside the score, they do not change recall order
+	// except to break an exact content tie on default-scoring vaults.
+	TransitionBoost *float64 `json:"transition_boost"`
+	EntityBoost     *float64 `json:"entity_boost"`
+	AccessFrequency *float64 `json:"access_frequency"`
 	// Confidence is the engram's STORED confidence. It does not depend on the
 	// query, so it is non-null whenever the engram exists — including when the
 	// query produced no score at all.
@@ -454,6 +559,10 @@ type ExplainResult struct {
 	// Threshold is the bar a default muninn_recall applies in this vault —
 	// would_return means "clears that bar", not "was a candidate".
 	Threshold float64 `json:"threshold"`
+	// WithheldReason: set ("weak_only") when the memory clears the bar but a
+	// default recall withholds the whole weak-only response; would_return is
+	// then false and Note says how to receive it.
+	WithheldReason string `json:"withheld_reason,omitempty"`
 	// Note explains, in plain language, anything the caller would otherwise
 	// have to infer from a zero. Empty on the fully-scored happy path.
 	Note string `json:"note,omitempty"`

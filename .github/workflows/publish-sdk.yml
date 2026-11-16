@@ -129,6 +129,10 @@ jobs:
   publish-php:
     name: Sync PHP SDK to muninndb-php
     runs-on: ubuntu-latest
+    # The push to muninndb-php uses its own deploy key; this job's GITHUB_TOKEN
+    # only needs to read this repository.
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v5

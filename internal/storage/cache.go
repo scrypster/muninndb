@@ -12,10 +12,19 @@ import (
 // Cache keys are scoped by vault prefix so different vaults cannot
 // serve each other's engrams even when ULIDs overlap in memory.
 // Uses sync.Map for lock-free concurrent reads (the common case).
+//
+// Fills are guarded (cache_guard.go): a value is installed only through fill,
+// with the token its reader took before reading the store, so a value read
+// before a committed write can never outlive that write's invalidation.
+//
+// count is exactly the number of live entries at quiescence: it moves only
+// when a key goes absent→present (a Swap that loaded nothing) or
+// present→absent (a LoadAndDelete/CompareAndDelete that removed something).
 type L1Cache struct {
 	data    sync.Map // string (vaultHex+":"+ULID) -> *cacheEntry
 	count   atomic.Int64
 	maxSize int
+	guard   fillGuard
 }
 
 // cacheKeyFor returns the composite cache key for a (vault, id) pair.
@@ -28,6 +37,10 @@ func cacheKeyFor(ws [8]byte, id ULID) string {
 type cacheEntry struct {
 	eng        *Engram
 	lastAccess atomic.Int64 // Unix nanoseconds
+	// token is the fill token this entry was installed under: every write
+	// whose bump is <= token is reflected in eng. A value DERIVED from this
+	// entry (GetMetadata's metaCache promotion) is filled with this token.
+	token uint64
 }
 
 // NewL1Cache creates a new L1 cache with the specified max size.
@@ -38,6 +51,60 @@ func NewL1Cache(maxSize int) *L1Cache {
 	return &L1Cache{
 		maxSize: maxSize,
 	}
+}
+
+// getEntry is Get returning the entry (for its token); stamp as Get does.
+func (c *L1Cache) getEntry(ws [8]byte, id ULID, stamp bool) (*cacheEntry, bool) {
+	val, ok := c.data.Load(cacheKeyFor(ws, id))
+	if !ok {
+		return nil, false
+	}
+	entry := val.(*cacheEntry)
+	if stamp {
+		entry.lastAccess.Store(time.Now().UnixNano())
+	}
+	return entry, true
+}
+
+// fill installs eng for (ws, id) iff no write to id has been bumped past tok
+// (R3), then re-checks and withdraws its own entry if one has (R4). See
+// fillGuard for the proof. stamp=false is the read-only path: lastAccess
+// stays 0 and a full cache skips the fill instead of evicting.
+func (c *L1Cache) fill(ws [8]byte, id ULID, eng *Engram, tok uint64, stamp bool) {
+	if !c.guard.engramClean(id, tok) {
+		return
+	}
+	if !stamp && c.count.Load() >= int64(c.maxSize) {
+		return
+	}
+	entry := &cacheEntry{eng: eng, token: tok}
+	if stamp {
+		entry.lastAccess.Store(time.Now().UnixNano())
+	}
+	key := cacheKeyFor(ws, id)
+	if _, loaded := c.data.Swap(key, entry); !loaded {
+		if n := c.count.Add(1); stamp && n > int64(c.maxSize) {
+			// Evict until back at capacity. One eviction per fill (the old
+			// shape) never recovered from concurrent evictions that picked
+			// the same victim — with an exact counter that overshoot would
+			// persist. Stops if a pass removes nothing (another goroutine is
+			// evicting the same sample).
+			for c.count.Load() > int64(c.maxSize) && c.evict() {
+			}
+		}
+	}
+	if !c.guard.engramClean(id, tok) {
+		if c.data.CompareAndDelete(key, entry) {
+			c.count.Add(-1)
+		}
+	}
+}
+
+// Invalidate is W2+W3 for one engram: bump its stripe, then drop the entry.
+// Writers reach it through PebbleStore.commitBatch, never directly.
+func (c *L1Cache) Invalidate(ws [8]byte, id ULID) {
+	c.guard.bumpEngram(id)
+	c.Delete(ws, id)
 }
 
 // Get retrieves an engram from the cache.
@@ -61,20 +128,13 @@ func (c *L1Cache) Get(ws [8]byte, id ULID) (*Engram, bool) {
 	return entry.eng, true
 }
 
-// Set stores an engram in the cache under the given vault prefix.
+// Set stores an engram in the cache under the given vault prefix, asserting
+// that eng is at least as new as every write committed so far (it fills with
+// the current token). Production read paths never call it — they fill with
+// the token taken BEFORE their store read (fill); TestNoUnguardedCacheFills
+// pins that. Tests and callers holding a just-computed value use it.
 func (c *L1Cache) Set(ws [8]byte, id ULID, eng *Engram) {
-	entry := &cacheEntry{
-		eng: eng,
-	}
-	entry.lastAccess.Store(time.Now().UnixNano())
-
-	c.data.Store(cacheKeyFor(ws, id), entry)
-	newCount := c.count.Add(1)
-
-	// Trigger eviction if needed
-	if newCount > int64(c.maxSize) {
-		c.evict()
-	}
+	c.fill(ws, id, eng, c.guard.token(), true)
 }
 
 // GetNoStamp is Get without the recency side effect: it returns the cached
@@ -98,15 +158,17 @@ func (c *L1Cache) GetNoStamp(ws [8]byte, id ULID) (*Engram, bool) {
 // its lastAccess is left at the zero value, so LastAccessNs reports 0 (not
 // cached, in the recency sense) until a REAL access — one that goes through
 // Get/Set — stamps it. See GetNoStamp's doc for why.
+//
+// It also never EVICTS: on a full cache the fill is skipped. Eviction removes
+// a warm entry, and a warm entry's lastAccess is a live recency SCORING input
+// (EngramLastAccessNs) for the next recall — so a suppressed read that evicted
+// would still change what the following identical read scores. Skipping costs
+// only a Pebble re-read of this engram later, the same as if it had been
+// evicted. The capacity check is approximate under concurrency, like Set's.
+//
+// Same freshness assertion as Set; production uses fill.
 func (c *L1Cache) SetNoStamp(ws [8]byte, id ULID, eng *Engram) {
-	entry := &cacheEntry{
-		eng: eng,
-	}
-	c.data.Store(cacheKeyFor(ws, id), entry)
-	newCount := c.count.Add(1)
-	if newCount > int64(c.maxSize) {
-		c.evict()
-	}
+	c.fill(ws, id, eng, c.guard.token(), false)
 }
 
 // Delete removes an engram from the cache for the given vault.
@@ -118,7 +180,7 @@ func (c *L1Cache) Delete(ws [8]byte, id ULID) {
 	}
 }
 
-// Len returns the approximate number of entries in the cache.
+// Len returns the number of entries in the cache (exact at quiescence).
 func (c *L1Cache) Len() int {
 	return int(c.count.Load())
 }
@@ -149,9 +211,27 @@ func (c *L1Cache) DeleteByVault(ws [8]byte) {
 	})
 }
 
+// InvalidateVault is DeleteByVault for a committed range write: every stripe
+// is bumped first, so a fill in flight from before the write is rejected.
+func (c *L1Cache) InvalidateVault(ws [8]byte) {
+	c.guard.bumpAll()
+	c.DeleteByVault(ws)
+}
+
+// InvalidateAll drops every entry after bumping every stripe.
+func (c *L1Cache) InvalidateAll() {
+	c.guard.bumpAll()
+	c.data.Range(func(k, _ any) bool {
+		if _, loaded := c.data.LoadAndDelete(k); loaded {
+			c.count.Add(-1)
+		}
+		return true
+	})
+}
+
 // evict removes one entry using approximate LRU.
 // Scans 64 random entries, evicts the one with oldest lastAccess.
-func (c *L1Cache) evict() {
+func (c *L1Cache) evict() bool {
 	const sampleSize = 64
 
 	var oldest *cacheEntry
@@ -182,6 +262,8 @@ func (c *L1Cache) evict() {
 		// concurrent evictions pick the same victim.
 		if _, loaded := c.data.LoadAndDelete(oldestID); loaded {
 			c.count.Add(-1)
+			return true
 		}
 	}
+	return false
 }

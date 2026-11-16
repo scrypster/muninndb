@@ -25,18 +25,13 @@ func assertNear(t *testing.T, name string, got, want, tol float64) {
 	}
 }
 
-// expectedBaseLevel returns the B(M) value that computeACTR will produce
-// for the given parameters, including the bLevelCap. Tests should use this
-// instead of inlining the formula so they stay in sync with production code.
+// expectedBaseLevel returns the B(M) value that computeACTR produces. Since
+// the honest clock (increment 1) that is bLevelCap for EVERY engram — the
+// parameters are kept so each call site still documents the age/access shape
+// it exercises, and so it reads as an assertion that none of them matter.
 func expectedBaseLevel(n, ageDays, d float64) float64 {
-	const ageFloorDays = 1.0 / (24.0 * 60.0)
-	effectiveAge := math.Max(ageDays, ageFloorDays)
-	bl := math.Log(n) - d*math.Log(effectiveAge/n)
-	bLevelCap := math.Log(math.Exp(actrDenominator) - 1)
-	if bl > bLevelCap {
-		bl = bLevelCap
-	}
-	return bl
+	_, _, _ = n, ageDays, d
+	return math.Log(math.Exp(actrDenominator) - 1)
 }
 
 // expectedACTRRaw computes the expected Raw score from first principles.
@@ -62,7 +57,7 @@ func TestComputeACTR_FreshEngram(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.9, 2.0, 0.0, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0.9, 2.0, 0.0, 0.0, eng, now, w, false)
 
 	contentMatch := 0.35*0.9 + 0.25*2.0
 	n := 2.0 // AccessCount(1) + 1
@@ -89,18 +84,19 @@ func TestComputeACTR_OldEngram_NoHebbian(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.7, 1.0, 0.0, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0.7, 1.0, 0.0, 0.0, eng, now, w, false)
 
 	contentMatch := 0.35*0.7 + 0.25*1.0
 	n := 1.0
-	// n=1, ageDays=30: B(M) = ln(1) - 0.5*ln(30) ≈ -1.70 — well below cap.
 	baseLevel := expectedBaseLevel(n, 30.0, 0.5)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 4.0, 0.0)
 
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
-	if sc.Raw > 0.1 {
-		t.Errorf("Old engram (no Hebbian) Raw=%.4f, expected suppressed (< 0.1)", sc.Raw)
-	}
+	// Honest clock: a 30-day-old never-accessed memory is NOT suppressed. Its
+	// prior is neutral, so Raw is exactly its content match. (Before, B(M)
+	// decayed to -1.70 here and Raw fell below 0.1 — but only in a cold
+	// process; a warm one stamped the cache and scored it at the cap.)
+	assertNear(t, "Raw == ContentMatch (neutral prior)", sc.Raw, contentMatch, 1e-12)
 }
 
 func TestComputeACTR_OldEngram_WithHebbian(t *testing.T) {
@@ -113,7 +109,7 @@ func TestComputeACTR_OldEngram_WithHebbian(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.7, 1.0, 0.8, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0.7, 1.0, 0.8, 0.0, eng, now, w, false)
 
 	contentMatch := 0.35*0.7 + 0.25*1.0
 	n := 1.0
@@ -122,8 +118,9 @@ func TestComputeACTR_OldEngram_WithHebbian(t *testing.T) {
 
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
 
-	// Hebbian must rescue the memory: compare with no-Hebbian case.
-	scNoHeb := computeACTR(0.7, 1.0, 0.0, 0.0, eng, 0, now, w, false)
+	// Hebbian still PROMOTES in ranking (the prior rises above neutral);
+	// it can no longer be needed to rescue an old memory from age decay.
+	scNoHeb := computeACTR(0.7, 1.0, 0.0, 0.0, eng, now, w, false)
 	if sc.Raw <= scNoHeb.Raw*2 {
 		t.Errorf("Hebbian rescue too weak: with=%.4f, without=%.4f, ratio=%.1fx",
 			sc.Raw, scNoHeb.Raw, sc.Raw/scNoHeb.Raw)
@@ -140,7 +137,7 @@ func TestComputeACTR_HighAccessCount(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.7, 1.5, 0.0, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0.7, 1.5, 0.0, 0.0, eng, now, w, false)
 
 	contentMatch := 0.35*0.7 + 0.25*1.5
 	n := 101.0
@@ -172,7 +169,7 @@ func TestComputeACTR_ZeroContentMatch(t *testing.T) {
 	w := actrDefaultWeights()
 
 	// High activation but zero content relevance.
-	sc := computeACTR(0, 0, 0.9, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0, 0, 0.9, 0.0, eng, now, w, false)
 
 	if sc.Raw != 0.0 {
 		t.Errorf("Zero content match: Raw=%v, want exactly 0.0", sc.Raw)
@@ -192,7 +189,7 @@ func TestComputeACTR_ConfidenceMultiplication(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, now, w, false)
 
 	assertNear(t, "Confidence", sc.Confidence, 0.5, 1e-9)
 	assertNear(t, "Final", sc.Final, sc.Raw*0.5, 1e-9)
@@ -216,7 +213,7 @@ func TestComputeACTR_ScoreClamping(t *testing.T) {
 
 	// Hebbian=1.0 pushes totalActivation well above bLevelCap — raw still exceeds 1.0.
 	// This is the case the two-pass safety net handles (Hebbian-boosted engrams).
-	sc := computeACTR(1.0, 10.0, 1.0, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(1.0, 10.0, 1.0, 0.0, eng, now, w, false)
 
 	contentMatch := 0.35*1.0 + 0.25*10.0
 	n := 51.0
@@ -243,7 +240,7 @@ func TestComputeACTR_ZeroLastAccess(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, now, w, false)
 
 	// Zero LastAccess → treated as "just now" → ageDays = ageFloor (1 minute)
 	contentMatch := 0.35*0.8 + 0.25*1.0
@@ -266,7 +263,7 @@ func TestComputeACTR_PreY2KLastAccess(t *testing.T) {
 	}
 	w := actrDefaultWeights()
 
-	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0.8, 1.0, 0.0, 0.0, eng, now, w, false)
 
 	// Pre-Y2K → treated as "just now", identical to zero-time case.
 	engZero := &storage.Engram{
@@ -275,7 +272,7 @@ func TestComputeACTR_PreY2KLastAccess(t *testing.T) {
 		AccessCount: 0,
 		LastAccess:  time.Time{},
 	}
-	scZero := computeACTR(0.8, 1.0, 0.0, 0.0, engZero, 0, now, w, false)
+	scZero := computeACTR(0.8, 1.0, 0.0, 0.0, engZero, now, w, false)
 
 	assertNear(t, "Raw (PreY2K == ZeroTime)", sc.Raw, scZero.Raw, 1e-9)
 	assertNear(t, "Final (PreY2K == ZeroTime)", sc.Final, scZero.Final, 1e-9)
@@ -297,21 +294,27 @@ func TestComputeACTR_CustomDecayAndHebScale(t *testing.T) {
 	w.ACTRDecay = 0.8
 	w.ACTRHebScale = 2.0
 
-	sc := computeACTR(0.7, 1.0, hebbianBoost, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0.7, 1.0, hebbianBoost, 0.0, eng, now, w, false)
 
 	contentMatch := 0.35*0.7 + 0.25*1.0
 	n := 4.0
-	// n=4, ageDays=10: B(M)=ln(4)-0.8*ln(10/4)≈0.65 — not capped.
 	baseLevel := expectedBaseLevel(n, 10.0, 0.8)
 	wantRaw := expectedACTRRaw(contentMatch, baseLevel, 2.0, hebbianBoost)
 
 	assertNear(t, "Raw", sc.Raw, wantRaw, 1e-6)
 
-	// Must differ from default parameters.
+	// The Hebbian scale is still live and must change Raw...
 	wDef := actrDefaultWeights()
-	scDef := computeACTR(0.7, 1.0, hebbianBoost, 0.0, eng, 0, now, wDef, false)
+	scDef := computeACTR(0.7, 1.0, hebbianBoost, 0.0, eng, now, wDef, false)
 	if math.Abs(sc.Raw-scDef.Raw) < 1e-6 {
-		t.Error("Custom params should produce different Raw than defaults")
+		t.Error("a custom ACTRHebScale should produce a different Raw than the default")
+	}
+	// ...but the decay exponent is inert (honest clock: no age input), so
+	// changing ONLY d must not move Raw by a bit.
+	wDecayOnly := actrDefaultWeights()
+	wDecayOnly.ACTRDecay = 0.8
+	if got := computeACTR(0.7, 1.0, hebbianBoost, 0.0, eng, now, wDecayOnly, false); got.Raw != scDef.Raw {
+		t.Errorf("changing only actr_decay moved Raw %.10f -> %.10f; ACT-R scoring must not read it", scDef.Raw, got.Raw)
 	}
 }
 
@@ -369,6 +372,11 @@ func TestSoftplus_NumericalStability(t *testing.T) {
 	})
 }
 
+// TestComputeACTR_DecayFactorReportedCorrectly: the reported DecayFactor is
+// the one scoring APPLIED — the neutral 1.0 at every age and stability (and
+// Recency likewise). It used to report exp(-age/stability), a factor ACT-R
+// never multiplied in, which made muninn_explain show 0.05 on rows whose
+// applied prior was the cap.
 func TestComputeACTR_DecayFactorReportedCorrectly(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
@@ -397,12 +405,11 @@ func TestComputeACTR_DecayFactorReportedCorrectly(t *testing.T) {
 			}
 			w := actrDefaultWeights()
 
-			sc := computeACTR(0.5, 0.5, 0.0, 0.0, eng, 0, now, w, false)
+			sc := computeACTR(0.5, 0.5, 0.0, 0.0, eng, now, w, false)
 
-			effectiveAgeDays := math.Max(now.Sub(lastAccess).Hours()/24.0, 1.0/(24.0*60.0))
-			wantDecay := math.Max(0.05, math.Exp(-effectiveAgeDays/float64(tt.stability)))
-
-			assertNear(t, "DecayFactor", sc.DecayFactor, wantDecay, 1e-6)
+			assertNear(t, "DecayFactor", sc.DecayFactor, 1.0, 0)
+			assertNear(t, "Recency", sc.Recency, 1.0, 0)
+			assertNear(t, "AccessFrequency", sc.AccessFrequency, 0, 0)
 		})
 	}
 }
@@ -435,7 +442,7 @@ func TestComputeACTR_FreshVault_NoDivergence(t *testing.T) {
 				AccessCount: uint32(tc.accessCount),
 				LastAccess:  now,
 			}
-			sc := computeACTR(tc.vectorScore, 0.0, 0.0, 0.0, eng, 0, now, w, false)
+			sc := computeACTR(tc.vectorScore, 0.0, 0.0, 0.0, eng, now, w, false)
 			contentMatch := w.SemanticSimilarity * tc.vectorScore
 			if sc.Raw > contentMatch+1e-9 {
 				t.Errorf("Raw=%.6f exceeds contentMatch=%.6f — base-level saturated past content gate",
@@ -457,8 +464,8 @@ func TestComputeACTR_FreshVault_Differentiated(t *testing.T) {
 	engHigh := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
 	engLow := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
 
-	scHigh := computeACTR(0.9, 1.0, 0.0, 0.0, engHigh, 0, now, w, false)
-	scLow := computeACTR(0.4, 1.0, 0.0, 0.0, engLow, 0, now, w, false)
+	scHigh := computeACTR(0.9, 1.0, 0.0, 0.0, engHigh, now, w, false)
+	scLow := computeACTR(0.4, 1.0, 0.0, 0.0, engLow, now, w, false)
 
 	if scHigh.Raw <= scLow.Raw {
 		t.Errorf("scHigh.Raw=%.6f <= scLow.Raw=%.6f: higher content match must rank above lower",
@@ -487,8 +494,8 @@ func TestComputeACTR_TwoPassSafetyNet_HebbianCanStillSaturate(t *testing.T) {
 	eng := &storage.Engram{Confidence: 1.0, Stability: 30.0, AccessCount: 5, LastAccess: now}
 
 	// Strong Hebbian (1.0) with scale 4.0 adds 4.0 to totalActivation.
-	scNoHeb := computeACTR(0.9, 1.0, 0.0, 0.0, eng, 0, now, w, false)
-	scHeb := computeACTR(0.9, 1.0, 1.0, 0.0, eng, 0, now, w, false)
+	scNoHeb := computeACTR(0.9, 1.0, 0.0, 0.0, eng, now, w, false)
+	scHeb := computeACTR(0.9, 1.0, 1.0, 0.0, eng, now, w, false)
 
 	if scNoHeb.Raw > 1.0 {
 		t.Errorf("zero-Hebbian Raw=%.6f must not exceed 1.0 after root-cause fix", scNoHeb.Raw)
@@ -526,7 +533,7 @@ func TestComputeACTR_TagPoolFloor_RescuesZeroContentMatch(t *testing.T) {
 
 	// Zero vector/FTS signal (content-unrelated tag hit), same as
 	// TestComputeACTR_ZeroContentMatch, but inTagPool=true this time.
-	sc := computeACTR(0, 0, 0.9, 0.0, eng, 0, now, w, true)
+	sc := computeACTR(0, 0, 0.9, 0.0, eng, now, w, true)
 
 	if sc.Raw <= 0.0 {
 		t.Fatalf("tag-pool candidate with zero content match: Raw=%v, want > 0 (floor must rescue it)", sc.Raw)
@@ -544,7 +551,7 @@ func TestComputeACTR_TagPoolFloor_RescuesZeroContentMatch(t *testing.T) {
 
 	// Sanity: confirm the non-tag-pool sibling is still exactly zero, i.e. the
 	// floor is scoped to inTagPool and does not leak into ordinary scoring.
-	scNotTagPool := computeACTR(0, 0, 0.9, 0.0, eng, 0, now, w, false)
+	scNotTagPool := computeACTR(0, 0, 0.9, 0.0, eng, now, w, false)
 	if scNotTagPool.Raw != 0.0 {
 		t.Errorf("non-tag-pool candidate with zero content match: Raw=%v, want exactly 0.0 (floor must not apply)", scNotTagPool.Raw)
 	}
@@ -565,8 +572,8 @@ func TestComputeACTR_TagPoolFloor_DoesNotAffectGenuineMatch(t *testing.T) {
 
 	// vectorScore=0.9, ftsScore=1.0 -> contentMatch = 0.35*0.9+0.25*tanh(1.0) ≈ 0.505,
 	// comfortably above tagMatchFloor (0.1).
-	scTagPool := computeACTR(0.9, 1.0, 0.0, 0.0, eng, 0, now, w, true)
-	scPlain := computeACTR(0.9, 1.0, 0.0, 0.0, eng, 0, now, w, false)
+	scTagPool := computeACTR(0.9, 1.0, 0.0, 0.0, eng, now, w, true)
+	scPlain := computeACTR(0.9, 1.0, 0.0, 0.0, eng, now, w, false)
 
 	assertNear(t, "Raw (genuine match, inTagPool should be a no-op)", scTagPool.Raw, scPlain.Raw, 1e-12)
 	assertNear(t, "Final (genuine match, inTagPool should be a no-op)", scTagPool.Final, scPlain.Final, 1e-12)
@@ -593,9 +600,9 @@ func TestComputeACTR_TagPoolFloor_GenuineMatchOutranksFlooredTagOnly(t *testing.
 
 	// Genuine content match: vectorScore=0.9 alone gives contentMatch=0.35*0.9=0.315,
 	// already well within the 0.5-0.9 "typical genuine match" band once FTS is added.
-	genuine := computeACTR(0.9, 2.0, 0.0, 0.0, eng, 0, now, w, false)
+	genuine := computeACTR(0.9, 2.0, 0.0, 0.0, eng, now, w, false)
 	// Tag-only hit: zero vector/FTS signal, rescued only by the floor.
-	tagOnly := computeACTR(0.0, 0.0, 0.0, 0.0, eng, 0, now, w, true)
+	tagOnly := computeACTR(0.0, 0.0, 0.0, 0.0, eng, now, w, true)
 
 	if tagOnly.Raw <= 0.0 {
 		t.Fatalf("floored tag-only candidate must score > 0, got Raw=%v", tagOnly.Raw)
@@ -627,7 +634,7 @@ func TestComputeACTR_SemanticBaseline_NearFloorCosineContributesNothing(t *testi
 
 	// Noise-band cosine (0.50), no FTS overlap: with the floor, semCal=0 so
 	// contentMatch (and therefore Raw, absent tag pool/hebbian rescue) is 0.
-	sc := computeACTR(0.50, 0.0, 0.0, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0.50, 0.0, 0.0, 0.0, eng, now, w, false)
 	if sc.Raw != 0 {
 		t.Errorf("noise-band cosine (0.50) with baseline 0.520 produced Raw=%v, want 0", sc.Raw)
 	}
@@ -645,7 +652,7 @@ func TestComputeACTR_SemanticBaseline_AboveFloorStillScores(t *testing.T) {
 	w := actrDefaultWeights()
 	w.SemanticBaseline = 0.520
 
-	sc := computeACTR(0.69, 0.0, 0.0, 0.0, eng, 0, now, w, false)
+	sc := computeACTR(0.69, 0.0, 0.0, 0.0, eng, now, w, false)
 	if sc.Raw <= 0 {
 		t.Errorf("genuine cosine (0.69) with baseline 0.520 produced Raw=%v, want > 0", sc.Raw)
 	}
@@ -663,7 +670,7 @@ func TestComputeACTR_SemanticBaseline_TagPoolFloorUnaffected(t *testing.T) {
 	w := actrDefaultWeights()
 	w.SemanticBaseline = 0.520
 
-	tagOnly := computeACTR(0.0, 0.0, 0.0, 0.0, eng, 0, now, w, true)
+	tagOnly := computeACTR(0.0, 0.0, 0.0, 0.0, eng, now, w, true)
 	if tagOnly.Raw <= 0 {
 		t.Errorf("tag-pooled candidate must still be rescued to tagMatchFloor with the semantic baseline set, got Raw=%v", tagOnly.Raw)
 	}
@@ -680,7 +687,7 @@ func TestComputeACTR_SemanticBaseline_Monotone(t *testing.T) {
 
 	prev := -1.0
 	for _, cos := range []float64{0, 0.3, 0.5, 0.520, 0.6, 0.69, 0.8, 1.0} {
-		sc := computeACTR(cos, 0.0, 0.0, 0.0, eng, 0, now, w, false)
+		sc := computeACTR(cos, 0.0, 0.0, 0.0, eng, now, w, false)
 		if sc.Raw < prev {
 			t.Fatalf("Raw score not monotone in cosine: cos=%v produced Raw=%v < previous %v", cos, sc.Raw, prev)
 		}

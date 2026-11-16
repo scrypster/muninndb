@@ -2,6 +2,7 @@ package storage
 
 import (
 	"hash/fnv"
+	"sort"
 	"sync"
 )
 
@@ -20,7 +21,37 @@ type stripedMutex struct {
 
 // For returns the mutex for the given byte key using FNV-32a hashing.
 func (s *stripedMutex) For(key []byte) *sync.Mutex {
+	return &s.mu[stripeIndex(key)]
+}
+
+func stripeIndex(key []byte) uint32 {
 	h := fnv.New32a()
 	h.Write(key)
-	return &s.mu[h.Sum32()%lockStripes]
+	return h.Sum32() % lockStripes
+}
+
+// lockMany locks the stripes covering keys, each stripe once, in ascending
+// stripe order, and returns the function that unlocks them. The fixed order
+// is what keeps two multi-stripe holders from deadlocking each other. The
+// stripes are not reentrant: the caller must hold none of them already.
+func (s *stripedMutex) lockMany(keys [][]byte) (unlock func()) {
+	idx := make([]uint32, 0, len(keys))
+	seen := make(map[uint32]struct{}, len(keys))
+	for _, k := range keys {
+		i := stripeIndex(k)
+		if _, dup := seen[i]; dup {
+			continue
+		}
+		seen[i] = struct{}{}
+		idx = append(idx, i)
+	}
+	sort.Slice(idx, func(a, b int) bool { return idx[a] < idx[b] })
+	for _, i := range idx {
+		s.mu[i].Lock()
+	}
+	return func() {
+		for j := len(idx) - 1; j >= 0; j-- {
+			s.mu[idx[j]].Unlock()
+		}
+	}
 }

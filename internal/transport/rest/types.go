@@ -107,6 +107,10 @@ type EngineAPI interface {
 	// the current (Porter2-stemmed) tokenizer. Sets the FTS version marker to 1
 	// upon completion. Returns the number of engrams re-indexed.
 	ReindexFTSVault(ctx context.Context, vaultName string) (int64, error)
+	// RebuildVectorIndex schedules a background full rebuild of the named
+	// vault's HNSW graph (served throughout; progress in admin observability
+	// as hnsw_rebuild). Returns hnsw.ErrRebuildInProgress if one is running.
+	RebuildVectorIndex(ctx context.Context, vaultName string) error
 	// ResetRepairWatermark deletes the named repair watermark(s) (#761) for
 	// vaultName so the next boot re-scans instead of trusting a prior clean
 	// pass. Node-local: neither repair pass is leader-gated or replicated.
@@ -358,8 +362,13 @@ type ExplainComponents struct {
 	SemanticSimilarityRaw float64 `json:"semantic_similarity_raw"`
 	DecayFactor           float64 `json:"decay_factor"`
 	HebbianBoost          float64 `json:"hebbian_boost"`
-	AccessFrequency       float64 `json:"access_frequency"`
-	Confidence            float64 `json:"confidence"`
+	// TransitionBoost / EntityBoost complete the association evidence
+	// (COG-35); they do not change recall order on default-scoring vaults
+	// except to break an exact content tie.
+	TransitionBoost float64 `json:"transition_boost"`
+	EntityBoost     float64 `json:"entity_boost"`
+	AccessFrequency float64 `json:"access_frequency"`
+	Confidence      float64 `json:"confidence"`
 }
 
 // ExplainResponse is returned by the explain endpoint.
@@ -372,6 +381,11 @@ type ExplainResponse struct {
 	AssocPath   []string          `json:"assoc_path"`
 	WouldReturn bool              `json:"would_return"`
 	Threshold   float64           `json:"threshold"`
+	// WithheldReason: "weak_only" when the memory clears the bar but a default
+	// recall withholds the whole weak-only response (see ActivateResponse).
+	WithheldReason string `json:"withheld_reason,omitempty"`
+	// Note explains a false would_return or an unscored engram.
+	Note string `json:"note,omitempty"`
 }
 
 // SetStateRequest is the body for PUT /api/engrams/{id}/state.

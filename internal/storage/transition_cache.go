@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"github.com/scrypster/muninndb/internal/rankorder"
 	"log/slog"
 	"math"
 	"sort"
@@ -165,8 +166,13 @@ func (tc *TransitionCache) scanSource(ws [8]byte, srcID [16]byte, topK int) []Tr
 		return true
 	})
 
+	// Equal counts break newest-first (rankorder): this list is cut at topK
+	// and feeds PAS candidate injection, which precedes recall's final sort.
 	sort.Slice(targets, func(i, j int) bool {
-		return targets[i].Count > targets[j].Count
+		if targets[i].Count != targets[j].Count {
+			return targets[i].Count > targets[j].Count
+		}
+		return rankorder.Before(targets[i].ID, targets[j].ID)
 	})
 
 	if len(targets) > topK {

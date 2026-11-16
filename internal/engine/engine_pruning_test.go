@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,20 +21,11 @@ import (
 func ptr[T any](v T) *T { return &v }
 
 // testEnvWithAuth wires up a fully functional Engine with a real auth.Store,
-// real storage and FTS, using a temporary directory cleaned up after the test.
+// real storage and FTS, on an in-memory filesystem (openMemPebble).
 // Returns the engine, the auth.Store, the pebble store, and a cleanup func.
 func testEnvWithAuth(t *testing.T) (*Engine, *auth.Store, *storage.PebbleStore, func()) {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "muninndb-pruning-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	db, err := storage.OpenPebble(dir, storage.DefaultOptions())
-	if err != nil {
-		os.RemoveAll(dir)
-		t.Fatal(err)
-	}
+	db := openMemPebble(t)
 
 	store := storage.NewPebbleStore(db, storage.PebbleStoreConfig{CacheSize: 1000})
 	ftsIdx := fts.New(db)
@@ -50,7 +40,6 @@ func testEnvWithAuth(t *testing.T) (*Engine, *auth.Store, *storage.PebbleStore, 
 	return eng, as, store, func() {
 		eng.Stop()
 		store.Close()
-		os.RemoveAll(dir)
 	}
 }
 

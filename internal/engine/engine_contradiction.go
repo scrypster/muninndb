@@ -69,6 +69,12 @@ const (
 	// and annotated, but cluster_truncated is set rather than the response
 	// silently pretending the cluster was fully enumerated.
 	contradictionMaxCluster = 8
+
+	// contradictionOverflowMax caps how many rows a response may carry beyond
+	// the caller's limit to put a disputed returned row's partner beside it
+	// (COG-29 overflow, applyContradictionCut). The overflow is at most
+	// min(limit, contradictionOverflowMax).
+	contradictionOverflowMax = 3
 )
 
 // Sides of a declared contradiction, from one row's point of view.
@@ -379,9 +385,10 @@ func (e *Engine) ContradictionDebt(ctx context.Context, vault string) (*Contradi
 	// store.GetEngrams) would otherwise stamp the L1 cache's recency clock on
 	// BOTH members of every declared pair — engrams this call never returns,
 	// on an orientation call the agent made about something else entirely.
-	// EngramLastAccessNs feeds real recency SCORING in a LATER, unrelated
-	// recall, so the readout would have been quietly making the very memories
-	// it demotes look freshly used. Suppressed UNCONDITIONALLY, not just for
+	// EngramLastAccessNs still feeds recency SCORING on weighted_sum/CGDN
+	// vaults in a LATER, unrelated recall (ACT-R and rrf no longer read it), so
+	// there the readout would quietly make the very memories it demotes look
+	// freshly used. Suppressed UNCONDITIONALLY, not just for
 	// read_only: naming a memory in a vault-wide debt report is never a user
 	// access, whatever the caller's read_only flag says.
 	ctx = storage.ContextWithNoAccessCacheStamp(ctx)
@@ -467,18 +474,21 @@ func (e *Engine) applyContradictionHonesty(
 	req *activation.ActivateRequest,
 	gate *visibilityGate,
 	now time.Time,
-) (out []activation.ScoredEngram, conflict *mbp.ConflictBlock, keepAtLeast int) {
+) (out []activation.ScoredEngram, conflict *mbp.ConflictBlock) {
 	if len(results) == 0 {
-		return results, nil, 0
+		return results, nil
 	}
 	if !e.vaultMayHaveContradictions(ctx, ws) {
-		return results, nil, 0
+		return results, nil
 	}
 
 	// Step 1 — examine window. Results are already score-descending.
 	window := len(results)
 	if req.MaxResults > 0 && window > req.MaxResults+contradictionMargin {
 		window = req.MaxResults + contradictionMargin
+	}
+	if c := recallCostFrom(ctx); c != nil {
+		c.contradictionWindow.Add(int64(window))
 	}
 	idx := make(map[storage.ULID]int, window)
 	ids := make([]storage.ULID, 0, window)
@@ -489,7 +499,7 @@ func (e *Engine) applyContradictionHonesty(
 
 	edges := e.collectContradictionEdges(ctx, ws, ids, idx)
 	if len(edges) == 0 {
-		return results, nil, 0
+		return results, nil
 	}
 
 	// Step 3 — the unresolved test. Partner liveness is resolved once, in a
@@ -536,7 +546,7 @@ func (e *Engine) applyContradictionHonesty(
 		live = append(live, ce)
 	}
 	if len(live) == 0 {
-		return results, nil, 0
+		return results, nil
 	}
 
 	// Step 4 — cluster. Union-find over the examined window, so A⊥B, B⊥C is
@@ -622,11 +632,9 @@ func (e *Engine) applyContradictionHonesty(
 	// Annotate. Cluster membership is a set of positions and the permutation
 	// above only shuffled rows WITHIN that set, so `clusters` is still correct.
 	block := &mbp.ConflictBlock{Unresolved: true, Warning: contradictionWarning}
-	memberCluster := make(map[int][]int, len(parent))
 	for _, members := range clusters {
 		truncated := len(members) > contradictionMaxCluster
 		for _, i := range members {
-			memberCluster[i] = members
 			out[i].UnresolvedContradiction = buildRowConflict(out, i, members, live, idx, partners, truncated)
 		}
 	}
@@ -651,10 +659,8 @@ func (e *Engine) applyContradictionHonesty(
 	}
 	sort.SliceStable(order, func(x, y int) bool { return out[order[x]].Score > out[order[y]].Score })
 	reordered := make([]activation.ScoredEngram, len(out))
-	pos := make(map[int]int, len(order))
 	for newPos, oldIdx := range order {
 		reordered[newPos] = out[oldIdx]
-		pos[oldIdx] = newPos
 	}
 	out = reordered
 
@@ -665,47 +671,67 @@ func (e *Engine) applyContradictionHonesty(
 		slog.Error("recall: COG-29 changed the result count — this is a bug", "before", len(results), "after", len(out))
 	}
 
-	// Cluster membership must survive truncation: if any cluster member is
-	// inside the caller's cut, all of them are. Rebuilt on POST-SORT positions
-	// — computing it against the pre-sort ranks would silently mis-report the
-	// overflow. The overflow is bounded and REPORTED: returning one side of a
-	// conflict alone is the failure this whole phase exists to remove, so the
-	// truncation yields to it, but never silently.
-	if req.MaxResults > 0 {
-		sorted := make(map[int][]int, len(memberCluster))
-		for oldIdx, members := range memberCluster {
-			np := make([]int, 0, len(members))
-			for _, m := range members {
-				np = append(np, pos[m])
-			}
-			sort.Ints(np)
-			sorted[pos[oldIdx]] = np
+	// The cut to the caller's limit, and the bounded partner overflow, happen
+	// later in applyContradictionCut — once, on the final list.
+
+	return out, block
+}
+
+// applyContradictionCut cuts a recall's final list to `limit` (COG-29
+// overflow, as amended for content-first order). For each row INSIDE the cut,
+// in order, whose unresolved declared contradiction names a partner that is
+// in the list but OUTSIDE the cut, that partner — and only that partner,
+// never the rows ranked between them — is appended after the cut, so an agent
+// that reads the disputed row also receives the side disputing it. At most
+// one partner per returned row; a partner added this way does not pull in ITS
+// partners (no chaining); the overflow is at most min(limit,
+// contradictionOverflowMax). A partner the cap keeps out is still NAMED on
+// the row (`with`), with partner_in_results=false. partner_in_results is
+// recomputed here against what the caller actually receives.
+//
+// Before this, the cut was stretched to the partner's POSITION: a disputed
+// top row whose partner ranked 5th returned 5 rows at limit 1 (three of them
+// unrelated), and a chain of ten contradicts edges returned 8 rows at limit 1.
+// The old rule was unreachable while phase 6 cut at `limit` first; the
+// deferred cut of content-first order (COG-35) made it live.
+func applyContradictionCut(rows []activation.ScoredEngram, limit int) (out []activation.ScoredEngram, overflow int) {
+	if limit <= 0 || len(rows) <= limit {
+		out = rows
+	} else {
+		out = append(make([]activation.ScoredEngram, 0, limit+contradictionOverflowMax), rows[:limit]...)
+		budget := limit
+		if budget > contradictionOverflowMax {
+			budget = contradictionOverflowMax
 		}
-		limit := req.MaxResults
-		for p, members := range sorted {
-			if p >= req.MaxResults {
+		beyond := make(map[storage.ULID]int, len(rows)-limit)
+		for i := limit; i < len(rows); i++ {
+			beyond[rows[i].Engram.ID] = i
+		}
+		added := make(map[storage.ULID]bool, budget)
+		for i := 0; i < limit && overflow < budget; i++ {
+			c := rows[i].UnresolvedContradiction
+			if c == nil || added[c.With] {
 				continue
 			}
-			for _, m := range members {
-				if m+1 > limit {
-					limit = m + 1
-				}
+			if j, ok := beyond[c.With]; ok {
+				out = append(out, rows[j])
+				added[c.With] = true
+				overflow++
 			}
 		}
-		if maxLimit := req.MaxResults + contradictionMaxCluster - 1; limit > maxLimit {
-			limit = maxLimit
-		}
-		if limit > len(out) {
-			limit = len(out)
-		}
-		keepAtLeast = limit
-		block.AdjacencyOverflow = limit - req.MaxResults
-		if block.AdjacencyOverflow < 0 {
-			block.AdjacencyOverflow = 0
+	}
+	present := make(map[storage.ULID]bool, len(out))
+	for i := range out {
+		present[out[i].Engram.ID] = true
+	}
+	for i := range out {
+		if c := out[i].UnresolvedContradiction; c != nil && c.PartnerInResults != present[c.With] {
+			cc := *c
+			cc.PartnerInResults = present[c.With]
+			out[i].UnresolvedContradiction = &cc
 		}
 	}
-
-	return out, block, keepAtLeast
+	return out, overflow
 }
 
 // pruneConflictBlock drops pairs whose endpoints all fell outside the caller's

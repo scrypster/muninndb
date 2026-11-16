@@ -39,7 +39,7 @@ The exact mechanism, from `internal/engine/activation/engine.go` (origin/develop
   (`internal/engine/engine.go:2308`, COG-6 block). Observed on the clone: no returned result below final ≈ 0.107.
 
 **So the leak is:** noise cosine 0.50–0.60 → contentMatch 0.30–0.36 → × fresh prior ≈ 1.0 (and sometimes
-× transition/hebbian boosts, e.g. the jet-engines query scored a flaky-factory memory at **final = 1.0**
+× transition/hebbian boosts, e.g. the jet-engines query scored an unrelated in-vault memory (R16) at **final = 1.0**
 via `transition_boost = 1`) → sails over the 0.1 bar.
 
 **Recency floating:** ACT-R has no additive recency term — recency in `score_components` is
@@ -59,34 +59,35 @@ recency/decay reachable without content — that is #711's named deferral (2) an
 
 ### 2a. Corpus-top cosine (what recall actually sees), via REST activate
 
-Top `semantic_similarity` over the whole vault per query:
+Top `semantic_similarity` over the whole vault per query. The relevant queries were the production
+vault's own memory titles; they are withheld here and labelled R01–R18 — the numbers are the evidence.
 
 | Out-of-domain nonsense (18) | top sem | Relevant (18) | top sem |
 |---|---|---|---|
-| photosynthesis in ferns | 0.559 | quarterly rate table by tier | 0.620 |
-| color of the sky at dawn | 0.487 | service-api validation layer boundaries | 0.688 |
-| how to tune a violin | 0.487 | reciprocity agreement handling | 0.679 |
-| quarterly ballet recital | **0.596** | remittance processing flow | 0.642 |
-| jet engines produce thrust | 0.560 | JATC fund rules | **0.586** |
-| sourdough starter | 0 (FTS-only) | market recovery fund calculation | 0.674 |
-| hiking in Patagonia | abstained | dues checkoff remittance | 0 (FTS-only) |
-| chocolate cake frosting | abstained | PHPStan worktree test failures | 0.788 |
-| arctic terns migration | 0.564 | Vuetify theme configuration | 0.790 |
-| knit a wool sweater | 0.497 | ConfirmDialog singleton pattern | 0.779 |
-| medieval castle sieges | 0.574 | 1919 validator quarter corrections | 0.639 |
-| vitamin D deficiency | 0.533 | per-capita billing | 0 (FTS-only) |
-| snorkeling Maldives | abstained | employer portal onboarding | 0.682 |
-| change a car tire | 0 (FTS-only) | ledger reconciliation | 0 (FTS-only) |
-| Ottoman Empire history | 0.500 | API versioning for service-api | 0 (FTS-only) |
-| watercolor techniques | 0.508 | factory hardcoded attr flakiness | 0.602 |
-| training a puppy | 0 (FTS-only) | member classification tiers | 0.664 |
-| lunar eclipse viewing | abstained | audit score calculation | 0.739 |
+| photosynthesis in ferns | 0.559 | R01 | 0.620 |
+| color of the sky at dawn | 0.487 | R02 | 0.688 |
+| how to tune a violin | 0.487 | R03 | 0.679 |
+| quarterly ballet recital | **0.596** | R04 | 0.642 |
+| jet engines produce thrust | 0.560 | R05 | **0.586** |
+| sourdough starter | 0 (FTS-only) | R06 | 0.674 |
+| hiking in Patagonia | abstained | R07 | 0 (FTS-only) |
+| chocolate cake frosting | abstained | R08 | 0.788 |
+| arctic terns migration | 0.564 | R09 | 0.790 |
+| knit a wool sweater | 0.497 | R10 | 0.779 |
+| medieval castle sieges | 0.574 | R11 | 0.639 |
+| vitamin D deficiency | 0.533 | R12 | 0 (FTS-only) |
+| snorkeling Maldives | abstained | R13 | 0.682 |
+| change a car tire | 0 (FTS-only) | R14 | 0 (FTS-only) |
+| Ottoman Empire history | 0.500 | R15 | 0 (FTS-only) |
+| watercolor techniques | 0.508 | R16 | 0.602 |
+| training a puppy | 0 (FTS-only) | R17 | 0.664 |
+| lunar eclipse viewing | abstained | R18 | 0.739 |
 
 - Nonsense corpus-top band: **0.487–0.596** (n=11 with sem>0).
 - Relevant corpus-top band: **0.586–0.790** (n=13 with sem>0; the sem=0 rows matched via FTS and need no
   semantic rescue — that is the #711 channel working).
 - **They separate, but the tails nearly touch:** worst noise 0.596 (ballet) vs weakest sem-carrying
-  genuine 0.586 (JATC — which also has strong FTS corroboration) / 0.602 (factory flakiness).
+  genuine 0.586 (R05 — which also has strong FTS corroboration) / 0.602 (R16).
 
 **Query length is not the discriminator:** a 15-word nonsense sentence tops at 0.581 vs. one-word
 "photosynthesis" 0.565, "ballet" 0.451 — the noise band is length-stable.
@@ -175,11 +176,11 @@ reembed). §2b shows why stored-vector pairwise stats alone cannot be the source
 | quarterly ballet recital | 0.596 → 0.086 → 0.052 | **abstains** (< 0.1) ✓ |
 | jet engines (worst leak, was final=1.0) | 0.560 → 0.005 → 0.003; transition boost now multiplies ≈0 | **abstains** ✓ |
 | medieval sieges / arctic terns / vitamin D / Ottoman / watercolor / sweater / sky | 0.50–0.574 → ≤0.036 → ≤0.022 | **abstain** ✓ |
-| audit score calculation | 0.739 → 0.410 → 0.246 (+fts) | returns ✓ |
-| ConfirmDialog singleton | 0.779 → 0.500 → 0.300 (+fts) | returns ✓ |
-| service-api validation boundaries | 0.688 → 0.294 → 0.176 | returns ✓ |
-| remittance processing flow (weakest sem-only) | 0.642 → 0.190 → 0.114 | returns ✓ (thin margin — see risks) |
-| JATC fund rules | 0.586 → 0.063 → 0.038 **+ 0.4·fts** | returns via FTS corroboration ✓ |
+| R18 | 0.739 → 0.410 → 0.246 (+fts) | returns ✓ |
+| R10 | 0.779 → 0.500 → 0.300 (+fts) | returns ✓ |
+| R02 | 0.688 → 0.294 → 0.176 | returns ✓ |
+| R04 (weakest sem-only) | 0.642 → 0.190 → 0.114 | returns ✓ (thin margin — see risks) |
+| R05 | 0.586 → 0.063 → 0.038 **+ 0.4·fts** | returns via FTS corroboration ✓ |
 | Nordlys direct ("Nordlys telemetry Kafka") | 0.831 → 0.617 → 0.370 + 0.4·1.0 | returns ✓ |
 | Nordlys paraphrase (0.624, sem-only, stale) | → 0.149 → 0.089 alone; ×3.17 prior when hebbian-linked (measured heb 0.97) → 0.28 | **unchanged**: today it never enters the K=57 pool; with corroboration it survives the floor; without, it dies at 0.089<0.1 — zero net regression, named residual |
 

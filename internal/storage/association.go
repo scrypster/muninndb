@@ -115,11 +115,29 @@ func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, s
 		return err
 	}
 	// #771: refuse rather than silently replace a different RelType edge
-	// collision at the same (src, weight, dst) key.
+	// collision at the same (src, weight, dst) key. The check and the write
+	// are held together by the pair's guard lock (STO-15): two concurrent
+	// writers of different RelTypes — the novelty worker's automatic `refines`
+	// and a caller's declared `supersedes` on the same pair — used to both
+	// pass the check, and the later commit erased the earlier edge.
+	mu := ps.assocGuardLocks.For(assocPairLockKey(wsPrefix, src, dst))
+	mu.Lock()
+	defer mu.Unlock()
 	if err := checkRelTypeCollision(ps.db, wsPrefix, [16]byte(src), assoc.Weight, [16]byte(dst), assoc.RelType); err != nil {
 		return err
 	}
 	return ps.writeAssociationUnguarded(ctx, wsPrefix, src, dst, assoc)
+}
+
+// assocPairLockKey is the assocGuardLocks key for one (vault, src, dst) pair.
+// It ignores weight on purpose: the stripe only has to cover the exact
+// (src, weight, dst) key, and one key per pair keeps the locking simple.
+func assocPairLockKey(ws [8]byte, src, dst ULID) []byte {
+	k := make([]byte, 0, 40)
+	k = append(k, ws[:]...)
+	k = append(k, src[:]...)
+	k = append(k, dst[:]...)
+	return k
 }
 
 // writeAssociationUnguarded is WriteAssociation's body without the STO-12
@@ -147,7 +165,7 @@ func (ps *PebbleStore) writeAssociationUnguarded(ctx context.Context, wsPrefix [
 	binary.BigEndian.PutUint32(weightBuf[:], math.Float32bits(assoc.Weight))
 	batch.Set(keys.AssocWeightIndexKey(wsPrefix, [16]byte(src), [16]byte(dst)), weightBuf[:], nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	// AFTER the commit, never before. See noteContradictsWrite: a bump that
@@ -211,6 +229,7 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 	// Phase 3: open ONE iterator covering the entire 0x03|wsPrefix range (snapshot-aware).
 	lower := keys.AssocFwdRangeStart(wsPrefix)
 	upper := keys.AssocFwdRangeEnd(wsPrefix) // nil means unbounded (all-0xFF workspace)
+	tok := ps.readFillToken(ctx)             // before NewIter (cache_guard.go R1)
 	rawIter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
 		LowerBound: lower,
 		UpperBound: upper,
@@ -280,7 +299,7 @@ func (ps *PebbleStore) GetAssociations(ctx context.Context, wsPrefix [8]byte, id
 			return nil, fmt.Errorf("assoc scan: %w", err)
 		}
 
-		ps.assocCache.Add(assocCacheKey(wsPrefix, id), &assocCacheEntry{assocs: assocs, truncated: truncated})
+		ps.fillAssoc(wsPrefix, id, &assocCacheEntry{assocs: assocs, truncated: truncated}, tok)
 		// COPY (#820). `assocs` is now the cache entry's backing array; the hit
 		// path above copies for the same reason, and this function's own doc
 		// comment promises it. Returning `assocs` published a live view of the
@@ -415,6 +434,7 @@ func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte
 		return bytes.Compare(sorted[i][:], sorted[j][:]) < 0
 	})
 
+	tok := ps.readFillToken(ctx) // before NewIter (cache_guard.go R1)
 	iter, err := ps.pebbleReader(ctx).NewIter(&pebble.IterOptions{
 		LowerBound: keys.AssocRevRangeStart(wsPrefix),
 		UpperBound: keys.AssocRevRangeEnd(wsPrefix),
@@ -477,7 +497,7 @@ func (ps *PebbleStore) rankingReverseEdges(ctx context.Context, wsPrefix [8]byte
 		if err := iter.Error(); err != nil {
 			return nil, fmt.Errorf("ranking reverse scan: %w", err)
 		}
-		ps.revAssocCache.Add(assocCacheKey(wsPrefix, id), &revAssocCacheEntry{assocs: assocs, truncated: truncated})
+		ps.fillRevAssoc(wsPrefix, id, &revAssocCacheEntry{assocs: assocs, truncated: truncated}, tok)
 		n := len(assocs)
 		if maxPerNode > 0 && n > maxPerNode {
 			n = maxPerNode
@@ -593,6 +613,7 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 	prefix := keys.AssocFwdKey(wsPrefix, [16]byte(id), 1.0, [16]byte{})
 	prefix = prefix[0 : 1+8+16] // trim to just the prefix portion
 
+	tok := ps.cache.guard.token() // live read: before the iterator (cache_guard.go R1)
 	rawIter, err := PrefixIterator(ps.db, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("prefix iterator: %w", err)
@@ -641,7 +662,7 @@ func (ps *PebbleStore) associationsForOne(wsPrefix [8]byte, id ULID, maxPerNode 
 		return nil, fmt.Errorf("associationsForOne scan: %w", err)
 	}
 	// Populate cache — expirable.LRU enforces the TTL automatically.
-	ps.assocCache.Add(ck, &assocCacheEntry{assocs: assocs, truncated: truncated})
+	ps.fillAssoc(wsPrefix, id, &assocCacheEntry{assocs: assocs, truncated: truncated}, tok)
 	return assocs, nil
 }
 
@@ -870,7 +891,7 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	binary.BigEndian.PutUint32(wiBuf[:], math.Float32bits(weight))
 	batch.Set(keys.AssocWeightIndexKey(wsPrefix, [16]byte(a), [16]byte(b)), wiBuf[:], nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -1061,7 +1082,7 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 		batch.Set(keys.AssocWeightIndexKey(update.WS, update.Src, update.Dst), wiBuf[:], nil)
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -1250,7 +1271,7 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 				_ = batch.Delete(keys.AssocWeightIndexKey(wsPrefix, e.src, e.dst), nil)
 			}
 		}
-		if err := batch.Commit(pebble.NoSync); err != nil {
+		if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 			return fmt.Errorf("decay assoc chunk commit: %w", err)
 		}
 		ps.replicateBatch(batch)
@@ -1526,6 +1547,46 @@ func (ps *PebbleStore) GetReverseAssociations(ctx context.Context, wsPrefix [8]b
 	return results, nil
 }
 
+// SupersedersOf returns the distinct engrams holding a RelSupersedes edge onto
+// id. Unlike GetReverseAssociations it is NOT capped: the 0x04 reverse index
+// orders a node's incoming edges by weight, then source, with no relation in
+// the key, so any capped scan can be starved — a node with >= cap incoming
+// max-weight edges of another relation hides its supersedes edge entirely.
+// Cost is one full pass over id's incoming edges, decoding only the relation;
+// the write paths that need an exact answer (evolve's fork guard) pay it.
+func (ps *PebbleStore) SupersedersOf(ctx context.Context, wsPrefix [8]byte, id ULID) ([]ULID, error) {
+	iter, err := PrefixIterator(ps.db, keys.AssocRevPrefixForID(wsPrefix, [16]byte(id)))
+	if err != nil {
+		return nil, fmt.Errorf("SupersedersOf prefix iter: %w", err)
+	}
+	defer iter.Close()
+	seen := map[ULID]bool{}
+	var out []ULID
+	for iter.First(); iter.Valid(); iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		k := iter.Key()
+		if len(k) < 45 {
+			continue
+		}
+		relType, _, _, _, _, _, _ := decodeAssocValue(iter.Value())
+		if relType != RelSupersedes {
+			continue
+		}
+		var src ULID
+		copy(src[:], k[29:45])
+		if !seen[src] {
+			seen[src] = true
+			out = append(out, src)
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("SupersedersOf scan: %w", err)
+	}
+	return out, nil
+}
+
 // contradictionValueLen is the current 0x0A value length: the partner ULID
 // followed by the detection time in Unix nanoseconds.
 // Layout: partner(16) | detectedAtUnixNano(8).
@@ -1660,7 +1721,7 @@ func (ps *PebbleStore) FlagContradiction(ctx context.Context, wsPrefix [8]byte, 
 	// Also write reverse for quick lookup
 	batch.Set(contraKeyRev, encodeContradictionValue(aBytes, detectedAt), nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return false, fmt.Errorf("commit batch: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -1684,7 +1745,7 @@ func (ps *PebbleStore) ResolveContradiction(ctx context.Context, wsPrefix [8]byt
 	batch.Delete(contraKeyAB, nil)
 	batch.Delete(contraKeyBA, nil)
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("resolve contradiction: %w", err)
 	}
 	ps.replicateBatch(batch)

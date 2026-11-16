@@ -86,6 +86,9 @@ var expectedToolClassification = map[string]toolClass{
 	"muninn_remember":       classAdditive,
 	"muninn_remember_batch": classAdditive,
 	"muninn_remember_tree":  classAdditive,
+	// Label pipeline (SEC-15 amendment): a label is a new child row of a
+	// recall event; it never modifies or deletes a memory.
+	"muninn_feedback": classAdditive,
 
 	// ── Mutating (write-mode reachable; observe and append refused) ────────
 	"muninn_apply_enrichment": classMutating,
@@ -103,7 +106,6 @@ var expectedToolClassification = map[string]toolClass{
 	"muninn_entity_state":          classMutating,
 	"muninn_entity_state_batch":    classMutating,
 	"muninn_evolve":                classMutating,
-	"muninn_feedback":              classMutating,
 	"muninn_forget":                classMutating,
 	"muninn_intend":                classMutating,
 	"muninn_link":                  classMutating,
