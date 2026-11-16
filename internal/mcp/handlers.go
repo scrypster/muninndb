@@ -736,9 +736,9 @@ func (s *MCPServer) handleRecall(ctx context.Context, w http.ResponseWriter, id 
 		// weak_only is a deliberate, counted withholding, not "nothing
 		// matched": say how many and exactly how to see them.
 		result["weak_available"] = resp.WeakAvailable
-		result["hint"] = fmt.Sprintf("Nothing in this vault matched strongly: the %d memories that came closest are all relevance_band \"weak\" "+
-			"(neighbours of the query, not answers), so they were withheld. To see them anyway, repeat this call with include_weak: true "+
-			"and verify each one before relying on it.", resp.WeakAvailable)
+		result["hint"] = fmt.Sprintf("Every memory that came close to this query is relevance_band \"weak\" — within one doubling of "+
+			"the embedding model's noise floor, hard to tell from noise — so the %d were withheld. To see them anyway, repeat this call with "+
+			"include_weak: true and verify each one before relying on it.", resp.WeakAvailable)
 		sendResult(w, id, textContent(mustJSON(result)))
 		return
 	}

@@ -82,6 +82,20 @@ func denyReadOnlyMutation(ctx context.Context) error {
 	return nil
 }
 
+// denyWriteOnlyRead rejects write-mode (ingest-only) keys on RPCs that return
+// stored memory or vault state: Read, Activate, Stat, ListVaults, Subscribe,
+// and AdjustConfidence (which returns an engram's confidence).
+// It is the gRPC counterpart of REST's auth.WriteOnlyGuard and of MCP's
+// write-mode tool gate. Which RPCs are reads is pinned against the service
+// descriptor by TestEveryRPCHasAModeClass, and the behaviour for every mode
+// and every RPC by TestCredentialModeMatrix.
+func denyWriteOnlyRead(ctx context.Context) error {
+	if auth.WriteOnlyFromContext(ctx) {
+		return status.Error(codes.PermissionDenied, "write-only key cannot read")
+	}
+	return nil
+}
+
 // resolveRequestVault validates the vault named in an RPC request against the
 // authenticated context and returns the vault to hand to the engine. It mirrors
 // the REST layer's validateResolvedVault so gRPC enforces the same vault model:
@@ -354,6 +368,9 @@ func (s *Server) BatchWrite(ctx context.Context, req *pb.BatchWriteRequest) (*pb
 
 // Read implements the Read RPC.
 func (s *Server) Read(ctx context.Context, req *pb.ReadRequest) (*pb.ReadResponse, error) {
+	if err := denyWriteOnlyRead(ctx); err != nil {
+		return nil, err
+	}
 	vault, err := s.resolveRequestVault(ctx, req.Vault)
 	if err != nil {
 		return nil, err
@@ -402,6 +419,9 @@ func (s *Server) BatchForget(ctx context.Context, req *pb.BatchForgetRequest) (*
 
 // Stat implements the Stat RPC.
 func (s *Server) Stat(ctx context.Context, req *pb.StatRequest) (*pb.StatResponse, error) {
+	if err := denyWriteOnlyRead(ctx); err != nil {
+		return nil, err
+	}
 	vault, err := s.resolveRequestVault(ctx, req.Vault)
 	if err != nil {
 		return nil, err
@@ -421,6 +441,9 @@ func (s *Server) Stat(ctx context.Context, req *pb.StatRequest) (*pb.StatRespons
 func (s *Server) ListVaults(ctx context.Context, req *pb.ListVaultsRequest) (*pb.ListVaultsResponse, error) {
 	if ctx.Value(auth.ContextAPIKey) == nil {
 		return nil, status.Error(codes.Unauthenticated, "ListVaults requires an API key")
+	}
+	if err := denyWriteOnlyRead(ctx); err != nil {
+		return nil, err
 	}
 	resp, err := s.engine.ListVaults(ctx, req)
 	if err != nil {
@@ -456,6 +479,11 @@ func (s *Server) AdjustConfidence(ctx context.Context, req *pb.AdjustConfidenceR
 	if err := denyReadOnlyMutation(ctx); err != nil {
 		return nil, err
 	}
+	// The response carries the resulting confidence, and with delta 0 nothing
+	// changes: for an ingest-only key that is a read (SEC-19).
+	if err := denyWriteOnlyRead(ctx); err != nil {
+		return nil, err
+	}
 	vault, err := s.resolveRequestVault(ctx, req.Vault)
 	if err != nil {
 		return nil, err
@@ -472,6 +500,9 @@ func (s *Server) AdjustConfidence(ctx context.Context, req *pb.AdjustConfidenceR
 // Activate implements the Activate RPC (server-streaming).
 func (s *Server) Activate(req *pb.ActivateRequest, stream pb.MuninnDB_ActivateServer) error {
 	ctx := stream.Context()
+	if err := denyWriteOnlyRead(ctx); err != nil {
+		return err
+	}
 	vault, err := s.resolveRequestVault(ctx, req.Vault)
 	if err != nil {
 		return err
@@ -497,6 +528,9 @@ func (s *Server) Activate(req *pb.ActivateRequest, stream pb.MuninnDB_ActivateSe
 // messages until the client disconnects or the subscription TTL expires.
 func (s *Server) Subscribe(stream pb.MuninnDB_SubscribeServer) error {
 	ctx := stream.Context()
+	if err := denyWriteOnlyRead(ctx); err != nil {
+		return err
+	}
 
 	req, err := stream.Recv()
 	if err != nil {

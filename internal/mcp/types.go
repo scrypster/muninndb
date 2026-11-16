@@ -124,11 +124,14 @@ type Memory struct {
 	// RelevanceBand is #773's ABSOLUTE relevance band for this row:
 	// strong | moderate | weak | filter_match | uncalibrated. Recall always
 	// sets it; muninn_read never does (this struct is shared, hence omitempty).
+	// It reports evidence against the embedding model's noise floor, not
+	// whether the row answers the query; what each band claims to a reader lives in
+	// band_claims.go (COG-30 (d)).
 	//
 	// Read it, NOT `score` alone: on rrf/weighted_sum vaults score is relative
 	// to this query's own best candidate; on default (ACT-R) vaults it is the
 	// absolute content score that orders the rows (COG-35), but a number is
-	// not a judgement against this vault's noise floor — the band is. And NOT
+	// not a judgement against the noise floor — the band is. And NOT
 	// `confidence`: that is belief
 	// that the stored fact is TRUE (COG-10), not a measure of how well it
 	// matched. `relevance` below is a third thing again — the engram's stored

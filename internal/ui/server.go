@@ -369,10 +369,13 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:   "muninn_session",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
+		Name:     "muninn_session",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   s.tlsConfig != nil,
+		MaxAge:   -1,
 	})
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})

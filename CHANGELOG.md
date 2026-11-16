@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Relevance band descriptions corrected. A band reports how much evidence a memory has
+  against your query, measured against the embedding model's noise floor — not whether it answers
+  you. `moderate` is now documented as a candidate to verify, not an established answer, and
+  a recall that is not withheld is no longer described as proof the vault holds an answer: a
+  fluent question about something the vault does not hold often still returns `moderate`
+  rows. Changed in the `muninn_recall` tool description, the guide, the weak-only hint and
+  the REST `relevance_band`/`abstained_reason` descriptions. No wire value, ranking, score or
+  abstention change.
 - A restored memory is findable by keyword again. Forgetting a memory drops
   its keyword-search postings and `muninn_restore` never put them back, so a
   restored memory could only be found by meaning, never by its words. Restore
@@ -96,6 +104,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `muninndb_recall_embed_timeout_total{vault}`.
 
 ### Security
+
+- A blank session-secret file no longer turns admin authentication off or lets a session
+  cookie be forged. If `auth_secret` in the data directory was empty (a first-run write that
+  failed part-way, a truncated restore, a placeholder), the server read it as a valid
+  zero-length secret, and with a zero-length secret the REST and UI admin routes were served
+  without a session. If it held only whitespace or only zero bytes, admin routes still asked
+  for a session, but the signing key was one anyone could guess, so a session cookie could
+  be forged — for admin routes and for any locked vault. A blank file is now replaced with a
+  fresh secret at startup (logged at WARN), the secret is written to a temporary file and
+  renamed into place so a failed write cannot leave a blank one, and an empty secret neither
+  issues nor accepts a session token. A secret file that exists but cannot be read is now a
+  startup error instead of being overwritten. To check yours, run
+  `LC_ALL=C tr -d ' \t\r\n\v\f\000' < <data-dir>/auth_secret | wc -c`: if it prints 0, the file was
+  blank and the server was affected. A file size above zero is not enough to rule it out.
+
+- gRPC now refuses read calls from an ingest-only key. A `write`-mode API key is meant to
+  store memories and read nothing; REST and MCP enforced that, the gRPC handlers for Read,
+  Activate, Stat, ListVaults and Subscribe did not check the mode at all, and
+  AdjustConfidence returned an engram's confidence to such a key. All six now return
+  `PermissionDenied` ("write-only key cannot read") before the engine is called. Every RPC
+  is classified as a handshake, a read, a mutation or both, and a test checks every
+  credential mode against every RPC, so a new RPC cannot be added without that decision.
 
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
