@@ -111,6 +111,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `muninndb_embed_lane_wait_seconds{lane}`,
   `muninndb_recall_embed_timeout_total{vault}`.
 
+- A cluster leader can no longer crash with `panic: pebble: closed` because a
+  replication stream outlived storage at shutdown. Stopping the cluster
+  coordinator cancelled its streams without waiting for them, so a stream
+  already past its cancellation check — or one started for a follower that
+  reconnected while the leader was still shutting down — read the replication
+  log after storage had closed. Shutdown now waits for every stream to exit
+  before storage closes, and starts none once it has begun. Found as an
+  intermittent failure of the project's own test suite; hitting it on a
+  running cluster needs unlucky timing and nobody has reported it. Other
+  cluster background work (the periodic log prune, for one) is still not
+  waited for at shutdown.
+
 ### Security
 
 - A blank session-secret file no longer turns admin authentication off or lets a session

@@ -88,6 +88,11 @@ type NetworkStreamer struct {
 	log     *ReplicationLog
 	peer    *PeerConn
 	lastSeq uint64
+
+	// beforeRead, when non-nil, runs after the cancellation check and before
+	// each log read. Test seam: it holds a streamer at the one point where a
+	// cancel can no longer stop the read that follows.
+	beforeRead func()
 }
 
 // NewNetworkStreamer creates a NetworkStreamer that will send entries to peer
@@ -125,6 +130,9 @@ func (s *NetworkStreamer) Stream(ctx context.Context) error {
 		for {
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if s.beforeRead != nil {
+				s.beforeRead()
 			}
 
 			entries, err := s.log.ReadSince(s.lastSeq, 1000)

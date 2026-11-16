@@ -69,6 +69,12 @@ func newTestCoordinator(t *testing.T, role string) (*ClusterCoordinator, *pebble
 	}
 
 	coord := NewClusterCoordinator(cfg, repLog, applier, epochStore)
+	// Tear down in production order (cmd/muninn/server.go): stop the
+	// coordinator, which joins its streamer goroutines, then close the store.
+	// Cleanups run last-in-first-out, so this runs before the db.Close above.
+	// Closing the store under a live streamer is "panic: pebble: closed" in a
+	// goroutine no test owns, which takes the whole package run down.
+	t.Cleanup(func() { _ = coord.Stop() })
 	return coord, db
 }
 
