@@ -523,8 +523,8 @@ func (s *Server) writerLoop(conn net.Conn, writeCh chan *Frame, errCh chan error
 	errCh <- failed
 }
 
-// noteStalled counts a connection closed for taking none of its replies, and
-// logs it, at most once per stallWarnInterval.
+// noteStalled counts a connection closed because its socket took no reply data
+// for a whole stall timeout, and logs it, at most once per stallWarnInterval.
 func (s *Server) noteStalled(conn net.Conn, stall time.Duration) {
 	closed := s.stalledClosed.Add(1)
 	now := time.Now().UnixNano()
@@ -532,8 +532,10 @@ func (s *Server) noteStalled(conn net.Conn, stall time.Duration) {
 	if now-last < int64(stallWarnInterval) || !s.stallLastWarn.CompareAndSwap(last, now) {
 		return
 	}
-	slog.Warn("mbp: closed a connection that accepted none of its replies",
-		"remote", conn.RemoteAddr().String(), "for", stall.String(), "closed_so_far", closed)
+	// "No progress", not "read nothing": the peer may have taken megabytes
+	// earlier and be reading still (see the measurements at the top).
+	slog.Warn("mbp: closed a connection whose socket took no reply data for the stall timeout",
+		"remote", conn.RemoteAddr().String(), "stall_timeout", stall.String(), "closed_so_far", closed)
 }
 
 // enqueue queues one reply frame for the connection's writer, counted against

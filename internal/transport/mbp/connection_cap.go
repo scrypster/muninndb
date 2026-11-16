@@ -57,7 +57,9 @@ const (
 	connectionMemoryShare = 4
 
 	// fallbackMaxConnections is the cap when the process has no memory limit
-	// to derive one from: what the derivation gives at the default 4 GiB.
+	// to derive one from: the default at the default 4 GiB. That is not the
+	// number the derivation gives there, which is 14; it is the floor,
+	// minDerivedConnections, which replaces it.
 	fallbackMaxConnections = 16
 
 	// minDerivedConnections keeps a server with a very small memory limit

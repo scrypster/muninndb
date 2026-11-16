@@ -319,6 +319,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup error instead of being overwritten. To check yours, run
   `LC_ALL=C tr -d ' \t\r\n\v\f\000' < <data-dir>/auth_secret | wc -c`: if it prints 0, the file was
   blank and the server was affected. A file size above zero is not enough to rule it out.
+  **Who is affected:** a server whose `auth_secret` file was blank, in every release from
+  v0.1.0 to v0.11.0. Every one of them reads the file as it is and treats an empty
+  secret as "no admin sign-in needed". A server whose file holds a real secret, which is
+  what a normal first run writes, was never affected.
 
 - gRPC now refuses read calls from an ingest-only key. A `write`-mode API key is meant to
   store memories and read nothing; REST and MCP enforced that, the gRPC handlers for Read,
@@ -327,6 +331,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PermissionDenied` ("write-only key cannot read") before the engine is called. Every RPC
   is classified as a handshake, a read, a mutation or both, and a test checks every
   credential mode against every RPC, so a new RPC cannot be added without that decision.
+  **Who is affected:** anyone who has issued a `write`-mode key to a holder who can reach
+  the gRPC port (8477), in releases v0.3.15-alpha to v0.11.0. `write`-mode keys exist
+  from v0.3.15-alpha, and no release checks for them on gRPC. `ListVaults` is in gRPC
+  from v0.8.0. What such a key could read was its own vault.
 
 - MBP now enforces API-key modes. The native binary protocol (port 8474) authenticated a key
   and recorded its mode, but nothing checked the mode before acting on a request. Over MBP an
@@ -334,8 +342,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key that already had a memory), link two memories (including marking them as
   contradicting each other) and soft- or hard-delete them. A `write` (ingest-only) key could
   read a memory by id, run recall across the vault and read statistics. In both cases the
-  memories the key could reach were those of its own vault. REST, gRPC and MCP were not
-  affected, and `append` keys were already kept from changing or deleting existing memories
+  memories the key could reach were those of its own vault. REST and MCP were not
+  affected. gRPC had the ingest-only half of this, which the entry above covers. And
+  `append` keys were already kept from changing or deleting existing memories
   by the engine, on every transport.
   **Who is affected:** anyone whose MBP port (8474) can be reached by the holder of an
   `observe` or `write` key, in every release up to v0.11.0. The MBP transport has never
@@ -531,8 +540,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error `4012` ("server is at its connection limit") and closed. The default comes from
   the server's memory limit. It is the number of connections that fit in a quarter of
   that limit if every one of them holds as much as a connection can, which is 69 MB (see
-  the next entry). That is 16 at the default `MUNINN_MEM_LIMIT_GB=4`, 59 at 16 and 237
-  at 64. Set `MUNINN_MBP_MAX_CONNECTIONS` to choose the number yourself. The server logs
+  the next entry), and never fewer than 16. At the default `MUNINN_MEM_LIMIT_GB=4` only 14
+  fit, so the default there is the minimum, 16. It is 59 at 16 and 237 at 64. Set
+  `MUNINN_MBP_MAX_CONNECTIONS` to choose the number yourself. The server logs
   the limit in force when it starts, as `max_connections` on the `mbp: listening` line.
   **If you run more than 16 MBP clients at once, set it before you upgrade, or the extra
   clients will be refused.** Refusals are logged at WARN
@@ -559,9 +569,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   if there is no room, so a slow client is served at the speed it reads and every request
   it sent is answered. The server stops reading requests from a connection whose replies
   are backing up, and from one that has 4 MB of requests in progress. And a connection
-  whose socket accepts no reply data at all for 15 seconds is closed. That last limit is
-  on making no progress, not on how long a reply takes. With this, one connection can
-  make the server hold at most 69
+  whose socket accepts no reply data at all for 15 seconds is closed. There is no limit
+  on how long one reply may take, but a slow reader can still be closed: see "A slow
+  reader can be disconnected" below. With this, one connection can make the server hold
+  at most 69
   MB of requests and replies: 20 MB of requests in progress, 32 MB of decompressed
   payloads and 17 MB of unread replies. The same test now holds 16 MB where it held 183.
   **What a client will notice:** a `PING` may carry at most 1,024 bytes. A larger one is
@@ -693,36 +704,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key now return one name. `openapi.yaml` describes the scoping, and documents the
   response as the JSON array the server has always sent (SEC-25).
 
-- The CLI no longer sends an admin session to a server that did not issue it. The CLI
-  signs in at one address and sends admin requests to another, and the two were set
-  separately: `MUNINNDB_UI_URL` for the sign-in and `MUNINNDB_ADMIN_URL` for the
-  requests. With only `MUNINNDB_ADMIN_URL` set, the sign-in stayed at this machine's
-  own server. So `muninn vault ...`, `muninn api-key ...` and the other admin commands
-  signed in to the LOCAL server and then sent its admin session cookie to the other
-  server with every request. The interactive shell did the same for `show vaults`.
+- The CLI no longer sends an admin session, or the default admin credentials, to a
+  server they do not belong to. The CLI signs in at one address and sends admin requests
+  to another, and the two were set separately: `MUNINNDB_UI_URL` for the sign-in and
+  `MUNINNDB_ADMIN_URL` for the requests. With only `MUNINNDB_ADMIN_URL` set, the sign-in
+  stayed at this machine's own server. So `muninn vault ...`, `muninn api-key ...` and
+  the other admin commands signed in to the LOCAL server and then sent its admin session
+  cookie to the other server with every request. The interactive shell did the same for
+  `show vaults`. With both variables set to different hosts the session issued at one
+  was sent to the other in the same way. And every admin command tried the default
+  admin credentials first, at whatever address it was pointed.
   **Who is affected:** anyone who has run the CLI with `MUNINNDB_ADMIN_URL` pointing at
-  another machine and without `MUNINNDB_UI_URL`, while a MuninnDB server was running
-  on their own machine that accepted the sign-in (the default credentials are tried
-  first). Releases v0.5.1 to v0.11.0 for the admin commands, v0.6.1 to v0.11.0 for the
-  shell. `-h <host>` was not affected.
-  **What the other server learned:** a session cookie that is valid as admin on your
-  local server for up to 24 hours. It is of use only to someone who can also reach your
-  local server's ports, which listen on loopback unless you changed that. Over plain
-  `http://` it was also visible to anyone on the path.
+  one host while the sign-in went to another: either without `MUNINNDB_UI_URL`, while a
+  MuninnDB server was running on their own machine that accepted the sign-in, or with
+  `MUNINNDB_UI_URL` set to a different host from `MUNINNDB_ADMIN_URL`. Releases v0.5.1
+  to v0.11.0 for the admin commands, v0.6.1 to v0.11.0 for the shell. `-h <host>` was
+  not affected.
+  **What the other server learned:** a session cookie that is valid as admin on the
+  server that issued it for up to 24 hours. When that is your local server, it is of
+  use only to someone who can also reach your local server's ports, which listen on
+  loopback unless you changed that. Over plain `http://` it was also visible to anyone
+  on the path.
   **What to do:** upgrade. A session expires 24 hours after it was issued, and nothing
-  in this release or before it revokes one sooner. If this applies to you and your
-  local server can be reached from the network, limit what can reach it until the last
-  such session has expired.
+  in this release or before it revokes one sooner. If this applies to you and the
+  server that issued the session can be reached from the network, limit what can reach
+  it until the last such session has expired.
   **What changed:** with only `MUNINNDB_ADMIN_URL` set, the CLI now signs in at the same
   host on the next port, as `-h` always has. Set `MUNINNDB_UI_URL` if your server's
-  console is somewhere else. A session cookie is sent only to the host that issued it,
-  or to the API host you named together with the sign-in address by setting both
-  variables. The default credentials are tried without being asked only on this
-  machine. On another machine the shell asks for credentials, and the listing commands
-  say that none were sent (SEC-31).
+  console is somewhere else: it is the address the CLI signs in at. A session cookie is
+  sent only to the host that issued it. The one exception is a server whose console and
+  API are on two host names: if you set both variables, and both addresses are on this
+  machine or both are on other machines, the session goes to the API host too, and the
+  CLI prints a line on stderr saying so. An address on this machine is never treated as
+  the same server as one on another machine.
+  **What a user of a remote server must now pass:** credentials. The default admin
+  credentials are tried without being asked only when the sign-in address is on this
+  machine. Against another machine, pass `-u <user> -p` (or `--password=<pw>`) to
+  `muninn vault ...`, `muninn api-key ...` and the other admin commands. Without them
+  the command asks for a password instead of trying the default one. The listing
+  commands do not ask: they print the short list and say no credentials were sent. The
+  interactive shell asks for a user name and password and exits with status 1 if the
+  sign-in fails. `muninn init` does not apply the vault behaviour setting on another
+  machine and prints the command to run instead (SEC-31).
 
-- Subscriptions over MBP now belong to the connection that made them, and no longer use
-  up a vault's subscription limit. Over MBP, any connection could cancel any subscription
+- A subscription can no longer be cancelled or crowded out from MBP, and one gRPC
+  connection can no longer take a vault's whole subscription limit. Over MBP, any
+  connection could cancel any subscription
   on the server by naming its id, including one in a vault its key was not for. A client
   could choose its own subscription id, and choosing one already used in another vault
   replaced that vault's subscription in the server's records. A subscription stayed
