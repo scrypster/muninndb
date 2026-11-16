@@ -64,6 +64,13 @@ type batchAssocEdge struct {
 	ws  [8]byte
 	src ULID
 	dst ULID
+	// guarded marks an edge queued through WriteAssociation, the batch path the
+	// STO-15 collision guard covers. weight and relType are what it queued,
+	// kept so Commit can repeat the check under the pair's guard lock. The
+	// inline edges WriteEngram queues were never guarded and are not re-checked.
+	guarded bool
+	weight  float32
+	relType RelType
 }
 
 // batchPendingItem holds the data required for post-commit vault counter and
@@ -262,8 +269,41 @@ func (b *pebbleStoreBatch) WriteAssociation(ctx context.Context, ws [8]byte, src
 	var weightBuf [4]byte
 	binary.BigEndian.PutUint32(weightBuf[:], math.Float32bits(assoc.Weight))
 	b.batch.Set(keys.AssocWeightIndexKey(ws, [16]byte(src), [16]byte(dst)), weightBuf[:], nil)
-	b.assocEdges = append(b.assocEdges, batchAssocEdge{ws: ws, src: src, dst: dst})
+	b.assocEdges = append(b.assocEdges, batchAssocEdge{ws: ws, src: src, dst: dst, guarded: true, weight: assoc.Weight, relType: assoc.RelType})
 	return nil
+}
+
+// recheckAssocCollisionsLocked takes the guard lock of every (vault, src, dst)
+// pair this batch queued an edge for and repeats the STO-15 RelType-collision
+// check against committed state. On success the locks are held and the caller
+// releases them after the commit; on a collision they are released here and
+// the batch must not be committed.
+//
+// lockMany takes the stripes in ascending order, so two batches cannot deadlock
+// each other, and the direct PebbleStore.WriteAssociation path holds a single
+// stripe. Edges queued in THIS batch are not visible to the check (same scope
+// as the queue-time check: callers queue at most one edge per pair).
+func (b *pebbleStoreBatch) recheckAssocCollisionsLocked() (unlock func(), err error) {
+	var lockKeys [][]byte
+	for _, e := range b.assocEdges {
+		if e.guarded {
+			lockKeys = append(lockKeys, assocPairLockKey(e.ws, e.src, e.dst))
+		}
+	}
+	if len(lockKeys) == 0 {
+		return func() {}, nil
+	}
+	unlock = b.ps.assocGuardLocks.lockMany(lockKeys)
+	for _, e := range b.assocEdges {
+		if !e.guarded {
+			continue
+		}
+		if err := checkRelTypeCollision(b.ps.db, e.ws, [16]byte(e.src), e.weight, [16]byte(e.dst), e.relType); err != nil {
+			unlock()
+			return nil, err
+		}
+	}
+	return unlock, nil
 }
 
 // batchQueuedEngram reports whether an engram with this (ws, id) has already
@@ -513,6 +553,14 @@ func (b *pebbleStoreBatch) Commit() error {
 	if err != nil {
 		return err // not committed; Discard still releases the batch
 	}
+	// STO-15: the collision check ran when each edge was QUEUED. Repeat it now
+	// against what has committed since, and hold the pairs' guard locks through
+	// the commit and the replication append, so nothing lands in between.
+	unlockAssocGuard, err := b.recheckAssocCollisionsLocked()
+	if err != nil {
+		unlockMutations()
+		return err // not committed; Discard still releases the batch
+	}
 	b.committed = true
 
 	syncOption := pebble.Sync
@@ -531,6 +579,7 @@ func (b *pebbleStoreBatch) Commit() error {
 	}
 	err = b.ps.commitBatch(b.batch, commitOpt)
 	if err != nil {
+		unlockAssocGuard()
 		unlockMutations()
 		return fmt.Errorf("batch commit: %w", err)
 	}
@@ -547,6 +596,7 @@ func (b *pebbleStoreBatch) Commit() error {
 		testCommittedPoint("BatchCommit", m.ws, m.id)
 	}
 	b.ps.replicateBatch(b.batch)
+	unlockAssocGuard()
 	unlockMutations()
 	var syncErr error
 	if locked && syncOption == pebble.Sync {
