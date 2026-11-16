@@ -349,6 +349,27 @@ func TestHandleAdminLogout_ClearsSessionCookie(t *testing.T) {
 	if resp["status"] != "ok" {
 		t.Errorf("expected status=ok, got %q", resp["status"])
 	}
+
+	// The clearing cookie carries the same attributes as the one login set, so
+	// it is never the one place the session cookie name appears without them.
+	var cleared *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "muninn_session" {
+			cleared = c
+		}
+	}
+	if cleared == nil {
+		t.Fatal("logout set no muninn_session cookie")
+	}
+	if cleared.Value != "" || cleared.MaxAge >= 0 {
+		t.Errorf("logout cookie value=%q MaxAge=%d; want empty and negative", cleared.Value, cleared.MaxAge)
+	}
+	if !cleared.HttpOnly {
+		t.Error("logout cookie is not HttpOnly")
+	}
+	if cleared.SameSite != http.SameSiteStrictMode {
+		t.Errorf("logout cookie SameSite = %v; want Strict", cleared.SameSite)
+	}
 }
 
 // --- broadcastStats via SSE integration ---
