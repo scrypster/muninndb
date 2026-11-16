@@ -404,7 +404,12 @@ The calling LLM already has full conversation context when it decides to remembe
 ### Optional fields on `muninn_remember` / `muninn_remember_batch`:
 - **summary** — one-line summary (skips background summarization)
 - **entities** — `[{"name": "PostgreSQL", "type": "database"}]` (skips entity extraction)
-- **relationships** — `[{"target_id": "01ABC...", "relation": "depends_on", "weight": 0.9}]`
+- **relationships** — `[{"target_id": "01ABC...", "relation": "depends_on", "weight": 0.9}]`.
+  On a write that creates a memory, a `supersedes` relationship is a declaration, not only an
+  edge: it does what `muninn_link(relation="supersedes")` does — the target is retired from
+  present-tense recall, atomically with the write — and the write is refused (nothing stored)
+  if the target is missing, forgotten, or already has a successor (the error names the current
+  version), or if the credential is append-mode.
 - **type** / **type_label** — memory classification
 
 ### Inline Enrichment Modes (per vault)

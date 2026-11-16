@@ -397,8 +397,8 @@ func (b *pebbleStoreBatch) SupersedeEngram(ctx context.Context, ws [8]byte, id U
 // ("stamp-valid-until") is the direct method's, written after the commit and
 // only when the stamp applied.
 //
-// No production caller yet: the inline-supersedes write path that needs it is
-// the next increment.
+// Its caller is the inline-supersedes write path (COG-38,
+// Engine.commitNewEngramSuperseding).
 func (b *pebbleStoreBatch) StampValidUntil(ctx context.Context, ws [8]byte, id ULID, until time.Time, onlyIfOpen bool) error {
 	st := &pendingStamp{ws: ws, id: id, until: until}
 	if err := b.mutateEngram(ctx, ws, id, "stamp valid_until", func(eng *Engram) {
