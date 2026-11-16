@@ -127,10 +127,13 @@ final class ClientTests: XCTestCase {
             XCTAssertEqual(request.httpMethod, "POST")
             XCTAssertTrue(request.url!.path.hasSuffix("/api/engrams/batch"))
 
+            // The shape the server sends (internal/transport/rest/server.go,
+            // handleBatchWrite): index and status on every item, id on a stored
+            // item, error on a refused one. There is no created_at.
             return self.mockResponse(json: [
                 "results": [
-                    ["id": "eng-1", "created_at": 1700000000],
-                    ["id": "eng-2", "created_at": 1700000001],
+                    ["index": 0, "id": "eng-1", "status": "ok"],
+                    ["index": 1, "id": "eng-2", "status": "ok"],
                 ],
             ])
         }
@@ -141,8 +144,33 @@ final class ClientTests: XCTestCase {
         ]
         let result = try await client.writeBatch(vault: "default", engrams: engrams)
         XCTAssertEqual(result.results.count, 2)
+        XCTAssertEqual(result.results[0].index, 0)
         XCTAssertEqual(result.results[0].id, "eng-1")
+        XCTAssertEqual(result.results[0].status, "ok")
+        XCTAssertNil(result.results[0].error)
         XCTAssertEqual(result.results[1].id, "eng-2")
+    }
+
+    func testWriteBatchWithARefusedItem() async throws {
+        MockURLProtocol.requestHandler = { _ in
+            return self.mockResponse(json: [
+                "results": [
+                    ["index": 0, "id": "eng-1", "status": "ok"],
+                    ["index": 1, "status": "error", "error": "content is required"],
+                ],
+            ])
+        }
+
+        let engrams = [
+            WriteOptions(concept: "c1", content: "content1"),
+            WriteOptions(concept: "c2", content: ""),
+        ]
+        let result = try await client.writeBatch(vault: "default", engrams: engrams)
+        XCTAssertEqual(result.results.count, 2)
+        XCTAssertEqual(result.results[1].index, 1)
+        XCTAssertNil(result.results[1].id)
+        XCTAssertEqual(result.results[1].status, "error")
+        XCTAssertEqual(result.results[1].error, "content is required")
     }
 
     // MARK: - Read

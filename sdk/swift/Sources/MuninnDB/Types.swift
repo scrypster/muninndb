@@ -88,14 +88,16 @@ public struct WriteResponse: Codable, Sendable {
 
 // MARK: - Batch Write
 
+/// One item of a batch write, in the order the items were sent.
+///
+/// `status` is `"ok"` for a stored item, which then has an `id`, and
+/// `"error"` for a refused one, which then has an `error`. The other items of
+/// the batch are stored either way.
 public struct BatchWriteResult: Codable, Sendable {
-    public let id: String
-    public let createdAt: Int64
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case createdAt = "created_at"
-    }
+    public let index: Int
+    public let id: String?
+    public let status: String
+    public let error: String?
 }
 
 public struct BatchWriteResponse: Codable, Sendable {
