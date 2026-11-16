@@ -106,6 +106,15 @@ type PebbleStore struct {
 	// casLocks serialises the read-compare-write of CompareAndSet per engram,
 	// closing the lifecycle-state TOCTOU and backing the ownership lease.
 	casLocks stripedMutex
+	// assocGuardLocks makes the STO-15 RelType-collision check and the write
+	// that follows it one step, per (vault, src, dst) pair. Without it two
+	// writers of different RelTypes on the same key both pass the check and
+	// the later commit silently replaces the earlier edge. Lock order: INNER
+	// to casLocks (a batch commit holds its engram stripes first). While it
+	// is held only leaf locks are taken — Pebble, the replication log, the
+	// fill guard, the retired set and the caches — none of which re-enters an
+	// association write.
+	assocGuardLocks stripedMutex
 	// archiveBloom is an in-memory Bloom filter over src engram IDs that have
 	// archived associations in the 0x25 namespace. Gates the 0x25 prefix scan
 	// during BFS traversal: if the filter says "no," skip the scan entirely.

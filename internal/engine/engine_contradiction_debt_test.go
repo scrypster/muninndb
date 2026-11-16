@@ -50,11 +50,11 @@ func debtPairFixture(t *testing.T, eng *Engine, vault, subject, factA, factB str
 		t.Fatal(err)
 	}
 	ws := eng.Store().ResolveVaultPrefix(vault)
-	// Weight deliberately distinct from the auto-detected contradiction marker's
-	// weight. The contradiction worker emits its own (different-RelType) detected
-	// edge between these near-identical facts; if both edges land at the same
-	// (src, weight, target) the assoc_reltype_guard rejects the second write and
-	// the fixture flakes. The readout counts Declared edges regardless of weight.
+	// Weight 0.5 cannot collide with RelRefines (rel_type 16). The novelty
+	// worker writes RelRefines at Jaccard similarity, which is always >= 0.70
+	// (novelty.Threshold), so a declared edge at 0.5 never shares its
+	// (src, weight, target) key. The readout counts Declared edges regardless
+	// of weight.
 	if err := eng.Store().WriteAssociation(ctx, ws, idB, idA, &storage.Association{
 		TargetID: idA, RelType: storage.RelContradicts, Weight: 0.5, Confidence: 1,
 		CreatedAt: declaredAt,

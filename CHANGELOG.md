@@ -25,10 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   afterwards. Per-vault `write_twin_threshold` overrides the model hint (bge-small: 0.93).
 - A metric for memories stored without a summary:
   `muninndb_engine_writes_missing_field_total{vault,field}` counts writes that stored with an
-  empty `summary` at write time. Divided by `muninndb_engine_writes_total` it shows how fast a
-  vault accumulates them, which is otherwise silent on a deployment with no summarize stage.
-  Vaults with `inline_enrichment: background_only` are not counted, since a background stage
-  owns the summary there. Tree writes and the upsert-evolve path are not covered.
+  empty `summary` at write time, which is otherwise silent on a deployment with no summarize
+  stage. The per-vault series show which vault such writes come from.
+  `muninndb_engine_writes_total` has no vault label, so a ratio is server-wide only: sum the
+  new metric across vaults before dividing. Vaults with `inline_enrichment: background_only`
+  are not counted, since a background stage owns the summary there, but their writes are in
+  that total, so the ratio reads low on a server that has such vaults. Tree writes and the
+  upsert-evolve path are not covered.
 
 ### Fixed
 
@@ -58,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every cache on a snapshot reset, and a cache fill that raced the commit can no longer install
   the old value (STO-22). Reported by likesjx (#869), who also wrote the first fix and verified
   it on a live cluster (#878).
+
+- Two links written at the same moment can no longer silently replace one another. Two
+  links between the same pair of memories at the same weight share one storage key, whatever
+  their relation. A guard refuses the second, but it checked and then wrote with nothing
+  holding the two steps together. When the write-time near-duplicate check linked a new
+  memory to an older one with `refines` at the same moment a caller declared `supersedes` on
+  that pair, both writes were told OK and one edge was lost. When `supersedes` was the one
+  lost, recall presented the superseded memory as the current version. The check and the
+  write are now one step on both write paths: the later writer gets the existing collision
+  error. This closes the concurrent case only. A later weight update on the pair can still
+  land one relation on another's key, and a declared link can still be refused because an
+  automatic one reached the key first; both need the relation in the key (#880).
 
 - Relevance band descriptions corrected. A band reports how much evidence a memory has
   against your query, measured against the embedding model's noise floor — not whether it answers
@@ -135,6 +150,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `muninndb_embed_lane_timeouts_total{lane}`,
   `muninndb_embed_lane_wait_seconds{lane}`,
   `muninndb_recall_embed_timeout_total{vault}`.
+
+- A cluster leader can no longer crash with `panic: pebble: closed` because a
+  replication stream outlived storage at shutdown. Stopping the cluster
+  coordinator cancelled its streams without waiting for them, so a stream
+  already past its cancellation check — or one started for a follower that
+  reconnected while the leader was still shutting down — read the replication
+  log after storage had closed. Shutdown now waits for every stream to exit
+  before storage closes, and starts none once it has begun. Found as an
+  intermittent failure of the project's own test suite; hitting it on a
+  running cluster needs unlucky timing and nobody has reported it. Other
+  cluster background work (the periodic log prune, for one) is still not
+  waited for at shutdown.
 
 ### Security
 

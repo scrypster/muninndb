@@ -144,17 +144,27 @@ type Engine struct {
 	// WARN so a busy vault doesn't spam logs once per query.
 	warnedUnknownEmbedModels sync.Map // model string -> struct{}{}
 	// Feature subsystems (all optional, nil-safe)
-	autoAssoc            *autoassoc.Worker         // write-time automatic tag-based associations
-	neighborWorker       *autoassoc.NeighborWorker // semantic neighbor auto-linking
-	goalLinkWorker       *autoassoc.GoalLinkWorker // goal-aware semantic auto-linking
-	noveltyDet           *novelty.Detector         // write-time near-duplicate detection
-	noveltyJobs          chan noveltyJob           // async novelty work queue
-	noveltyDone          chan struct{}             // signals novelty worker shutdown
-	pruneDone            chan struct{}             // signals prune worker shutdown
-	idempotencySweepDone chan struct{}             // signals idempotency sweep worker shutdown
-	archiveGCDone        chan struct{}             // signals archive GC worker shutdown
-	evolveRepairDone     chan struct{}             // signals evolve entity-link repair completion
-	evolveRepairDelay    time.Duration             // startup delay before the repair pass
+	autoAssoc      *autoassoc.Worker         // write-time automatic tag-based associations
+	neighborWorker *autoassoc.NeighborWorker // semantic neighbor auto-linking
+	goalLinkWorker *autoassoc.GoalLinkWorker // goal-aware semantic auto-linking
+	noveltyDet     *novelty.Detector         // write-time near-duplicate detection
+	noveltyJobs    chan noveltyJob           // async novelty work queue
+	// noveltyPending counts novelty jobs that are queued or running, so a test
+	// can drain the worker (WaitWriteTimeIdle) the way it drains the others.
+	// The worker writes `refines` edges; a test that asserts on a vault's edges
+	// while it is still running is racing it. A counter rather than a
+	// WaitGroup: the drain must also return once the worker has exited
+	// (shutdown or panic), when nothing will run what is still queued.
+	noveltyPending atomic.Int64
+	// noveltyJobHook, when set, runs at the start of every novelty job. Test
+	// seam only; nil in production.
+	noveltyJobHook       func()
+	noveltyDone          chan struct{} // signals novelty worker shutdown
+	pruneDone            chan struct{} // signals prune worker shutdown
+	idempotencySweepDone chan struct{} // signals idempotency sweep worker shutdown
+	archiveGCDone        chan struct{} // signals archive GC worker shutdown
+	evolveRepairDone     chan struct{} // signals evolve entity-link repair completion
+	evolveRepairDelay    time.Duration // startup delay before the repair pass
 	// assocWeightRepairDone is closed ONLY when the one-shot pre-fix
 	// full-weight association-key repair (#756) completes cleanly.
 	// runPruneWorker gates assoc decay on it — decay destroys the repair's
@@ -991,12 +1001,30 @@ func (e *Engine) waitWriteTimeIdle() {
 	e.WaitWriteTimeIdle()
 }
 
+// waitNoveltyIdle returns when no novelty job is queued or running. It also
+// returns once the novelty worker has exited — after shutdown, or after a
+// panic, which the worker does not survive — because nothing will ever run the
+// jobs still queued then, and a drain must not wait on them.
+func (e *Engine) waitNoveltyIdle() {
+	for e.noveltyPending.Load() > 0 {
+		select {
+		case <-e.noveltyDone:
+			return
+		default:
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+}
+
 // WaitWriteTimeIdle is the exported test seam over waitWriteTimeIdle, for
 // tests OUTSIDE this package (e.g. internal/mcp) that seed through the real
 // engine and must not poll wall-clock deadlines for async index visibility
 // (#722 doctrine; the SetFlushInterval precedent). Production code has no
 // reason to call it — recall is eventually consistent by design.
 func (e *Engine) WaitWriteTimeIdle() {
+	// The novelty worker first: it writes `refines` edges for what was just
+	// written, and until this drain existed nothing here waited for it.
+	e.waitNoveltyIdle()
 	if e.autoAssoc != nil {
 		e.autoAssoc.WaitIdle()
 	}
@@ -1942,12 +1970,15 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 			content:   eng.Content,
 			vaultName: vaultName,
 		}
+		e.noveltyPending.Add(1)
 		select {
 		case <-e.stopCtx.Done():
 			// Engine shutting down — skip novelty detection to avoid send on closed channel.
+			e.noveltyPending.Add(-1)
 		case e.noveltyJobs <- job:
 		default:
 			// Queue full — drop novelty check rather than block write path.
+			e.noveltyPending.Add(-1)
 			e.noveltyJobsDropped.Add(1)
 			metrics.NoveltyDropsTotal.Inc()
 		}
@@ -2792,10 +2823,13 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 				content:   p.eng.Content,
 				vaultName: p.vaultName,
 			}
+			e.noveltyPending.Add(1)
 			select {
 			case <-e.stopCtx.Done():
+				e.noveltyPending.Add(-1)
 			case e.noveltyJobs <- job:
 			default:
+				e.noveltyPending.Add(-1)
 				e.noveltyJobsDropped.Add(1)
 				metrics.NoveltyDropsTotal.Inc()
 			}
@@ -6018,26 +6052,35 @@ func (e *Engine) runNoveltyWorker() {
 			if !ok {
 				return
 			}
-			m := e.noveltyDet.Check(job.vaultID, job.id.String(), job.concept, job.content)
-			if m == nil {
-				continue
-			}
-			targetID, err := storage.ParseULID(m.ExistingULID)
-			if err != nil {
-				continue
-			}
-			refinesAssoc := &storage.Association{
-				TargetID:   targetID,
-				RelType:    storage.RelRefines,
-				Weight:     float32(m.Similarity),
-				Confidence: 1.0,
-				CreatedAt:  time.Now(),
-			}
-			_ = e.store.WriteAssociation(e.stopCtx, job.wsPrefix, job.id, targetID, refinesAssoc)
-			if e.coherence != nil {
-				e.coherence.GetOrCreate(job.vaultName).RecordLinkCreated(true, true)
-			}
+			e.runNoveltyJob(job)
 		}
+	}
+}
+
+// runNoveltyJob handles one novelty job and marks it finished, on every path.
+func (e *Engine) runNoveltyJob(job noveltyJob) {
+	defer e.noveltyPending.Add(-1)
+	if e.noveltyJobHook != nil {
+		e.noveltyJobHook()
+	}
+	m := e.noveltyDet.Check(job.vaultID, job.id.String(), job.concept, job.content)
+	if m == nil {
+		return
+	}
+	targetID, err := storage.ParseULID(m.ExistingULID)
+	if err != nil {
+		return
+	}
+	refinesAssoc := &storage.Association{
+		TargetID:   targetID,
+		RelType:    storage.RelRefines,
+		Weight:     float32(m.Similarity),
+		Confidence: 1.0,
+		CreatedAt:  time.Now(),
+	}
+	_ = e.store.WriteAssociation(e.stopCtx, job.wsPrefix, job.id, targetID, refinesAssoc)
+	if e.coherence != nil {
+		e.coherence.GetOrCreate(job.vaultName).RecordLinkCreated(true, true)
 	}
 }
 
