@@ -105,6 +105,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- A blank session-secret file no longer turns admin authentication off or lets a session
+  cookie be forged. If `auth_secret` in the data directory was empty (a first-run write that
+  failed part-way, a truncated restore, a placeholder), the server read it as a valid
+  zero-length secret, and with a zero-length secret the REST and UI admin routes were served
+  without a session. If it held only whitespace or only zero bytes, admin routes still asked
+  for a session, but the signing key was one anyone could guess, so a session cookie could
+  be forged — for admin routes and for any locked vault. A blank file is now replaced with a
+  fresh secret at startup (logged at WARN), the secret is written to a temporary file and
+  renamed into place so a failed write cannot leave a blank one, and an empty secret neither
+  issues nor accepts a session token. A secret file that exists but cannot be read is now a
+  startup error instead of being overwritten. To check yours, run
+  `LC_ALL=C tr -d ' \t\r\n\v\f\000' < <data-dir>/auth_secret | wc -c`: if it prints 0, the file was
+  blank and the server was affected. A file size above zero is not enough to rule it out.
+
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
   v0.60.0, clearing all 23 reachable govulncheck findings. Notable ones:

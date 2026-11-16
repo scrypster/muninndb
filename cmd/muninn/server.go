@@ -1273,6 +1273,13 @@ func runServer() {
 		slog.Error("auth bootstrap failed", "err", err)
 		os.Exit(1)
 	}
+	if len(sessionSecret) == 0 {
+		// Bootstrap guarantees a non-empty secret. This is the second lock on the
+		// same door: the REST and UI servers serve admin routes without auth when
+		// handed an empty secret, so the server must not start with one.
+		slog.Error("auth bootstrap returned an empty session secret; refusing to start", "path", secretPath)
+		os.Exit(1)
+	}
 
 	// Loud warning when the server is reachable off-host while the admin still
 	// has the default password — an open-server posture. We warn rather than
