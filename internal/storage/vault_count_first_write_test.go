@@ -165,3 +165,40 @@ func TestVaultCount_ConcurrentFirstWritesCountEachOnce(t *testing.T) {
 		}
 	}
 }
+
+// A merge into a vault this process has not touched yet: the target counter
+// was seeded after the merged records committed, so the seed scan already
+// counted them and the merge added them again.
+func TestVaultCount_MergeIntoUntouchedTargetNotInflated(t *testing.T) {
+	ps := openTestStore(t)
+	ctx := context.Background()
+	src, dst := vcWS("vc-msrc"), vcWS("vc-mdst")
+	for i := 0; i < 3; i++ {
+		if _, err := ps.WriteEngram(ctx, src, vcEngram(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := ps.WriteEngram(ctx, dst, vcEngram(10+i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A new process: no in-memory counter for the target, and (as for a
+	// vault written before 0x15 existed) no persisted count either.
+	ps.FlushCounters()
+	ps.vaultCounters.Delete(dst)
+	ps.counterFlush.Delete(dst)
+	if err := ps.db.Delete(keys.VaultCountKey(dst), nil); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := ps.MergeVaultData(ctx, src, dst, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged != 3 {
+		t.Fatalf("fixture: merged %d engrams, want 3", merged)
+	}
+	if got := ps.GetVaultCount(ctx, dst); got != 5 {
+		t.Fatalf("GetVaultCount(target) = %d after merging 3 into a vault holding 2, want 5", got)
+	}
+}

@@ -330,6 +330,10 @@ func (ps *PebbleStore) MergeVaultData(
 	// Bulk raw-KV copy bypasses the per-engram lifecycle hooks: drop the
 	// target's retired set so its next reader rebuilds it (retired.go).
 	defer ps.resetRetired(wsTarget)
+	// Seed the target's counter before anything is copied: Phase 4 adds the
+	// merged count to it, so a seed scan run after the copy would count the
+	// merged engrams twice (see seedVaultCounter).
+	ps.seedVaultCounter(ctx, wsTarget)
 	wsSourceNext, err := incrementWS(wsSource)
 	if err != nil {
 		return 0, fmt.Errorf("merge: %w", err)

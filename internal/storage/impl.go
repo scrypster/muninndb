@@ -309,13 +309,13 @@ func (ps *PebbleStore) getOrInitCounter(ctx context.Context, wsPrefix [8]byte) *
 			loaded.count.Store(n)
 			return
 		}
-		// Fall back to per-vault scan (one-time cost on first startup)
+		// No persisted count: scan. The result is NOT written back. Seeding
+		// runs before the commit it counts (seedVaultCounter), so persisting
+		// here saved the count from before that write, and a crash before the
+		// next sweep left it trusted forever. The key is written only by the
+		// coalescer from post-commit counts. Until then a restart scans again.
 		n, _ := ps.countEngramsForVault(ctx, wsPrefix)
 		loaded.count.Store(n)
-		// Persist so next startup avoids the scan
-		buf := make([]byte, 8)
-		binary.BigEndian.PutUint64(buf, uint64(n))
-		_ = ps.db.Set(countKey, buf, pebble.NoSync)
 	})
 	return loaded
 }

@@ -108,7 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without `max_engrams` lost nothing, and `retention_days` does not use the count. The
   count also feeds how rare recall judges an entity to be, so entity-boosted
   `weighted_sum` scores were slightly high. A vault whose first action in a process was a
-  delete was counted one low in the same way.
+  delete was counted one low in the same way, and a vault merge into a vault the process had
+  not touched yet counted the merged memories twice.
   - **On upgrade**, migration v7 recounts every vault from the memories it actually holds
     and logs each correction as `migration v7: vault memory count corrected` with the
     vault, the saved count and the stored count. A vault with `max_engrams` whose saved
