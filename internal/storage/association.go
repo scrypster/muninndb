@@ -115,11 +115,29 @@ func (ps *PebbleStore) WriteAssociation(ctx context.Context, wsPrefix [8]byte, s
 		return err
 	}
 	// #771: refuse rather than silently replace a different RelType edge
-	// collision at the same (src, weight, dst) key.
+	// collision at the same (src, weight, dst) key. The check and the write
+	// are held together by the pair's guard lock (STO-15): two concurrent
+	// writers of different RelTypes — the novelty worker's automatic `refines`
+	// and a caller's declared `supersedes` on the same pair — used to both
+	// pass the check, and the later commit erased the earlier edge.
+	mu := ps.assocGuardLocks.For(assocPairLockKey(wsPrefix, src, dst))
+	mu.Lock()
+	defer mu.Unlock()
 	if err := checkRelTypeCollision(ps.db, wsPrefix, [16]byte(src), assoc.Weight, [16]byte(dst), assoc.RelType); err != nil {
 		return err
 	}
 	return ps.writeAssociationUnguarded(ctx, wsPrefix, src, dst, assoc)
+}
+
+// assocPairLockKey is the assocGuardLocks key for one (vault, src, dst) pair.
+// It ignores weight on purpose: the stripe only has to cover the exact
+// (src, weight, dst) key, and one key per pair keeps the locking simple.
+func assocPairLockKey(ws [8]byte, src, dst ULID) []byte {
+	k := make([]byte, 0, 40)
+	k = append(k, ws[:]...)
+	k = append(k, src[:]...)
+	k = append(k, dst[:]...)
+	return k
 }
 
 // writeAssociationUnguarded is WriteAssociation's body without the STO-12

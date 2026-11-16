@@ -34,3 +34,7 @@
 *.html  diff text
 *.toml  diff text
 *.md    diff text
+
+# Vendored as-is: this file ships with mixed CRLF/LF line endings, and the `text` attribute
+# above would have git normalize it, leaving every checkout dirty. Keep the bytes untouched.
+web/static/vendor/layout-base-2.0.1.js -text
