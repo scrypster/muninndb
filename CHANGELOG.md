@@ -42,24 +42,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- A word a memory holds can no longer score as if the vault had never seen it. Keyword
-  search kept each word's rarity (IDF) in memory, worked out from two numbers read at
-  different moments and refreshed only when another memory holding that word was indexed.
-  A search that overlapped the indexing of a memory could work out a rarity from a memory
-  count one behind the word's own count, which reads as "never seen", and keep it. The write
-  path does that search itself, for the tags of every tagged memory. From then on the word
-  matched nothing in that vault — `full_text_relevance` 0, the memory found by meaning alone
-  at a lower band, or not at all when no vector was available — until another memory holding
-  the word was written, a keyword reindex ran, or the server restarted. The index on disk was
-  complete throughout, so nothing reported it. Measured before this change, from an empty
-  data directory: of 520 identically built 40-memory vaults, 5 ended that way for the first
-  tag written and 3 more held a stale value that mis-weighted it. Rarity is now worked out on
-  every search from the committed counts, and a word that has postings always counts as
-  present. Keyword scores no longer depend on what the server searched earlier, so a vault
-  scores a query the same before and after a restart; on a long-running server some
-  multi-word keyword scores will therefore move once, on upgrade. Searches also no longer
-  wait on the keyword indexer: with one writer indexing continuously, median keyword search
-  time went from 17 ms to 0.17 ms. At rest a search does one more point read per query word.
+- A word a memory holds can no longer score as if the vault had never seen it because of
+  what the server searched earlier. Keyword search kept each word's rarity (IDF) in memory,
+  worked out from two numbers read at different moments and refreshed only when another
+  memory holding that word was indexed. A search that overlapped the indexing of a memory
+  could work out a rarity from a memory count one behind the word's own count, which reads as
+  "never seen", and keep it. The write path does that search itself, for the tags of every
+  tagged memory. From then on the word matched nothing in that vault — `full_text_relevance`
+  0, the memory found by meaning alone at a lower band, or not at all when no vector was
+  available — until another memory holding the word was written, a keyword reindex ran, or
+  the server restarted. The index on disk was complete throughout, so nothing reported it.
+  Measured before this change, from an empty data directory, 40 invented memories per vault
+  written over MCP by one to four writers at once: the first tag written ended that way in 12
+  of 820 vaults, and 3 more held a stale value that mis-weighted it. An independent
+  reproduction, one writer and a searcher that never pauses: 300 of 300 before, 0 of 300
+  after.
+
+  What changed. Rarity is worked out on every search. A search reads the memory count, every
+  word's count and every posting list from one snapshot, so a score always belongs to a state
+  the index was really in (before, under a concurrent writer, 339 of 383,404 scores for one
+  memory matched no such state). A memory's postings, its words' counts and the vault's
+  memory count are committed together. A word that has a count record always counts as
+  present. Searches no longer wait on the keyword indexer: with one writer indexing
+  continuously, median keyword search time went from 17 ms to 0.2 ms. A search does one more
+  point read per query word; the snapshot itself cost nothing measurable.
+
+  On upgrade. Keyword scores no longer depend on what the server searched earlier, so a vault
+  scores a query the same before and after a restart. On a long-running server some scores
+  therefore move once, toward the correct value, and a memory can cross the default threshold
+  when they do. The memories affected hold only the common word of a query whose rare word
+  was first searched while the vault was small. In a vault grown from 30 to 430 memories, 847
+  of 25,477 (query, memory) keyword scores were at or above 0.1 on the long-running server
+  and are below it after a restart or this change; none moved the other way.
+
+  Not fixed here. A word can have postings and no count record at all, and still matches
+  nothing: a memory whose keyword index was never built — its index job is dropped when the
+  queue is full or the server stops first, and nothing rebuilds it at startup — and that was
+  later retagged or restored. That predates this change and a restart does not clear it. And
+  a vault last written by an older build that stopped between its two writes carries a memory
+  count one behind; for words almost every memory holds, that changes a rarity by up to about
+  3x and a keyword score by up to 0.25. When a word's count exceeds the memory count the
+  server now says so: `muninndb_fts_stats_inconsistent_total` counts it, and one `WARN` per
+  vault per ten minutes names the vault prefix. `muninn vault reindex-fts <name>` rebuilds
+  the statistics.
+
+- A keyword index that cannot be read no longer answers "no match" or corrupts its counts.
+  Every read error in the keyword index was treated as "not found". A search over an
+  unreadable index returned nothing and no error, so recall looked exactly like a genuine
+  miss. Indexing, retagging or restoring a memory while a read failed took the unreadable
+  count as zero and saved 1 over it: indexing one memory while reads were failing took a
+  word's count from 6 to 1 and the vault's memory count from 6 to 1, durably, and reported
+  success. Read errors are now returned. Recall logs `activation: fts search degraded` for the vault and still returns
+  what the vector channel found; an index write that cannot read its counts fails without
+  writing anything. A recall response carries no marker that its keyword channel was down:
+  the log line is the only signal.
 
 - After a cluster failover, replicas no longer discard the new leader's writes. A replica
   does not advance its own replication sequence counter while it follows, so a replica that
