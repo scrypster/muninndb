@@ -270,7 +270,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	writerErr := make(chan error, 1)
 	go s.writerLoop(conn, writeCh, writerErr)
 
-	// Start reader loop
+	// Start reader loop. When it returns, no handler is still running.
 	s.readerLoop(connCtx, conn, writeCh, helloResp.Capabilities)
 
 	close(writeCh)
@@ -286,8 +286,23 @@ const maxConcurrentFrames = 64
 
 // readerLoop reads frames and dispatches them to handlers.
 // A semaphore limits per-connection goroutine concurrency to maxConcurrentFrames.
+//
+// It returns only when every handler it started has finished. The caller
+// closes writeCh next, and a handler that went to answer after that would be
+// sending on a closed channel — a panic, in a goroutine nothing recovers, that
+// ends the whole server process. Any client could cause it by disconnecting
+// with a request still being handled (SEC-22). The handlers are not cut short:
+// what the client asked for before it left is carried out, and the answers
+// nobody is there to read are dropped by the writer.
 func (s *Server) readerLoop(ctx context.Context, conn net.Conn, writeCh chan *Frame, negotiatedCapabilities []string) {
 	sem := make(chan struct{}, maxConcurrentFrames)
+	// Taking every slot is waiting for every handler: each holds one until it
+	// returns.
+	defer func() {
+		for i := 0; i < cap(sem); i++ {
+			sem <- struct{}{}
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():

@@ -218,6 +218,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   several zstd frames into one payload, compressed with a window over 16 MB (`--ultra` or
   `--long` modes), or sent more than 16 MB decoded will now get that error (SEC-21).
 
+- A client that disconnects in the middle of an MBP request no longer crashes the server.
+  When a connection closed, the server closed that connection's outgoing queue without
+  waiting for the requests it was still handling. The first of them to finish then tried
+  to answer on the closed queue, which is a fatal error nothing caught, and the whole
+  process exited: every vault, and REST, gRPC and MCP with it. No intent was needed — a
+  client that timed out or was killed with a request in flight had the same effect.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
+  trust, in every release up to v0.11.0. No key is needed when any vault is public, and
+  the `default` vault is public out of the box; with no public vault, any valid key of
+  any mode is enough.
+  **What a client could do:** stop the server at will, by sending a request and closing
+  the connection before the answer.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port,
+  and run the server under something that restarts it. An unexplained exit with
+  `panic: send on closed channel` in the server log was this.
+  **What changed:** a connection now waits for the requests it is handling before it
+  closes its outgoing queue. Requests received before the client left are still carried
+  out; their answers are discarded (SEC-22).
+
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
   v0.60.0, clearing all 23 reachable govulncheck findings. Notable ones:
