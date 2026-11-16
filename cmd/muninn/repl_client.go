@@ -82,7 +82,10 @@ func (r *replState) cmdShowVaults() {
 		return
 	}
 	if r.sessionCookie != "" {
-		req.AddCookie(&http.Cookie{Name: "session", Value: r.sessionCookie})
+		// The server reads the admin session from "muninn_session". Under any
+		// other name the cookie is ignored and the list is the caller's own
+		// vault only.
+		req.AddCookie(&http.Cookie{Name: "muninn_session", Value: r.sessionCookie})
 	}
 	resp, err := client.Do(req)
 	if err != nil {

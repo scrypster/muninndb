@@ -64,9 +64,19 @@ func runVault(args []string) {
 	sub := remaining[0]
 	subArgs := remaining[1:]
 
-	// "list" uses the public API — no admin auth needed.
+	// "list": every vault on the server is an admin's answer. Without an admin
+	// session the server lists only the vault open to the caller, so sign in
+	// when that is possible without getting in the way — with the credentials
+	// given, or the defaults — and say so plainly when the list is the short
+	// one. It never prompts unless -p asked it to.
 	if sub == "list" {
+		signedIn := signInForVaultList(username, password, prompted)
 		runVaultList(subArgs)
+		if !signedIn {
+			fmt.Println()
+			fmt.Println("Listed without an admin session: only vaults open to anyone are shown.")
+			fmt.Println("To list every vault: muninn vault list -u <admin user> -p")
+		}
 		return
 	}
 
@@ -238,7 +248,7 @@ func runVaultList(args []string) {
 	}
 
 	apiURL := vaultAdminBase + "/api/vaults"
-	resp, err := httpClientForURL(apiURL, 0).Get(apiURL)
+	resp, err := getWithAdminSession(apiURL)
 	if err != nil {
 		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
 		fmt.Println("Is muninn running? Try: muninn status")
@@ -1099,9 +1109,13 @@ func exportVaultMarkdownOne(vaultName, outputFile string) error {
 	return nil
 }
 
+// listVaultNamesAdmin lists every vault on the server. It needs the admin
+// session its callers have already signed in for: without one the server
+// answers with the caller's own vault only, and "all vaults" would quietly
+// mean one.
 func listVaultNamesAdmin() ([]string, error) {
 	apiURL := vaultAdminBase + "/api/vaults"
-	resp, err := httpClientForURL(apiURL, 0).Get(apiURL)
+	resp, err := getWithAdminSession(apiURL)
 	if err != nil {
 		return nil, err
 	}

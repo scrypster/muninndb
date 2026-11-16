@@ -437,9 +437,12 @@ func (s *Server) Stat(ctx context.Context, req *pb.StatRequest) (*pb.StatRespons
 
 // ListVaults implements the ListVaults RPC.
 // Requires a valid API key — anonymous/public-vault callers are rejected to
-// prevent cross-vault name enumeration by unauthenticated clients.
+// prevent cross-vault name enumeration by unauthenticated clients. A key is
+// pinned to one vault and is told about that vault only: enumeration by an
+// authenticated client is the same disclosure (SEC-25).
 func (s *Server) ListVaults(ctx context.Context, req *pb.ListVaultsRequest) (*pb.ListVaultsResponse, error) {
-	if ctx.Value(auth.ContextAPIKey) == nil {
+	key, _ := ctx.Value(auth.ContextAPIKey).(*auth.APIKey)
+	if key == nil {
 		return nil, status.Error(codes.Unauthenticated, "ListVaults requires an API key")
 	}
 	if err := denyWriteOnlyRead(ctx); err != nil {
@@ -450,6 +453,8 @@ func (s *Server) ListVaults(ctx context.Context, req *pb.ListVaultsRequest) (*pb
 		slog.Error("list vaults failed", "error", err)
 		return nil, err
 	}
+	// The key's own vault, whatever else the server holds.
+	resp.Vaults = []string{key.Vault}
 	return resp, nil
 }
 

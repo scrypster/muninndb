@@ -169,6 +169,32 @@ func loginAdmin(username, password string) error {
 	return nil
 }
 
+// signInForVaultList gets an admin session for `vault list` when it can do so
+// without interrupting: with a password given on the command line, by
+// prompting when -p asked for a prompt, and otherwise with the default
+// credentials. It reports whether there is a session.
+func signInForVaultList(username, password string, prompted bool) bool {
+	if password != "" || prompted {
+		if err := authenticateAdmin(username, password, prompted); err != nil {
+			fmt.Fprintf(os.Stderr, "Authentication failed: %v\n", err)
+		}
+	} else {
+		_ = loginAdmin("root", "password")
+	}
+	return vaultCookie != ""
+}
+
+// getWithAdminSession sends a GET carrying the admin session cookie, if one
+// has been obtained.
+func getWithAdminSession(url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	addSessionCookie(req)
+	return httpClientForURL(url, 0).Do(req)
+}
+
 // addSessionCookie attaches the admin session cookie to an HTTP request
 // if one has been obtained.
 func addSessionCookie(req *http.Request) {

@@ -2847,21 +2847,24 @@ paths:
   /api/vaults:
     get:
       tags: [vault]
-      summary: "List all vault names."
+      summary: "List the vaults the caller may be told about."
+      description: >-
+        With a vault API key, or no credential on a public vault, the list is
+        the caller's one vault. Only an admin session is told every vault on
+        the server.
       security:
         - BearerAuth: []
       responses:
         "200":
-          description: "Vault names."
+          description: >-
+            Vault names, as a JSON array. One name for a key or a public-vault
+            caller; every vault for an admin session.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  vaults:
-                    type: array
-                    items:
-                      type: string
+                type: array
+                items:
+                  type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
 

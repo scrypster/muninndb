@@ -1362,6 +1362,13 @@ func (s *Server) handleListVaults(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Every vault for the admin session (the console's vault picker and
+	// `muninn vault list`); for a key or an open vault, only the caller's own
+	// (SEC-25). A server built with no auth store authenticates nothing, on
+	// any route, and has no caller to scope to.
+	if s.authStore != nil {
+		vaults = auth.VaultsVisibleTo(r.Context(), vaults)
+	}
 	s.sendJSON(w, http.StatusOK, vaults)
 }
 

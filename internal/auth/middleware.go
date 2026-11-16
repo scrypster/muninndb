@@ -146,6 +146,25 @@ func AdminSessionFromContext(ctx context.Context) bool {
 	return admin
 }
 
+// VaultsVisibleTo narrows the list of every vault on the server to the vaults
+// the request's caller may be told exist: all of them for a verified admin
+// session, and otherwise the ONE vault the request was authorised for — the
+// key's vault, or the public vault a caller with no key named. A caller
+// entitled to one vault is not told the names of the others (SEC-25).
+//
+// The caller's own vault is listed whether or not it has anything in it yet.
+// A context that carries no vault at all gets nothing.
+func VaultsVisibleTo(ctx context.Context, all []string) []string {
+	if AdminSessionFromContext(ctx) {
+		return all
+	}
+	vault, _ := ctx.Value(ContextVault).(string)
+	if vault == "" {
+		return []string{}
+	}
+	return []string{vault}
+}
+
 // Mode enforcement uses two layers — documented here for future reference:
 //
 //   "observe" mode — engine-layer enforcement: reads are allowed but cognitive

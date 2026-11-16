@@ -1563,16 +1563,15 @@ func TestListVaults_Success(t *testing.T) {
 	srv := newPublicTestServer(t, eng)
 
 	// ListVaults requires an authenticated caller — inject a key into the context.
+	// The key is pinned to "default", so that is the one vault it is told about,
+	// though the server holds two (SEC-25).
 	ctx := context.WithValue(context.Background(), auth.ContextAPIKey, &auth.APIKey{Vault: "default", Mode: auth.ModeFull})
 	resp, err := srv.ListVaults(ctx, &pb.ListVaultsRequest{})
 	if err != nil {
 		t.Fatalf("ListVaults: %v", err)
 	}
-	if len(resp.Vaults) != 2 {
-		t.Errorf("len(Vaults) = %d, want 2", len(resp.Vaults))
-	}
-	if resp.Vaults[0] != "default" || resp.Vaults[1] != "work" {
-		t.Errorf("Vaults = %v, want [default work]", resp.Vaults)
+	if len(resp.Vaults) != 1 || resp.Vaults[0] != "default" {
+		t.Errorf("Vaults = %v, want [default]", resp.Vaults)
 	}
 }
 

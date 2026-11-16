@@ -304,9 +304,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dashboard shows — is unchanged. A client that used a key to read the server's vault
   count or storage size will now see `1` and `0`; those figures need the admin session.
   `openapi.yaml` documents `scope` and the two scopes, and its `StatResponse` field
-  names are corrected to the snake_case the server has always sent. Vault names are
-  still returned by `GET /api/vaults` and gRPC `ListVaults`; see the next entry
-  (SEC-24).
+  names are corrected to the snake_case the server has always sent. Vault names were
+  also returned by the listing calls; see the next entry (SEC-24).
+
+- The vault list is no longer given to callers entitled to one vault. REST
+  `GET /api/vaults` returned the name of every vault on the server to a caller with no
+  credential on a public vault and to any key, whichever vault the key was for. The gRPC
+  `ListVaults` call returned every name to any key.
+  **Who is affected:** servers with more than one vault, in every release up to v0.11.0
+  for REST and from v0.8.0 for gRPC. With a public vault no credential was needed, and
+  `default` is public out of the box, so anyone who could reach the REST port could list
+  every vault.
+  **What a caller could learn:** the names of all vaults. A public vault needs no key,
+  so learning its name is all it takes to read and write it. A locked vault's name gives
+  no access.
+  **What to do:** upgrade. If you have public vaults other than `default`, treat their
+  names as known to anyone who could reach the REST port, and lock any that should not
+  be open (`PUT /api/admin/vaults/config`).
+  **What changed:** with a key, or with no credential on a public vault, the list is now
+  the caller's own vault only. The admin session still gets every vault, so the web
+  console is unchanged. `muninn vault list` used the unauthenticated list. It now signs
+  in as admin first, with `-u`/`-p` if given and otherwise with the default credentials.
+  If it cannot sign in, it lists what the server will tell it and says that this is not
+  every vault. It does not prompt unless you pass `-p`. Scripts that ran
+  `muninn vault list` against a server whose admin password has been changed need
+  `-u <user> --password=<pw>` to get the full list. SDK `list vaults` calls made with a
+  key now return one name. `openapi.yaml` describes the scoping, and documents the
+  response as the JSON array the server has always sent (SEC-25).
 
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to
