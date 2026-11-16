@@ -77,8 +77,10 @@ and remain the reviewer's job.
    missing/unmatched checksum non-fatal, reopens the hole. Don't accept an executable-bit
    plus version-string check as "integrity" — that is what the gap was.
 
-7. **`proto/muninn/v1/service.proto`** → regenerate `proto/gen/go/...`. No CI step verifies
-   the generated code is current — the reviewer must confirm regen ran. 🪝
+7. **`proto/muninn/v1/service.proto`** → regenerate `proto/gen/go/...` via `make proto`.
+   CI gates this as of #873: the `proto-check` job runs `make proto-check` (back up
+   `proto/gen`, regenerate, diff) and fails on drift. The reviewer no longer has to
+   eyeball it. 🪝
 
 8. **A new Pebble prefix** → see `keyspace-registry.md`: disjoint, and added to
    `internal/prefix/prefix.All()` (the single source of truth). The disjointness tests in

@@ -79,12 +79,12 @@ func TestGRPCActivate_RecordsNoUndeliveredAssociatedIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, a := range resp.Activations {
-		if a.ID == injectee {
+		if a.Id == injectee {
 			t.Fatalf("premise: the injectee must not be a matched row")
 		}
 	}
 	out, err := eng.RecordFeedbackLabelsDetailed(ctx, "default",
-		[]engine.FeedbackGroup{{QueryID: resp.QueryID, IDs: []string{injectee}, Useful: true}}, engine.FeedbackChannelDirect, engine.FeedbackOptions{})
+		[]engine.FeedbackGroup{{QueryID: resp.QueryId, IDs: []string{injectee}, Useful: true}}, engine.FeedbackChannelDirect, engine.FeedbackOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
