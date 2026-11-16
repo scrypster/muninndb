@@ -272,7 +272,7 @@ func (ps *PebbleStore) RepairLegacyFullWeightAssocKeys(ctx context.Context, wsPr
 			_ = batch.Delete(legacyFullWeightRevKey(wsPrefix, d.dst, d.src), nil)
 			moved = append(moved, d)
 		}
-		if err := batch.Commit(pebble.NoSync); err != nil {
+		if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 			return fmt.Errorf("assoc weight repair: chunk commit: %w", err)
 		}
 		// Counted after the commit, not at capture: the number reported is

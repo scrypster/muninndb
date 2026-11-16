@@ -133,14 +133,13 @@ func (a *grpcEngineAdapter) Activate(ctx context.Context, req *pb.ActivateReques
 			Score: item.Score, Why: item.Why,
 		}
 	}
-	// NOTE (deferred): resp.SemanticDegraded is intentionally NOT mapped here —
-	// pb.ActivateResponse has no such field. Wiring it needs a proto field + regen
-	// (a separate drift obligation); tracked as a follow-up so this stays a minimal
-	// increment. Until then gRPC callers do not receive the degrade-loudly signal
-	// that MBP/REST/MCP carry.
+	// SemanticDegraded + reason: a keyword-only recall must be marked on every
+	// transport. Leaving it off here served BM25-only rows to gRPC callers
+	// with no marker — silently wrong (principle #2).
 	return &pb.ActivateResponse{
 		QueryId: resp.QueryID, TotalFound: int32(resp.TotalFound),
 		Activations: items, LatencyMs: resp.LatencyMs,
+		SemanticDegraded: resp.SemanticDegraded, SemanticDegradedReason: resp.SemanticDegradedReason,
 	}, nil
 }
 

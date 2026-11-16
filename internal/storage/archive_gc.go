@@ -82,7 +82,7 @@ func (ps *PebbleStore) GCArchivedEdges(ctx context.Context, wsPrefix [8]byte) (i
 		batch.Delete(e.key, nil)
 	}
 
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return 0, fmt.Errorf("archive GC commit: %w", err)
 	}
 

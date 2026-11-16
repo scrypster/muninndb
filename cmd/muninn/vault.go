@@ -33,6 +33,7 @@ func printVaultUsage() {
 	fmt.Println("  export-markdown --vault <name> [--output <file>] [--all-vaults]  Export vault notes to markdown .tgz")
 	fmt.Println("  import      <file> --vault <name> [--reset-metadata]             Import .muninn archive into new vault")
 	fmt.Println("  reindex-fts <name>                               Rebuild FTS index with Porter2 stemming")
+	fmt.Println("  reindex-hnsw <name>                              Rebuild the vector graph in the background")
 	fmt.Println("  repair-watermark-reset <name> --which <evolve|assoc_weight|all>  Re-arm a repair pass on this node")
 	fmt.Println("  rename      <old-name> <new-name>                  Rename a vault (metadata only)")
 	fmt.Println("  reembed     <name>                               Clear embeddings and re-embed with current model")
@@ -71,7 +72,7 @@ func runVault(args []string) {
 
 	// Validate the subcommand before authenticating so typos get fast feedback.
 	switch sub {
-	case "create", "delete", "clear", "clone", "merge", "rename", "export", "export-markdown", "import", "reindex-fts", "repair-watermark-reset", "reembed", "recall-mode", "behavior", "plasticity":
+	case "create", "delete", "clear", "clone", "merge", "rename", "export", "export-markdown", "import", "reindex-fts", "reindex-hnsw", "repair-watermark-reset", "reembed", "recall-mode", "behavior", "plasticity":
 	default:
 		fmt.Printf("Unknown vault command: %q\n", sub)
 		printVaultUsage()
@@ -107,6 +108,8 @@ func runVault(args []string) {
 		runVaultImport(subArgs)
 	case "reindex-fts":
 		runVaultReindexFTS(subArgs)
+	case "reindex-hnsw":
+		runVaultReindexHNSW(subArgs)
 	case "repair-watermark-reset":
 		runVaultRepairWatermarkReset(subArgs)
 	case "reembed":
@@ -596,6 +599,53 @@ func runVaultReindexFTS(args []string) {
 		}
 		fmt.Printf("  Re-indexed %d engrams in vault %q.\n", result.EngramsReindexed, result.Vault)
 		fmt.Println("  FTS version marker set to 1 (Porter2 stemming active).")
+	case http.StatusNotFound:
+		fmt.Println("  Vault not found.")
+	case http.StatusUnauthorized:
+		fmt.Println("  Not authenticated. Use -u <user> -p to authenticate.")
+	default:
+		printHTTPError(resp)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// vault reindex-hnsw
+// ---------------------------------------------------------------------------
+
+func runVaultReindexHNSW(args []string) {
+	var vaultName string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") && vaultName == "" {
+			vaultName = a
+		}
+	}
+	if vaultName == "" {
+		fmt.Println("Usage: muninn vault reindex-hnsw <vault-name>")
+		fmt.Println("  Rebuilds the vault's vector graph in the background. Vector search keeps")
+		fmt.Println("  working from the current graph until the rebuilt one replaces it.")
+		fmt.Println("  Progress: hnsw_rebuild in the admin observability snapshot.")
+		return
+	}
+	reqURL := fmt.Sprintf("%s/api/admin/vaults/%s/reindex-hnsw", vaultAdminBase, url.PathEscape(vaultName))
+	client := httpClientForURL(reqURL, 30*time.Second)
+	req, err := http.NewRequest("POST", reqURL, nil)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	addSessionCookie(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
+		fmt.Println("Is muninn running? Try: muninn status")
+		return
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusAccepted:
+		fmt.Printf("  Vector graph rebuild queued for vault %q (runs in the background).\n", vaultName)
+	case http.StatusConflict:
+		fmt.Println("  A rebuild of this vault is already in progress.")
 	case http.StatusNotFound:
 		fmt.Println("  Vault not found.")
 	case http.StatusUnauthorized:

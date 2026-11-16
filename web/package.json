@@ -12,7 +12,7 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "devDependencies": {
-    "@playwright/test": "^1.44.0",
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/postcss": "^4.3.3",
     "postcss": "^8.4.0",
     "tailwindcss": "^4.3.3",

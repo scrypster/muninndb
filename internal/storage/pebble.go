@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
@@ -16,6 +17,11 @@ type Options struct {
 	L0StopWritesThreshold int
 	LBaseMaxBytes         int64
 	DisableWAL            bool
+	// FS is the filesystem Pebble runs on. Nil means the real disk
+	// (pebble's vfs.Default), which is what every production caller uses.
+	// Tests pass vfs.NewMem() to keep the production options while skipping
+	// per-open and per-write fsyncs (see internal/engine's testEnv).
+	FS vfs.FS
 }
 
 // DefaultOptions returns sensible defaults for a MuninnDB Pebble instance.
@@ -41,6 +47,7 @@ func OpenPebble(path string, opts *Options) (*pebble.DB, error) {
 		MemTableSize:  opts.MemTableSize,
 		LBaseMaxBytes: opts.LBaseMaxBytes,
 		DisableWAL:    opts.DisableWAL,
+		FS:            opts.FS,
 	}
 
 	pebbleOpts.L0CompactionThreshold = opts.L0CompactionThreshold

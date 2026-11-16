@@ -1602,15 +1602,22 @@ func (x *Filter) GetValue() []byte {
 }
 
 type ActivateResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	QueryId       string                 `protobuf:"bytes,1,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"`
-	TotalFound    int32                  `protobuf:"varint,2,opt,name=total_found,json=totalFound,proto3" json:"total_found,omitempty"`
-	Activations   []*ActivationItem      `protobuf:"bytes,3,rep,name=activations,proto3" json:"activations,omitempty"`
-	LatencyMs     float64                `protobuf:"fixed64,4,opt,name=latency_ms,json=latencyMs,proto3" json:"latency_ms,omitempty"`
-	Frame         int32                  `protobuf:"varint,5,opt,name=frame,proto3" json:"frame,omitempty"`
-	TotalFrames   int32                  `protobuf:"varint,6,opt,name=total_frames,json=totalFrames,proto3" json:"total_frames,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	QueryId     string                 `protobuf:"bytes,1,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"`
+	TotalFound  int32                  `protobuf:"varint,2,opt,name=total_found,json=totalFound,proto3" json:"total_found,omitempty"`
+	Activations []*ActivationItem      `protobuf:"bytes,3,rep,name=activations,proto3" json:"activations,omitempty"`
+	LatencyMs   float64                `protobuf:"fixed64,4,opt,name=latency_ms,json=latencyMs,proto3" json:"latency_ms,omitempty"`
+	Frame       int32                  `protobuf:"varint,5,opt,name=frame,proto3" json:"frame,omitempty"`
+	TotalFrames int32                  `protobuf:"varint,6,opt,name=total_frames,json=totalFrames,proto3" json:"total_frames,omitempty"`
+	// True when the vector/semantic signal for this recall could not be used and
+	// the ranking is keyword-led (BM25/decay/Hebbian) — see
+	// semantic_degraded_reason. Same meaning as MBP/REST/MCP semantic_degraded.
+	SemanticDegraded bool `protobuf:"varint,7,opt,name=semantic_degraded,json=semanticDegraded,proto3" json:"semantic_degraded,omitempty"`
+	// embed_timeout | embed_unavailable | embed_zero_vector |
+	// stored_embedding_read. Empty iff semantic_degraded is false.
+	SemanticDegradedReason string `protobuf:"bytes,8,opt,name=semantic_degraded_reason,json=semanticDegradedReason,proto3" json:"semantic_degraded_reason,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *ActivateResponse) Reset() {
@@ -1683,6 +1690,20 @@ func (x *ActivateResponse) GetTotalFrames() int32 {
 		return x.TotalFrames
 	}
 	return 0
+}
+
+func (x *ActivateResponse) GetSemanticDegraded() bool {
+	if x != nil {
+		return x.SemanticDegraded
+	}
+	return false
+}
+
+func (x *ActivateResponse) GetSemanticDegradedReason() string {
+	if x != nil {
+		return x.SemanticDegradedReason
+	}
+	return ""
 }
 
 type ActivationItem struct {
@@ -2467,7 +2488,7 @@ const file_muninn_v1_service_proto_rawDesc = "" +
 	"\x06Filter\x12\x14\n" +
 	"\x05field\x18\x01 \x01(\tR\x05field\x12\x0e\n" +
 	"\x02op\x18\x02 \x01(\tR\x02op\x12\x14\n" +
-	"\x05value\x18\x03 \x01(\fR\x05value\"\xe3\x01\n" +
+	"\x05value\x18\x03 \x01(\fR\x05value\"\xca\x02\n" +
 	"\x10ActivateResponse\x12\x19\n" +
 	"\bquery_id\x18\x01 \x01(\tR\aqueryId\x12\x1f\n" +
 	"\vtotal_found\x18\x02 \x01(\x05R\n" +
@@ -2476,7 +2497,9 @@ const file_muninn_v1_service_proto_rawDesc = "" +
 	"\n" +
 	"latency_ms\x18\x04 \x01(\x01R\tlatencyMs\x12\x14\n" +
 	"\x05frame\x18\x05 \x01(\x05R\x05frame\x12!\n" +
-	"\ftotal_frames\x18\x06 \x01(\x05R\vtotalFrames\"\x98\x02\n" +
+	"\ftotal_frames\x18\x06 \x01(\x05R\vtotalFrames\x12+\n" +
+	"\x11semantic_degraded\x18\a \x01(\bR\x10semanticDegraded\x128\n" +
+	"\x18semantic_degraded_reason\x18\b \x01(\tR\x16semanticDegradedReason\"\x98\x02\n" +
 	"\x0eActivationItem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\aconcept\x18\x02 \x01(\tR\aconcept\x12\x18\n" +

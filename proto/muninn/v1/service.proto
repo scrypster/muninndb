@@ -172,6 +172,13 @@ message ActivateResponse {
   double latency_ms = 4;
   int32 frame = 5;
   int32 total_frames = 6;
+  // True when the vector/semantic signal for this recall could not be used and
+  // the ranking is keyword-led (BM25/decay/Hebbian) — see
+  // semantic_degraded_reason. Same meaning as MBP/REST/MCP semantic_degraded.
+  bool semantic_degraded = 7;
+  // embed_timeout | embed_unavailable | embed_zero_vector |
+  // stored_embedding_read. Empty iff semantic_degraded is false.
+  string semantic_degraded_reason = 8;
 }
 
 message ActivationItem {

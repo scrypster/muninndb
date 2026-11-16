@@ -282,10 +282,16 @@ func TestVersionHead_ForkRefusesAndAbstainsAmbiguous(t *testing.T) {
 	a := h.write("retention policy", "Telemetry rows older than ninety days are purged nightly by the vacuum sweeper.")
 	// Two independent successors of A: a genuine fork. Written as bare engrams
 	// plus declared edges so both stay active (evolve would serialize them).
+	// The second edge is written at the store level: Link now refuses a
+	// second successor, so this is the on-disk shape a pre-guard store has.
 	b := h.write("retention policy alpha", "Aged instrumentation records compact into cold shards after one quarter.")
 	c := h.write("retention policy beta", "Stale measurement archives migrate to glacier storage each fiscal period.")
 	h.linkSupersedes(b, a)
-	h.linkSupersedes(c, a)
+	if err := h.eng.store.WriteAssociation(h.ctx, h.ws, h.mustParse(c), h.mustParse(a), &storage.Association{
+		TargetID: h.mustParse(a), RelType: storage.RelSupersedes, Weight: 1, Confidence: 1, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	h.softDelete(a) // evolve's other half: the predecessor is hidden from the present
 
 	resp := h.recall(retentionQuery)
@@ -357,11 +363,12 @@ func substitutedItem(resp *mbp.ActivateResponse) *mbp.ActivationItem {
 	return nil
 }
 
-// A chain whose head sits at exactly the depth cap still substitutes — a
-// cap-abstain would regress every long legacy chain — but must SAY the answer
-// may not be the terminus, because on this path the injected head is the only
-// row the caller sees.
-func TestVersionHead_CapDepthChainSubstitutesAndReportsTruncation(t *testing.T) {
+// A chain whose head sits at what used to be the depth cap (8 hops) resolves
+// to its terminus and is NOT flagged truncated: every intermediate an evolve
+// leaves behind is retired, so the walk limit (retired count + slack) is never
+// reached on a declared evolve chain. Before the retired-candidates change the
+// same chain was flagged chain_truncated on every recall.
+func TestVersionHead_FormerCapDepthChainResolvesWithoutTruncation(t *testing.T) {
 	h, cleanup := newVersionHeadHarness(t)
 	defer cleanup()
 
@@ -376,58 +383,42 @@ func TestVersionHead_CapDepthChainSubstitutesAndReportsTruncation(t *testing.T) 
 	if sub.ID != head {
 		t.Errorf("substituted row = %s, want the chain head %s", sub.ID, head)
 	}
-	if !sub.ChainTruncated {
-		t.Errorf("chain_truncated is false on a chain reaching the depth cap (%d) — the walk had no iteration left to prove this node terminal, and over-warning is the safe direction", supersessionMaxDepth)
+	if sub.ChainTruncated {
+		t.Errorf("chain_truncated is true on a %d-hop evolve chain — the walk reaches the terminus, so nothing was truncated", supersessionMaxDepth)
 	}
 }
 
-// PAST the cap, an EVOLVE chain has no reachable current version at all: every
-// intermediate an evolve leaves behind is soft-deleted and therefore unnameable
-// under default recall, so the only visible member is the terminus — and it is
-// out of reach. The honest answer is a LOUD abstention, not an invisible
-// intermediate presented as current and not silence.
-func TestVersionHead_OverlongEvolveChainAbstainsLoudly(t *testing.T) {
-	h, cleanup := newVersionHeadHarness(t)
-	defer cleanup()
-
-	a := h.write("retention policy", "Telemetry rows older than ninety days are purged nightly by the vacuum sweeper.")
-	evolveChain(h, a, supersessionMaxDepth+1)
-
-	resp := h.recall(retentionQuery)
-	if sub := substitutedItem(resp); sub != nil {
-		t.Fatalf("a chain past the depth cap substituted %s — no node within the cap is nameable on an evolve chain", sub.ID)
-	}
-	if len(resp.Activations) == 0 && resp.AbstainedReason != activation.AbstainSupersededOnly {
-		t.Errorf("abstained_reason = %q, want %q — an unreachable chain head must be named, not fallen silent about",
-			resp.AbstainedReason, activation.AbstainSupersededOnly)
-	}
-}
-
-// #794: the SAME overlong-evolve-chain abstention as
-// TestVersionHead_OverlongEvolveChainAbstainsLoudly computes `truncated`
-// inside resolveSupersessionHead's depth-cap loop, but the abstain return at
-// the bottom of that function dropped it on the floor — so the refusal was
-// reported identically whether the chain genuinely had no current version or
-// merely ran the depth cap out before it could tell. Pin that the WARN fires
-// on the refusal path too (previously it fired only on walk.OK), matching the
-// already-tested OK-but-truncated substitution path
-// (TestVersionHead_CapDepthChainSubstitutesAndReportsTruncation).
-func TestVersionHead_OverlongEvolveChainAbstainWarnsOnTruncation(t *testing.T) {
+// PAST the former cap, an evolve chain used to have no reachable current
+// version at all (the walk stopped inside the chain, where every node is a
+// retired intermediate) and recall abstained superseded_only while the current
+// fact sat one hop beyond. It now resolves to the head, attributed, with no
+// truncation and no depth-cap WARN.
+func TestVersionHead_ChainPastFormerCapResolvesToHead(t *testing.T) {
 	h, cleanup := newVersionHeadHarness(t)
 	defer cleanup()
 
 	buf := captureWarn(t)
 
 	a := h.write("retention policy", "Telemetry rows older than ninety days are purged nightly by the vacuum sweeper.")
-	evolveChain(h, a, supersessionMaxDepth+1)
+	head := evolveChain(h, a, supersessionMaxDepth+1)
 
 	resp := h.recall(retentionQuery)
-	if sub := substitutedItem(resp); sub != nil {
-		t.Fatalf("a chain past the depth cap substituted %s — no node within the cap is nameable on an evolve chain", sub.ID)
+	sub := substitutedItem(resp)
+	if sub == nil {
+		t.Fatalf("a %d-hop chain substituted nothing (abstained=%q, got %v) — the current head is reachable and must be returned",
+			supersessionMaxDepth+1, resp.AbstainedReason, ids(resp))
 	}
-
-	if !strings.Contains(buf.String(), "chain depth cap") {
-		t.Errorf("expected a chain-depth-cap WARN on the abstain path, got log: %q", buf.String())
+	if sub.ID != head {
+		t.Errorf("substituted row = %s, want the chain head %s", sub.ID, head)
+	}
+	if sub.SubstitutedFor != a {
+		t.Errorf("substituted_for = %s, want the matched version %s", sub.SubstitutedFor, a)
+	}
+	if sub.ChainTruncated {
+		t.Errorf("chain_truncated set on a fully walked chain")
+	}
+	if strings.Contains(buf.String(), "chain depth cap") || strings.Contains(buf.String(), "chain walk limit") {
+		t.Errorf("a fully resolved chain logged a walk-limit WARN: %q", buf.String())
 	}
 }
 

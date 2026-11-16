@@ -71,6 +71,31 @@ type RetroactiveProcessor struct {
 	// inserted into HNSW. The engine uses it to re-evaluate push subscriptions
 	// with the now-available vector (#512). Only set on the embed processor.
 	onEmbed func(eng *Engram, vec []float32)
+
+	// onEmbedded, when set, is called after an engram's embedding is stored
+	// and inserted into HNSW, with the vault prefix the processor already
+	// holds (a store lookup of an id's vault is a full scan). It is called
+	// synchronously inside the vault's clear admission, so a vault clear
+	// cannot interleave with it; it must be cheap and must not block. The
+	// write-time twin check (COG-36) feeds its ring from it. Only set on the
+	// embed processor.
+	onEmbedded func(ws [8]byte, eng *Engram, vec []float32)
+
+	// passStartNs is the wall-clock start (UnixNano) of the pass currently
+	// processing work, or 0 when idle. The write-time twin check (COG-36)
+	// reads it to tell "my write is queued behind earlier work"
+	// (embedder_busy) from "the embed itself ran long" (embed_timeout).
+	passStartNs atomic.Int64
+}
+
+// PassStartedAt reports when the pass now processing work began; ok=false
+// when the processor is idle (or found nothing to do).
+func (rp *RetroactiveProcessor) PassStartedAt() (time.Time, bool) {
+	ns := rp.passStartNs.Load()
+	if ns == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(0, ns), true
 }
 
 type retroactiveVaultGuard struct {
@@ -85,6 +110,12 @@ type retroactiveVaultGuard struct {
 // computed and inserted into the index. Must be called before Start.
 func (rp *RetroactiveProcessor) SetOnEmbed(fn func(eng *Engram, vec []float32)) {
 	rp.onEmbed = fn
+}
+
+// SetOnEmbedded registers the vault-aware post-store hook (see onEmbedded).
+// Must be called before Start.
+func (rp *RetroactiveProcessor) SetOnEmbedded(fn func(ws [8]byte, eng *Engram, vec []float32)) {
+	rp.onEmbedded = fn
 }
 
 // NewRetroactiveProcessor creates a new processor for a plugin.
@@ -419,6 +450,12 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 	if total == 0 {
 		return true
 	}
+	// Only the write-time twin check reads the pass start; with no hook
+	// wired (the check off) the processor does exactly what it did before.
+	if rp.onEmbedded != nil {
+		rp.passStartNs.Store(time.Now().UnixNano())
+		defer rp.passStartNs.Store(0)
+	}
 
 	// Snapshot cumulative processed count so we can detect per-pass work.
 	rp.statsMu.RLock()
@@ -580,11 +617,19 @@ func (rp *RetroactiveProcessor) processBatch(ctx context.Context) bool {
 				}
 				slog.Warn("retroactive processor: HNSWInsert failed",
 					"plugin", rp.plugin.Name(), "engram_id", eng.ID.String(), "error", storeErr)
-			} else if rp.onEmbed != nil {
-				// The vector is now searchable — let the engine re-evaluate push
-				// subscriptions with it (#512). Copy first: vec is a sub-slice of
-				// the batch result and the callback hands it to an async consumer.
-				rp.onEmbed(eng, append([]float32(nil), vec...))
+			} else {
+				if rp.onEmbed != nil {
+					// The vector is now searchable — let the engine re-evaluate push
+					// subscriptions with it (#512). Copy first: vec is a sub-slice of
+					// the batch result and the callback hands it to an async consumer.
+					rp.onEmbed(eng, append([]float32(nil), vec...))
+				}
+				if rp.onEmbedded != nil {
+					// The exact vector just stored and indexed — same text
+					// (Concept+" "+Content), same batch composition. Copied for
+					// the same reason as above.
+					rp.onEmbedded(microVaults[i], eng, append([]float32(nil), vec...))
+				}
 			}
 			if storeErr := rp.store.AutoLinkByEmbedding(ctx, eng.ID, vec); storeErr != nil {
 				slog.Warn("retroactive processor: AutoLinkByEmbedding failed",

@@ -92,7 +92,7 @@ func (ps *PebbleStore) putLease(wsPrefix [8]byte, id ULID, l Lease) error {
 	if err := batch.Set(keys.LeaseKey(wsPrefix, [16]byte(id)), val, nil); err != nil {
 		return fmt.Errorf("stage lease set: %w", err)
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit lease: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -107,7 +107,7 @@ func (ps *PebbleStore) deleteLease(wsPrefix [8]byte, id ULID) error {
 	if err := batch.Delete(keys.LeaseKey(wsPrefix, [16]byte(id)), nil); err != nil {
 		return fmt.Errorf("stage lease delete: %w", err)
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return fmt.Errorf("commit lease delete: %w", err)
 	}
 	ps.replicateBatch(batch)
@@ -159,6 +159,9 @@ func (ps *PebbleStore) CompareAndSet(ctx context.Context, wsPrefix [8]byte, id U
 	mu.Lock()
 	defer mu.Unlock()
 
+	// The condition may be evaluated on a cached copy: under this stripe no
+	// record writer can commit (STO-24) and the cache is never older than the
+	// last commit (STO-22). The state WRITE below re-reads the record itself.
 	metas, err := ps.GetMetadata(ctx, wsPrefix, []ULID{id})
 	if err != nil {
 		return CASOutcome{}, fmt.Errorf("cas get metadata: %w", err)
@@ -180,16 +183,30 @@ func (ps *PebbleStore) CompareAndSet(ctx context.Context, wsPrefix [8]byte, id U
 		return CASOutcome{Applied: false, State: cur.State, Lease: curLease}, nil
 	}
 
+	// Restore is the ONE way out of the soft-deleted state: a forget dropped
+	// the keyword postings and only Restore rebuilds them, so a state change
+	// from soft-deleted would bring the memory back unfindable by keyword
+	// (TestStateTransition_CannotUndeleteAroundRestore). Lease-only mutations
+	// of a forgotten memory are still allowed.
+	if mut.State != nil && cur.State == StateSoftDeleted && *mut.State != StateSoftDeleted {
+		return CASOutcome{State: cur.State, Lease: curLease}, fmt.Errorf("compare-and-set %s: %w", id.String(), ErrRestoreRequired)
+	}
+
 	newState := cur.State
 	newLease := curLease
 
 	// Apply the state change through the shared metadata path so the 0x0B state
 	// index, caches, provenance and replication all stay consistent.
 	if mut.State != nil {
-		updated := *cur
-		updated.State = *mut.State
-		updated.UpdatedAt = time.Now()
-		if err := ps.UpdateMetadata(ctx, wsPrefix, id, &updated); err != nil {
+		// Field-scoped (State, UpdatedAt) over the committed record, under the
+		// stripe lock held above: UpdateMetadata now takes that lock itself
+		// and it is not reentrant, and writing back *cur would also revert any
+		// field cur's cached copy did not have.
+		newSt := *mut.State
+		if err := ps.patchMetaLocked(ctx, wsPrefix, id, func(m *EngramMeta) {
+			m.State = newSt
+			m.UpdatedAt = time.Now()
+		}); err != nil {
 			return CASOutcome{}, fmt.Errorf("cas update state: %w", err)
 		}
 		newState = *mut.State

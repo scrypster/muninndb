@@ -34,7 +34,7 @@ func (ps *PebbleStore) WriteVaultName(wsPrefix [8]byte, name string) error {
 	batch.Set(metaKey, []byte(name), nil)
 	idxKey := keys.VaultNameIndexKey(name)
 	batch.Set(idxKey, wsPrefix[:], nil)
-	if err := batch.Commit(nil); err != nil {
+	if err := ps.commitBatch(batch, nil); err != nil {
 		return err
 	}
 	ps.vaultNameWritten.Store(wsPrefix, struct{}{})
@@ -118,7 +118,7 @@ func (ps *PebbleStore) BackfillVaultNames() error {
 			batch.Set(metaKey, []byte(name), nil)
 		}
 		batch.Set(idxKey, ws[:], nil)
-		if commitErr := batch.Commit(nil); commitErr != nil {
+		if commitErr := ps.commitBatch(batch, nil); commitErr != nil {
 			batch.Close()
 			return commitErr
 		}
@@ -167,7 +167,7 @@ func (ps *PebbleStore) RenameVault(ws [8]byte, oldName, newName string) error {
 	batch.Set(metaKey, []byte(newName), nil)
 	batch.Set(keys.VaultNameIndexKey(newName), ws[:], nil)
 	batch.Delete(keys.VaultNameIndexKey(oldName), nil)
-	if err := batch.Commit(nil); err != nil {
+	if err := ps.commitBatch(batch, nil); err != nil {
 		return fmt.Errorf("rename vault commit: %w", err)
 	}
 

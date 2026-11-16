@@ -76,7 +76,7 @@ func TestComputeACTR_SetsContentMatchFlooredOnlyWhenTheFloorFired(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := computeACTR(0, tt.fts, 0, 0, eng, 0, now, w, tt.inTagPool)
+			c := computeACTR(0, tt.fts, 0, 0, eng, now, w, tt.inTagPool)
 			if c.ContentMatchFloored != tt.wantFloored {
 				t.Errorf("ContentMatchFloored = %v, want %v (ContentMatch %.4f)",
 					c.ContentMatchFloored, tt.wantFloored, c.ContentMatch)

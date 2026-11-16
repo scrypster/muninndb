@@ -87,3 +87,50 @@ func TestGetEngrams_NoAccessCacheStampContext_DoesNotFreshenRecency(t *testing.T
 		t.Fatalf("a real (non-suppressed) GetEngrams must still stamp cache recency: EngramLastAccessNs=%d, want >= %d", ns, before)
 	}
 }
+
+// A suppressed (read-only) cache fill must not EVICT either. Eviction removes
+// the sampled entry with the oldest lastAccess — i.e. a warm entry whose stamp
+// is a live ACT-R recency input for the next recall. If a read-only recall's
+// cold-candidate fill pushes the cache over capacity and evicts one, the next
+// identical recall falls back to that engram's persisted LastAccess and scores
+// it differently: the read changed what the following read sees. On a full
+// cache the suppressed fill is skipped instead (the engram is still returned;
+// it is simply not cached, exactly as if it had been evicted later).
+//
+// The cache must be larger than evict()'s 64-entry sample: with a smaller one
+// the sample always includes the zero-stamped newcomer, which is then the
+// victim and the bug hides. With 512 entries each fill samples the newcomer
+// with probability ~1/8, so 40 fills evicting no stamped entry by luck is
+// ~1e-36 — the RED is deterministic in practice.
+func TestL1Cache_SetNoStamp_OnFullCacheDoesNotEvictStampedEntries(t *testing.T) {
+	const size = 512
+	c := NewL1Cache(size)
+	var ws [8]byte
+	stamped := make([]ULID, size)
+	for i := range stamped {
+		stamped[i] = ULID{0x01, byte(i >> 8), byte(i)}
+		c.Set(ws, stamped[i], &Engram{ID: stamped[i]})
+	}
+	before := make([]int64, size)
+	for i, id := range stamped {
+		before[i] = c.LastAccessNs(ws, id)
+		if before[i] == 0 {
+			t.Fatalf("fixture: entry %d not stamped", i)
+		}
+	}
+
+	for i := 0; i < 40; i++ {
+		cold := ULID{0x02, byte(i)}
+		c.SetNoStamp(ws, cold, &Engram{ID: cold})
+	}
+
+	for i, id := range stamped {
+		if got := c.LastAccessNs(ws, id); got != before[i] {
+			t.Fatalf("a suppressed SetNoStamp on a full cache evicted stamped entry %d (lastAccess %d -> %d): "+
+				"a read-only fill changed the recency the next recall scores with", i, before[i], got)
+		}
+	}
+	if n := c.Len(); n > size {
+		t.Fatalf("cache over capacity after suppressed fill: Len=%d, max %d", n, size)
+	}
+}
