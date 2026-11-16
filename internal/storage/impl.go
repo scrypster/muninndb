@@ -286,13 +286,20 @@ type vaultCounter struct {
 }
 
 // getOrInitCounter returns the vault counter, initializing it from Pebble on first access.
+//
+// Every caller waits for the initialization, including one that finds the
+// counter already in the map. The fast path used to return it straight away,
+// so a second writer could commit while the first writer's seed scan was still
+// running: the scan counted that engram and the writer's own Add counted it
+// again.
 func (ps *PebbleStore) getOrInitCounter(ctx context.Context, wsPrefix [8]byte) *vaultCounter {
+	var loaded *vaultCounter
 	if v, ok := ps.vaultCounters.Load(wsPrefix); ok {
-		return v.(*vaultCounter)
+		loaded = v.(*vaultCounter)
+	} else {
+		actual, _ := ps.vaultCounters.LoadOrStore(wsPrefix, &vaultCounter{})
+		loaded = actual.(*vaultCounter)
 	}
-	vc := &vaultCounter{}
-	actual, _ := ps.vaultCounters.LoadOrStore(wsPrefix, vc)
-	loaded := actual.(*vaultCounter)
 	loaded.once.Do(func() {
 		// Try to read persisted count from Pebble
 		countKey := keys.VaultCountKey(wsPrefix)
@@ -341,6 +348,19 @@ func (ps *PebbleStore) countEngramsForVault(ctx context.Context, wsPrefix [8]byt
 		return 0, fmt.Errorf("count engrams scan: %w", err)
 	}
 	return count, nil
+}
+
+// seedVaultCounter initializes ws's counter if this process has not yet. Every
+// path that adds to or subtracts from the counter must call it BEFORE it
+// commits the engrams it will count. Seeding afterwards let the seed scan see
+// those engrams and the following Add count them again: one high after a
+// single write, 2k after a first batch of k, persisted and trusted on every
+// later start, and PruneVault deleted real memories to pay for the excess.
+// Seeding first cannot double-count even under concurrent first writes:
+// sync.Once runs one scan, and no writer commits before its own seed call has
+// returned, so the scan only ever sees engrams nobody will add again.
+func (ps *PebbleStore) seedVaultCounter(ctx context.Context, wsPrefix [8]byte) {
+	ps.getOrInitCounter(ctx, wsPrefix)
 }
 
 // GetVaultCount returns the current engram count for a vault.
@@ -529,6 +549,7 @@ func (ps *PebbleStore) WriteEngram(ctx context.Context, wsPrefix [8]byte, eng *E
 	if ps.noSyncEngrams {
 		syncOption = pebble.NoSync
 	}
+	ps.seedVaultCounter(ctx, wsPrefix) // before the commit: see seedVaultCounter
 	if err := ps.commitBatch(batch, syncOption); err != nil {
 		return ULID{}, fmt.Errorf("commit batch: %w", err)
 	}
@@ -848,6 +869,11 @@ func (ps *PebbleStore) WriteEngramBatch(ctx context.Context, items []EngramBatch
 	syncOption := pebble.Sync
 	if ps.noSyncEngrams {
 		syncOption = pebble.NoSync
+	}
+	for i := range items {
+		if errs[i] == nil {
+			ps.seedVaultCounter(ctx, items[i].WSPrefix) // before the commit: see seedVaultCounter
+		}
 	}
 	if commitErr := ps.commitBatch(batch, syncOption); commitErr != nil {
 		for i := range errs {

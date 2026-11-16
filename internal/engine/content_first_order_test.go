@@ -627,6 +627,11 @@ func TestContentFirst_ReturnedSetIsTheTopContentMatches(t *testing.T) {
 // cfGoldenPath holds the trunk's output for the differential below. It was
 // generated on the trunk commit (CF_UPDATE_GOLDEN=1) before content-first order
 // existed and must not be regenerated to make a failure go away.
+//
+// It was regenerated once, deliberately, when the vault count stopped counting
+// a vault's first write twice: the trunk output had scored entity rarity
+// against 28 engrams in a vault holding 27. Exactly six lines moved, all in the
+// weighted_sum vault, all on the three entity-linked memories, each by -0.0011.
 const cfGoldenPath = "testdata/content_first_differential.golden"
 
 func cfDescribe(c *cfEnv, vault string, q string, limit int) string {

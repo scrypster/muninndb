@@ -600,6 +600,9 @@ func (ps *PebbleStore) StampValidUntilLocked(ctx context.Context, wsPrefix [8]by
 // DeleteEngram performs a hard delete: removes the engram, all association keys,
 // and all secondary indexes. Reads the engram first to gather index data.
 func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id ULID) error {
+	// Seeded before anything below commits: the decrement after the commit
+	// must not also be visible to the seed scan (see seedVaultCounter).
+	ps.seedVaultCounter(ctx, wsPrefix)
 	// Serialize against CompareAndSet on the same engram: hold the per-engram
 	// stripe lock across the read + delete-batch-commit, mirroring what
 	// CompareAndSet does. Otherwise a concurrent CAS can read the engram, this

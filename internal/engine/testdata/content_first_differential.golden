@@ -167,7 +167,7 @@ trail-diff-ws | "culvert outlet riprap drainage" | limit=5 | abstained=false
    3 riprap at the culvert outlet             score=0.9828 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    4 drainage culvert outlet notes            score=0.9738 abs=0.0000 band=uncalibrated/weighted_sum_fusion
 trail-diff-ws | "culvert outlet riprap drainage" | limit=20 | abstained=false 
-   0 riprap stone supply                      score=1.0347 abs=0.0000 band=uncalibrated/weighted_sum_fusion
+   0 riprap stone supply                      score=1.0336 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    1 drainage dip                             score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    2 culvert outlet riprap drainage check     score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    3 culvert outlet riprap drainage           score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
@@ -179,7 +179,7 @@ trail-diff-ws | "culvert outlet riprap drainage" | limit=20 | abstained=false
    9 culvert outlet drainage                  score=0.9422 abs=0.0000 band=uncalibrated/weighted_sum_fusion
   10 outlet drainage                          score=0.9319 abs=0.0000 band=uncalibrated/weighted_sum_fusion
   11 drainage riprap order                    score=0.9127 abs=0.0000 band=uncalibrated/weighted_sum_fusion
-  12 saddle campsite                          score=0.8922 abs=0.0000 band=uncalibrated/weighted_sum_fusion
+  12 saddle campsite                          score=0.8911 abs=0.0000 band=uncalibrated/weighted_sum_fusion
   13 riprap sizing                            score=0.8598 abs=0.0000 band=uncalibrated/weighted_sum_fusion
   14 culvert flagging                         score=0.8591 abs=0.0000 band=uncalibrated/weighted_sum_fusion
   15 outlet cleanup                           score=0.8508 abs=0.0000 band=uncalibrated/weighted_sum_fusion
@@ -194,7 +194,7 @@ trail-diff-ws | "riprap" | limit=5 | abstained=false
    3 riprap sizing                            score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    4 riprap drainage culvert                  score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
 trail-diff-ws | "riprap" | limit=20 | abstained=false 
-   0 culvert outlet riprap drainage           score=1.2011 abs=0.0000 band=uncalibrated/weighted_sum_fusion
+   0 culvert outlet riprap drainage           score=1.2000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    1 drainage dip                             score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    2 riprap stone supply                      score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    3 drainage riprap order                    score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
@@ -204,7 +204,7 @@ trail-diff-ws | "riprap" | limit=20 | abstained=false
    7 culvert outlet riprap                    score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    8 riprap at the culvert outlet             score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    9 culvert outlet riprap drainage check     score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
-  10 saddle campsite                          score=0.8922 abs=0.0000 band=uncalibrated/weighted_sum_fusion
+  10 saddle campsite                          score=0.8911 abs=0.0000 band=uncalibrated/weighted_sum_fusion
   11 culvert flagging                         score=0.8549 abs=0.0000 band=uncalibrated/weighted_sum_fusion
   12 outlet cleanup                           score=0.8466 abs=0.0000 band=uncalibrated/weighted_sum_fusion
   13 culvert apron                            score=0.8417 abs=0.0000 band=uncalibrated/weighted_sum_fusion
@@ -276,7 +276,7 @@ trail-diff-ws | "zyqx vrembolt quillet" | limit=5 | abstained=false
    4 drainage riprap order                    score=0.6653 abs=0.0000 band=uncalibrated/weighted_sum_fusion
 trail-diff-ws | "zyqx vrembolt quillet" | limit=20 | abstained=false 
    0 drainage dip                             score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
-   1 culvert outlet riprap drainage           score=0.8338 abs=0.0000 band=uncalibrated/weighted_sum_fusion
+   1 culvert outlet riprap drainage           score=0.8327 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    2 saddle campsite                          score=0.6911 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    3 drainage stone inventory                 score=0.6824 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    4 riprap stone supply                      score=0.6789 abs=0.0000 band=uncalibrated/weighted_sum_fusion
@@ -303,7 +303,7 @@ trail-diff-ws | "the of and" | limit=5 | abstained=false
    4 drainage riprap order                    score=0.6653 abs=0.0000 band=uncalibrated/weighted_sum_fusion
 trail-diff-ws | "the of and" | limit=20 | abstained=false 
    0 drainage dip                             score=1.0000 abs=0.0000 band=uncalibrated/weighted_sum_fusion
-   1 culvert outlet riprap drainage           score=0.8338 abs=0.0000 band=uncalibrated/weighted_sum_fusion
+   1 culvert outlet riprap drainage           score=0.8327 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    2 saddle campsite                          score=0.6911 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    3 drainage stone inventory                 score=0.6824 abs=0.0000 band=uncalibrated/weighted_sum_fusion
    4 riprap stone supply                      score=0.6789 abs=0.0000 band=uncalibrated/weighted_sum_fusion

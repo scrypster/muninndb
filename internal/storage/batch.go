@@ -651,6 +651,9 @@ func (b *pebbleStoreBatch) Commit() error {
 	if locked {
 		commitOpt = pebble.NoSync
 	}
+	for _, item := range b.pendingItems {
+		b.ps.seedVaultCounter(context.Background(), item.wsPrefix) // before the commit: see seedVaultCounter
+	}
 	err = b.ps.commitBatch(b.batch, commitOpt)
 	if err != nil {
 		unlockAssocGuard()
