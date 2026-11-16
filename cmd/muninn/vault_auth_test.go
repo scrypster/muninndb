@@ -349,10 +349,17 @@ func TestLoginAdmin_NoCookie200(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAddSessionCookie_WhenSet(t *testing.T) {
-	oldCookie := vaultCookie
-	defer func() { vaultCookie = oldCookie }()
+	oldCookie, oldHost := vaultCookie, vaultCookieHost
+	defer func() { vaultCookie, vaultCookieHost = oldCookie, oldHost }()
 
-	vaultCookie = "my-session-tok"
+	// The session is attached to a request to the host that issued it, and to
+	// no other (sessionCookieFor).
+	vaultCookie, vaultCookieHost = "my-session-tok", "example.com"
+	elsewhere, _ := http.NewRequest("GET", "http://elsewhere.example.com/test", nil)
+	addSessionCookie(elsewhere)
+	if _, err := elsewhere.Cookie("muninn_session"); err == nil {
+		t.Errorf("the session was attached to a request to a host that did not issue it")
+	}
 	req, _ := http.NewRequest("GET", "http://example.com/test", nil)
 	addSessionCookie(req)
 

@@ -66,7 +66,7 @@ func TestShellSignInKeepsTheSessionItSignedInWith(t *testing.T) {
 		t.Errorf("session after signing in with the operator's own credentials = %q; want the session that login returned", cookie)
 	}
 
-	r := &replState{sessionCookie: cookie}
+	r := &replState{sessionCookie: cookie, sessionHosts: []string{hostOf(ts.URL)}}
 	out := captureStdout(func() { r.cmdShowVaults() })
 	for _, vault := range []string{"default", "pilot-station", "customs-ledger"} {
 		if !strings.Contains(out, vault) {

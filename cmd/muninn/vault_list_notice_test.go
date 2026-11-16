@@ -48,6 +48,17 @@ func vaultListServer(t *testing.T, loginOK, defaultPublic bool) {
 	})
 }
 
+// exitStatus runs f with the process exit replaced, and returns the status f
+// asked to exit with (zero if it did not ask) and what it printed.
+func exitStatus(t *testing.T, f func()) (code int, out string) {
+	t.Helper()
+	old := osExit
+	osExit = func(c int) { code = c }
+	defer func() { osExit = old }()
+	out = captureStdout(f)
+	return code, out
+}
+
 // TestVaultList_WhatItSaysIsTrue pins what `muninn vault list` tells the
 // operator about the list it printed, in each situation it can be in. The
 // earlier text, "only vaults open to anyone are shown", was wrong twice: a
@@ -58,7 +69,10 @@ func TestVaultList_WhatItSaysIsTrue(t *testing.T) {
 
 	t.Run("signed in: every vault, and nothing more to say", func(t *testing.T) {
 		vaultListServer(t, true, true)
-		out := captureStdout(func() { runVault([]string{"list"}) })
+		code, out := exitStatus(t, func() { runVault([]string{"list"}) })
+		if code != 0 {
+			t.Errorf("exit status %d; want 0", code)
+		}
 		for _, vault := range []string{"default", "harbour-notices", "pilot-station"} {
 			if !strings.Contains(out, vault) {
 				t.Errorf("vault %q is missing:\n%s", vault, out)
@@ -71,7 +85,10 @@ func TestVaultList_WhatItSaysIsTrue(t *testing.T) {
 
 	t.Run("not signed in: the default vault only, and it says other public vaults are missing too", func(t *testing.T) {
 		vaultListServer(t, false, true)
-		out := captureStdout(func() { runVault([]string{"list"}) })
+		code, out := exitStatus(t, func() { runVault([]string{"list"}) })
+		if code != 0 {
+			t.Errorf("exit status %d; want 0: a list was printed, and it says what it is", code)
+		}
 		if !strings.Contains(out, "  default\n") || strings.Contains(out, "harbour-notices") {
 			t.Fatalf("want exactly the default vault listed:\n%s", out)
 		}
@@ -87,7 +104,10 @@ func TestVaultList_WhatItSaysIsTrue(t *testing.T) {
 
 	t.Run("not signed in and the default vault is locked: nothing is listed, and it says why", func(t *testing.T) {
 		vaultListServer(t, false, false)
-		out := captureStdout(func() { runVault([]string{"list"}) })
+		code, out := exitStatus(t, func() { runVault([]string{"list"}) })
+		if code == 0 {
+			t.Errorf("exit status 0 with nothing listed: a script would read that as a server with no vaults")
+		}
 		if strings.Contains(out, "vault(s)") || strings.Contains(out, "only vaults open to anyone are shown") {
 			t.Errorf("nothing was listed, yet the output describes a list:\n%s", out)
 		}
@@ -105,7 +125,10 @@ func TestVaultList_WhatItSaysIsTrue(t *testing.T) {
 		vaultAdminBase, vaultUIBase, vaultCookie = dead, dead, ""
 		t.Cleanup(func() { vaultAdminBase, vaultUIBase, vaultCookie = oldAdmin, oldUI, oldCookie })
 
-		out := captureStdout(func() { runVault([]string{"list"}) })
+		code, out := exitStatus(t, func() { runVault([]string{"list"}) })
+		if code == 0 {
+			t.Errorf("exit status 0 although the server was not reached")
+		}
 		if !strings.Contains(out, "Error connecting to MuninnDB") {
 			t.Errorf("no connection error:\n%s", out)
 		}
@@ -138,7 +161,11 @@ func TestShowVaults_SignsInAndSaysWhenItCouldNot(t *testing.T) {
 	t.Run("default credentials work: every vault", func(t *testing.T) {
 		vaultListServer(t, true, true)
 		t.Setenv("MUNINNDB_ADMIN_URL", vaultAdminBase)
-		out := captureStdout(runShowVaults)
+		t.Setenv("MUNINNDB_DATA", t.TempDir())
+		code, out := exitStatus(t, runShowVaults)
+		if code != 0 {
+			t.Errorf("exit status %d; want 0", code)
+		}
 		for _, vault := range []string{"default", "harbour-notices", "pilot-station"} {
 			if !strings.Contains(out, vault) {
 				t.Errorf("vault %q is missing:\n%s", vault, out)
@@ -151,7 +178,8 @@ func TestShowVaults_SignsInAndSaysWhenItCouldNot(t *testing.T) {
 	t.Run("default credentials refused: the short list, and it says so", func(t *testing.T) {
 		vaultListServer(t, false, true)
 		t.Setenv("MUNINNDB_ADMIN_URL", vaultAdminBase)
-		out := captureStdout(runShowVaults)
+		t.Setenv("MUNINNDB_DATA", t.TempDir())
+		_, out := exitStatus(t, runShowVaults)
 		if !strings.Contains(out, "default") || strings.Contains(out, "pilot-station") {
 			t.Fatalf("want only the default vault:\n%s", out)
 		}
@@ -159,6 +187,38 @@ func TestShowVaults_SignsInAndSaysWhenItCouldNot(t *testing.T) {
 			if !strings.Contains(out, want) {
 				t.Errorf("the output does not say %q:\n%s", want, out)
 			}
+		}
+	})
+}
+
+// TestVaultList_ExitStatus pins what a script can rely on: the status is zero
+// only when a list was printed and nothing the user asked for failed. It used
+// to be zero whatever happened, so an unreachable server and a refused password
+// both read as success.
+func TestVaultList_ExitStatus(t *testing.T) {
+	t.Run("a password the server refuses is a failure, even though the short list is printed", func(t *testing.T) {
+		vaultListServer(t, false, true)
+		code, out := exitStatus(t, func() { runVault([]string{"-u", "harbourmaster", "--password=not-the-password", "list"}) })
+		if code == 0 {
+			t.Errorf("exit status 0 after the given credentials were refused:\n%s", out)
+		}
+		if !strings.Contains(out, "Not signed in as admin") {
+			t.Errorf("the output does not say the list is the short one:\n%s", out)
+		}
+	})
+	t.Run("show vaults: nothing listed is a failure, and no vault is invented", func(t *testing.T) {
+		vaultListServer(t, false, false)
+		t.Setenv("MUNINNDB_ADMIN_URL", vaultAdminBase)
+		t.Setenv("MUNINNDB_DATA", t.TempDir())
+		code, out := exitStatus(t, runShowVaults)
+		if code == 0 {
+			t.Errorf("exit status 0 with nothing listed")
+		}
+		if strings.Contains(out, "(built-in)") || strings.Contains(out, "  default") {
+			t.Errorf("the server listed nothing, yet the output names a vault:\n%s", out)
+		}
+		if !strings.Contains(out, "default vault is not public") {
+			t.Errorf("the output does not say why nothing is listed:\n%s", out)
 		}
 	})
 }

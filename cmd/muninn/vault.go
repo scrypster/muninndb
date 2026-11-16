@@ -70,8 +70,17 @@ func runVault(args []string) {
 	// given, or the defaults — and say so plainly when the list is the short
 	// one. It never prompts unless -p asked it to.
 	if sub == "list" {
-		signedIn := signInForVaultList(username, password, prompted)
-		printVaultListNotice(signedIn, runVaultList(subArgs))
+		signIn := signInForVaultList(username, password, prompted)
+		// Signed in means signed in to the server the list comes from. A
+		// session issued by another host is not sent there (sessionCookieFor).
+		if signIn == signedIn && !signedInTo(vaultAdminBase) {
+			signIn = signInElsewhere
+		}
+		outcome := runVaultList(subArgs)
+		printVaultListNotice(signIn, outcome)
+		if code := vaultListExitCode(signIn, outcome); code != 0 {
+			osExit(code)
+		}
 		return
 	}
 
@@ -238,7 +247,8 @@ const (
 // printVaultListNotice says what the list just printed is, when it is not
 // every vault. Each line is true of the case it is printed in:
 //
-//   - Signed in as admin, the list is complete and there is nothing to add.
+//   - Signed in as admin to the server that answered, the list is complete and
+//     there is nothing to add.
 //   - Not signed in, the server answers a caller with no credential with the
 //     ONE vault that request is on, the default vault, and only when that vault
 //     is public (SEC-25). It is not "the public vaults": another public vault
@@ -246,23 +256,44 @@ const (
 //   - Not signed in with the default vault locked, the server lists nothing.
 //   - When the server was not reached, or failed some other way, nothing was
 //     listed and the error already printed is the whole story.
-func printVaultListNotice(signedIn bool, outcome vaultListOutcome) {
-	if signedIn {
+//
+// It also says why there is no session, because the reasons call for different
+// things: the default credentials were refused, none were tried because the
+// server is another machine, or the session held belongs to another host.
+func printVaultListNotice(signIn vaultSignIn, outcome vaultListOutcome) {
+	if signIn == signedIn || (outcome != vaultsListed && outcome != vaultListRefused) {
 		return
 	}
 	const howTo = "To list every vault: muninn vault list -u <admin user> -p"
-	switch outcome {
-	case vaultsListed:
+	if outcome == vaultsListed {
 		fmt.Println()
 		fmt.Println("Not signed in as admin, so this is not every vault. Without a sign-in the")
 		fmt.Println("server lists only the default vault, and only because it is public. No")
 		fmt.Println("other vault is listed, public ones included.")
-		fmt.Println(howTo)
-	case vaultListRefused:
+	} else {
 		fmt.Println("Not signed in as admin, and the default vault is not public, so the server")
 		fmt.Println("lists no vaults to this command.")
-		fmt.Println(howTo)
 	}
+	switch signIn {
+	case signInNotAttempted:
+		fmt.Println("No credentials were given, and the default ones are not sent to another machine.")
+	case signInElsewhere:
+		fmt.Println("The sign-in went to a different host from the one the list came from, and a")
+		fmt.Println("session is sent only to the host that issued it. Set MUNINNDB_UI_URL to the")
+		fmt.Println("sign-in address of the server you are listing, or use -h.")
+	}
+	fmt.Println(howTo)
+}
+
+// vaultListExitCode is the status `vault list` and `show vaults` exit with. It
+// is zero only when a list was printed and nothing the user asked for failed:
+// a script must be able to tell a list from no list, and a refused password
+// from a short list.
+func vaultListExitCode(signIn vaultSignIn, outcome vaultListOutcome) int {
+	if outcome != vaultsListed || signIn == signInRefused {
+		return 1
+	}
+	return 0
 }
 
 func runVaultList(args []string) vaultListOutcome {

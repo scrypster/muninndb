@@ -15,11 +15,12 @@ import (
 )
 
 type replState struct {
-	vault         string // current vault context (empty = no vault selected)
-	mcpURL        string // e.g. "http://127.0.0.1:8750"
-	cmdCount      int    // total commands run this session (for tip rotation)
-	firstRun      bool   // true if no config file existed at shell start
-	sessionCookie string // for REST API calls requiring admin auth
+	vault         string   // current vault context (empty = no vault selected)
+	mcpURL        string   // e.g. "http://127.0.0.1:8750"
+	cmdCount      int      // total commands run this session (for tip rotation)
+	firstRun      bool     // true if no config file existed at shell start
+	sessionCookie string   // for REST API calls requiring admin auth
+	sessionHosts  []string // the hosts sessionCookie may be sent to: its issuer, and an API host paired with it
 }
 
 func (r *replState) prompt() string {
@@ -66,10 +67,9 @@ func runShell() {
 	if mcpURL == "" {
 		mcpURL = "http://127.0.0.1:8750"
 	}
-	uiBase := os.Getenv("MUNINNDB_UI_URL")
-	if uiBase == "" {
-		uiBase = "http://127.0.0.1:8476"
-	}
+	// Where to sign in: MUNINNDB_UI_URL, or else derived from MUNINNDB_ADMIN_URL
+	// so that the shell signs in to the server it is going to talk to.
+	_, uiBase, pairedHost := cliBases(os.Getenv("MUNINNDB_ADMIN_URL"), os.Getenv("MUNINNDB_UI_URL"))
 
 	// Detect first run (no config file = user hasn't used 'use <vault>' before)
 	_, configErr := os.Stat(configPath())
@@ -109,6 +109,7 @@ func runShell() {
 	}
 
 	r.sessionCookie = sessionCookie
+	r.sessionHosts = []string{hostOf(uiBase), pairedHost}
 
 	scanner := bufio.NewScanner(os.Stdin)
 
@@ -296,10 +297,14 @@ func (r *replState) printRotatingTip() {
 // The session matters beyond the prompt: the vault list is scoped to the
 // caller (SEC-25), so a shell with no admin session is shown one vault.
 func replSignIn(uiBase string, ask func() (username, password string, err error)) (string, error) {
-	if sessionCookie, err := autoAuth(uiBase); err == nil {
-		return sessionCookie, nil
+	// The default credentials are tried on this machine only. Another machine
+	// is sent no credential the operator did not type.
+	if defaultCredentialsAllowed(uiBase) {
+		if sessionCookie, err := autoAuth(uiBase); err == nil {
+			return sessionCookie, nil
+		}
 	}
-	// Default creds failed — prompt once
+	// No default credentials, or they failed — prompt once
 	username, password, err := ask()
 	if err != nil {
 		return "", err

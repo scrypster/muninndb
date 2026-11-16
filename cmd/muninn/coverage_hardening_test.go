@@ -869,9 +869,11 @@ func TestRunShowVaults_NoServer(t *testing.T) {
 	vaultUIBase, vaultCookie = "http://127.0.0.1:0", ""
 	defer func() { vaultUIBase, vaultCookie = oldUI, oldCookie }()
 
-	out := captureStdout(func() {
-		runShowVaults()
-	})
+	t.Setenv("MUNINNDB_DATA", t.TempDir()) // not this machine's own data directory
+	code, out := exitStatus(t, runShowVaults)
+	if code == 0 {
+		t.Errorf("exit status 0 although the server was not reached")
+	}
 	if strings.Contains(out, "Not signed in") || strings.Contains(out, "muninn vault list -u") {
 		t.Errorf("the server was never reached and nothing was listed, yet the output talks about the list:\n%s", out)
 	}

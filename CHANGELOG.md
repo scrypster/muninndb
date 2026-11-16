@@ -560,17 +560,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **What changed:** with a key, or with no credential on a public vault, the list is now
   the caller's own vault only. The admin session still gets every vault, so the web
   console is unchanged. `muninn vault list` and `muninn show vaults` used the
-  unauthenticated list. They now sign in as admin first, `muninn vault list` with
-  `-u`/`-p` if given, and otherwise both with the default credentials. If the sign-in
-  fails, the command lists what the server will tell it, which is the `default` vault
-  and only when that vault is public, and says that this is not every vault. Other
-  public vaults are not listed without a sign-in. Neither command prompts unless you
-  pass `-p`. Scripts that ran `muninn vault list` against a server whose admin password
-  has been changed need `-u <user> --password=<pw>` to get the full list. The
-  interactive shell signs in when it starts and lists every vault, as before. SDK
+  unauthenticated list. They now sign in as admin first: `muninn vault list` with
+  `-u`/`-p` if given, and otherwise both with the default credentials, but only when
+  the server is on this machine. Another machine is sent no credential you did not
+  give. If there is no sign-in, the command lists what the server will tell it, which
+  is the `default` vault and only when that vault is public, and says that this is not
+  every vault and why. Other public vaults are not listed without a sign-in. Neither
+  command prompts unless you pass `-p`. Scripts that ran `muninn vault list` against a
+  server whose admin password has been changed, or against another machine, need
+  `-u <user> --password=<pw>` to get the full list. The interactive shell signs in when
+  it starts and lists every vault, as before. On another machine it now asks for the
+  credentials instead of trying the default ones first.
+  **Three things to know about the sign-in.** On a local server whose admin password
+  has been changed, each `muninn vault list` or `muninn show vaults` run without
+  credentials tries the default ones, fails, and leaves an `auth.login_failed` entry
+  for `root` in the audit log. Pass `-u`/`-p` to avoid it. The address the CLI signs
+  in at now follows `MUNINNDB_ADMIN_URL` unless `MUNINNDB_UI_URL` is set, and a session
+  is sent only to the host that issued it (see the next entry). And the exit
+  status of the two listing commands is no longer always 0: it is 1 when the server
+  could not be reached, when it listed nothing, and when credentials you gave were
+  refused. `muninn show vaults` no longer prints "default (built-in)" when the server
+  listed nothing. SDK
   `list vaults` calls made with a
   key now return one name. `openapi.yaml` describes the scoping, and documents the
   response as the JSON array the server has always sent (SEC-25).
+
+- The CLI no longer sends an admin session to a server that did not issue it. The CLI
+  signs in at one address and sends admin requests to another, and the two were set
+  separately: `MUNINNDB_UI_URL` for the sign-in and `MUNINNDB_ADMIN_URL` for the
+  requests. With only `MUNINNDB_ADMIN_URL` set, the sign-in stayed at this machine's
+  own server. So `muninn vault ...`, `muninn api-key ...` and the other admin commands
+  signed in to the LOCAL server and then sent its admin session cookie to the other
+  server with every request. The interactive shell did the same for `show vaults`.
+  **Who is affected:** anyone who has run the CLI with `MUNINNDB_ADMIN_URL` pointing at
+  another machine and without `MUNINNDB_UI_URL`, while a MuninnDB server was running
+  on their own machine that accepted the sign-in (the default credentials are tried
+  first). Releases v0.5.1 to v0.11.0 for the admin commands, v0.6.1 to v0.11.0 for the
+  shell. `-h <host>` was not affected.
+  **What the other server learned:** a session cookie that is valid as admin on your
+  local server for up to 24 hours. It is of use only to someone who can also reach your
+  local server's ports, which listen on loopback unless you changed that. Over plain
+  `http://` it was also visible to anyone on the path.
+  **What to do:** upgrade. A session expires 24 hours after it was issued, and nothing
+  in this release or before it revokes one sooner. If this applies to you and your
+  local server can be reached from the network, limit what can reach it until the last
+  such session has expired.
+  **What changed:** with only `MUNINNDB_ADMIN_URL` set, the CLI now signs in at the same
+  host on the next port, as `-h` always has. Set `MUNINNDB_UI_URL` if your server's
+  console is somewhere else. A session cookie is sent only to the host that issued it,
+  or to the API host you named together with the sign-in address by setting both
+  variables. The default credentials are tried without being asked only on this
+  machine. On another machine the shell asks for credentials, and the listing commands
+  say that none were sent (SEC-31).
 
 - Subscriptions over MBP now belong to the connection that made them, and no longer use
   up a vault's subscription limit. Over MBP, any connection could cancel any subscription
