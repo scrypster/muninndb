@@ -33,7 +33,9 @@ const (
 	//                          existing engram/entity/lease/enrichment is refused (engine-level
 	//                          via refuseAppend, so it holds on all transports; MCP also gates at
 	//                          dispatch). The credential for automated capture (flush): it can add
-	//                          memories and recall, never overwrite/evolve/forget/archive/re-trust.
+	//                          memories and recall, never overwrite/evolve/forget/archive/re-trust —
+	//                          nor supersede: a write that declares an inline `supersedes` retires
+	//                          the memory it names and is refused like muninn_link (COG-38).
 	//                          Accepted residuals — all reinforcement ("strengthens with use"), never
 	//                          destruction: (a) remember on a content-hash duplicate reinforces an
 	//                          existing engram's access metadata (TouchAccess, #682); (b) the read

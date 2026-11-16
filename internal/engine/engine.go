@@ -370,8 +370,12 @@ type Engine struct {
 	// evolveLocks serialise evolve's read-target → fork-guard → commit
 	// sequence per (vault, target id), so two simultaneous evolves of one
 	// memory cannot both see it as current and both write a successor.
-	// Lock order: upsertKeyLock (upsert path) → evolveLock; nothing takes
-	// them in the other order.
+	// Lock order: upsertKeyLock (upsert path) → idempotency lock →
+	// contentHashLock → evolveLock; nothing takes them in the other order.
+	// A write that declares inline supersedes of several memories holds
+	// several stripes at once, always taken in ascending stripe order
+	// (lockSupersedeTargets); evolve and Link hold exactly one and wait for no
+	// other evolve stripe while they do.
 	evolveLocks [upsertKeyStripes]sync.Mutex
 
 	// idempotencyLocks provides per-op_id mutexes to prevent TOCTOU races in the
@@ -1516,6 +1520,17 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	if err := e.refuseNonLeaderWrite(); err != nil {
 		return nil, err
 	}
+	// COG-38 / SEC-15: a write that declares an inline supersedes retires the
+	// memory it names. That modifies existing state, so an append credential
+	// is refused exactly as it is for Link — here, before the upsert dispatch,
+	// the idempotency replay and the dedup path, so none of them can carry the
+	// declaration past the gate.
+	declaresSupersedes := declaresInlineSupersedes(req)
+	if declaresSupersedes {
+		if err := e.refuseInlineSupersedesForAppend(ctx); err != nil {
+			return nil, err
+		}
+	}
 	writeStart := time.Now()
 	wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
 	e.activity.Record(wsPrefix)
@@ -1713,7 +1728,39 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 	}
 
 	// Write to store
-	id, err := e.store.WriteEngram(ctx, wsPrefix, eng)
+	var id storage.ULID
+	var err error
+	if declaresSupersedes && !skipContentDedup(ctx) {
+		// COG-38: a NEW memory that declares an inline supersedes makes the
+		// declaration Link(supersedes) makes, so it goes through the same
+		// guard and retires its target the same way — and the engram, the
+		// edge and the retirement are one atomic batch. The supersedes edges
+		// leave eng.Associations for the guarded writer; every other inline
+		// edge is written with the engram as before.
+		//
+		// Reached only by a write that creates a memory under its own
+		// content: a content-hash dedup hit returned above, and an upsert_mode
+		// create (the one caller that sets skipContentDedup) keeps its
+		// existing inline write below. Both resolve through a memory that may
+		// already hold the declaration, which this path does not ask about —
+		// see the scope note in inline_supersedes.go.
+		declaredSup, supErr := e.declaredSupersedes(req, vaultName)
+		if supErr != nil {
+			return nil, supErr
+		}
+		rest, splitErr := splitInlineSupersedes(assocs)
+		if splitErr != nil {
+			return nil, splitErr
+		}
+		eng.Associations = rest
+		err = e.commitNewEngramSuperseding(ctx, wsPrefix, eng, declaredSup)
+		id = eng.ID
+		// The full edge set again, for the post-commit consumers below
+		// (contradiction worker, triggers), which see what they always saw.
+		eng.Associations = assocs
+	} else {
+		id, err = e.store.WriteEngram(ctx, wsPrefix, eng)
+	}
 	if err != nil {
 		// An inline association naming an engram that no longer exists is the
 		// caller's mistake, not a storage fault — the same class as the
@@ -1722,6 +1769,12 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		// 500 (STO-12).
 		if errors.Is(err, storage.ErrDanglingEndpoint) {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidID, err)
+		}
+		// A refused supersedes declaration already says what was refused and
+		// why; it is not a storage fault and is returned as it is.
+		var refused *inlineSupersedesError
+		if errors.As(err, &refused) {
+			return nil, err
 		}
 		return nil, fmt.Errorf("write engram: %w", err)
 	}
@@ -2077,6 +2130,15 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	if err := e.validateClientEmbeddingDim(wsPrefix, req.Embedding); err != nil {
 		return nil, err
 	}
+	// COG-38 / SEC-15: the append gate, here as well as in Write, because
+	// WriteBatch enters this function directly. It is the only thing this
+	// path does about an inline supersedes in this increment: a create still
+	// writes the edge inline with the engram and a hit still ignores it.
+	if declaresInlineSupersedes(req) {
+		if err := e.refuseInlineSupersedesForAppend(ctx); err != nil {
+			return nil, err
+		}
+	}
 
 	keyHash := sha256.Sum256([]byte(req.IdempotentID))
 	mu := e.upsertKeyLock(wsPrefix, keyHash)
@@ -2316,6 +2378,9 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 	}
 	firstByContent := make(map[batchContentKey]int)
 	contentDuplicates := make(map[int]int) // duplicate item index → first-occurrence index
+	// Items that declare an inline supersedes (COG-38): written one at a time
+	// through Engine.Write after the bulk commit. See the routing below.
+	var routedSupersedes []int
 
 	for i, req := range reqs {
 		wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
@@ -2353,6 +2418,29 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 				continue
 			}
 			seenOpIDs[req.IdempotentID] = i
+		}
+
+		// ── Inline supersedes: one item at a time, through Write (COG-38) ──
+		// An item that declares a supersession retires another memory, so it
+		// needs what the bulk commit below cannot give it: the target's
+		// evolveLock, the fork guard, and the engram, edge and retirement in
+		// one atomic batch of its own. It is therefore written by Engine.Write
+		// — the same per-item routing the upsert branch above uses, and the
+		// same per-item contract — AFTER the bulk commit, so it sees every
+		// other item of this batch (content-hash dedup, op_id receipts) and
+		// every earlier superseding item (two items superseding one memory:
+		// the second is refused naming the first). Placed after the op_id
+		// block on purpose: an in-batch replay of an op_id stays a replay.
+		// The placeholder keeps the item out of the bulk commit.
+		//
+		// Two consequences for the caller: a superseding item's id sorts after
+		// the bulk items' whatever the request order, and a batch that
+		// contains one is several commits, not one — a crash can leave the
+		// bulk items stored and a superseding item not.
+		if declaresInlineSupersedes(req) {
+			routedSupersedes = append(routedSupersedes, i)
+			responses[i] = &mbp.WriteResponse{Hint: "pending_inline_supersedes"}
+			continue
 		}
 
 		// ── Content-hash dedup: same O(1) check as single Write ──────
@@ -2567,6 +2655,22 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		}
 	}
 
+	// Inline-supersedes items (COG-38), in request order, now that the bulk
+	// items are committed. Each is a complete single write — its own commit,
+	// receipt, content hash and post-commit hooks — so Phase 3 skips it. A
+	// refusal fails only its own item, with the error a single write returns.
+	// Before the two duplicate-resolution loops below, which read the
+	// first occurrence's final response.
+	for _, i := range routedSupersedes {
+		responses[i] = nil
+		resp, err := e.Write(ctx, reqs[i])
+		if err != nil {
+			errs[i] = err
+			continue
+		}
+		responses[i] = resp
+	}
+
 	// Intra-batch exact-content duplicates resolve to the first occurrence's
 	// new engram, reported the same way as a duplicate of a stored memory.
 	for dupIdx, firstIdx := range contentDuplicates {
@@ -2605,6 +2709,11 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 		// but the check stays defensive against future hint names.
 		if responses[i].Hint == "upsert-created" || responses[i].Hint == "upsert-evolved" ||
 			responses[i].Hint == "upsert-identical" || responses[i].Hint == "upsert-merged" {
+			continue
+		}
+		// Skip inline-supersedes items — Engine.Write committed them and ran
+		// their hooks; prepared[i]/ids[i] were never populated (COG-38).
+		if prepared[i].eng == nil {
 			continue
 		}
 		p := &prepared[i]
@@ -3884,11 +3993,8 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 		if meta == nil {
 			return nil, ErrEngramNotFound
 		}
-		if meta.State == storage.StateSoftDeleted {
-			return nil, ErrEngramSoftDeleted
-		}
-		if meta.State == storage.StateArchived {
-			return nil, ErrEngramArchived
+		if err := linkEndpointStateErr(meta.State); err != nil {
+			return nil, err
 		}
 	}
 

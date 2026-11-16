@@ -145,8 +145,14 @@ components:
             $ref: "#/components/schemas/InlineEntity"
         relationships:
           type: array
+          description: "Inline edges from this engram to existing engrams, by relation name. On a write that creates an engram, a `supersedes` relationship is a declaration with the same meaning and effect as POST /api/link with the supersedes relation: the target is retired (its valid_until is stamped if it was open; it stays readable as history) in the same atomic commit as the write. The write is refused and nothing is stored when the target cannot be superseded — 400 if it does not exist in this vault, 409 if it is forgotten or already has a successor (the message names the current version), 403 for an append-mode credential, 422 if the vault's inline_enrichment is background_only (which ignores caller relationships) or the request also declares another relation to the same target at the same weight. Not applied when the write resolves to an engram that already exists: identical content (the response carries hint duplicate_content) or upsert_mode. Other relations are stored as plain edges."
           items:
             $ref: "#/components/schemas/InlineRelationship"
+        associations:
+          type: array
+          description: "Inline edges from this engram to existing engrams, by numeric rel_type (the form gRPC and MBP also carry). An edge whose rel_type is supersedes (4) follows the same rule as a `supersedes` entry in `relationships`: on a write that creates an engram it retires its target atomically with the write, or the write is refused."
+          items:
+            $ref: "#/components/schemas/InlineAssociation"
 
     InlineEntity:
       type: object
@@ -164,6 +170,22 @@ components:
         relation:
           type: string
         weight:
+          type: number
+          format: float
+
+    InlineAssociation:
+      type: object
+      properties:
+        target_id:
+          type: string
+        rel_type:
+          type: integer
+          description: "Numeric relation type (1 supports, 2 contradicts, 3 depends_on, 4 supersedes, 5 relates_to, ...)."
+        weight:
+          type: number
+          format: float
+          description: "0 to 1. Values at or above 1 are stored as 1 and values at or below 0 as 0."
+        confidence:
           type: number
           format: float
 
@@ -2293,7 +2315,13 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: "Idempotency key collision."
+          description: "Idempotency key collision; or the write declares an inline supersedes whose target is forgotten or already has a successor (the message says what was and was not stored and names the current version)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "The request is well-formed but cannot be honoured as written (for example an out-of-range created_at, or an inline supersedes the vault's settings would drop). Nothing is stored."
           content:
             application/json:
               schema:
