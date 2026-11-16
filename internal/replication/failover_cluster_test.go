@@ -45,6 +45,11 @@ type clusterNode struct {
 	runDone chan struct{}
 	serveWG sync.WaitGroup
 	stopped bool
+
+	// accepted holds every connection the listener handed out, so stop can
+	// close them all the way a dying process closes its sockets.
+	acceptedMu sync.Mutex
+	accepted   []net.Conn
 }
 
 // newCluster builds one node per id on loopback, each seeded with the others.
@@ -154,6 +159,9 @@ func (n *clusterNode) start() {
 			if err != nil {
 				return // listener closed
 			}
+			n.acceptedMu.Lock()
+			n.accepted = append(n.accepted, conn)
+			n.acceptedMu.Unlock()
 			n.serveWG.Add(1)
 			go func() {
 				defer n.serveWG.Done()
@@ -176,6 +184,16 @@ func (n *clusterNode) stop() {
 	}
 	_ = n.ln.Close()
 	_ = n.coord.Stop()
+	// Stop closes the connections the coordinator has registered. A handshake
+	// that was still being served when Stop ran registers its connection
+	// afterwards, and nothing closes that one while the peer stays up: the
+	// loop serving it would read its pings until the peer itself stopped. A
+	// killed process leaves no such connection behind, so neither does this.
+	n.acceptedMu.Lock()
+	for _, conn := range n.accepted {
+		_ = conn.Close()
+	}
+	n.acceptedMu.Unlock()
 	if n.runDone != nil {
 		select {
 		case <-n.runDone:
