@@ -175,6 +175,15 @@ func RawTagRangePrefix(ws [8]byte, tagKeyHash uint32) []byte {
 	return key
 }
 
+// rawTagRangeKeyFixedLen is the fixed part of a raw-tag-range key: prefix(1) +
+// ws(8) + Hash(tagKey)(4) + separator(1) + id(16).
+const rawTagRangeKeyFixedLen = 13 + 1 + 16
+
+// rawTagRangeKeyHintMaxValue bounds how much of a tag value's length is used as
+// an allocation hint. It is not a limit on tag values — longer values still
+// produce a correct key — only on the pre-sizing arithmetic.
+const rawTagRangeKeyHintMaxValue = 1 << 16
+
 // RawTagRangeKey constructs the ordered raw-tag-range secondary index key
 // (0x2B prefix, S1). Layout:
 //
@@ -185,7 +194,16 @@ func RawTagRangePrefix(ws [8]byte, tagKeyHash uint32) []byte {
 // because 0x00 < '-'). Callers (internal/storage's raw-tag-range write path)
 // reject values containing 0x00 before calling this.
 func RawTagRangeKey(ws [8]byte, tagKeyHash uint32, value []byte, id [16]byte) []byte {
-	key := make([]byte, 0, 13+len(value)+1+16)
+	// The capacity is only a hint. len(value) is caller-supplied (a tag value from
+	// any transport), so it stays out of the size arithmetic above a bound: the sum
+	// can then never overflow, and an oversized value simply grows the slice on
+	// append instead of being pre-sized. The key bytes are identical either way
+	// (pinned by TestRawTagRangeKey_BytesIndependentOfCapacityHint).
+	hint := rawTagRangeKeyFixedLen
+	if len(value) <= rawTagRangeKeyHintMaxValue {
+		hint += len(value)
+	}
+	key := make([]byte, 0, hint)
 	key = append(key, RawTagRangePrefix(ws, tagKeyHash)...)
 	key = append(key, value...)
 	key = append(key, 0x00)
