@@ -13,6 +13,21 @@ Nothing yet.
 
 ---
 
+## [0.12.1] - 2026-11-17
+
+The same code as 0.12.0, released again because the 0.12.0 release workflow could not
+build its macOS binaries. The macOS runner it named is no longer offered, so no GitHub
+release, binaries or Homebrew formula were published for 0.12.0. Its npm package and
+Docker image were published and hold the same code as this release. Read the 0.12.0 entry
+for what changed.
+
+### Fixed
+
+- The release workflow builds the macOS binaries on `macos-15`. GitHub no longer offers
+  `macos-14`, so the macOS builds of 0.12.0 never started and its release was not created.
+
+---
+
 ## [0.12.0] - 2026-11-17
 
 The correctness release. Recall now orders results by how well each memory matches the
@@ -2517,7 +2532,8 @@ fix ships with a regression test.
 
 ## Comparison Links
 
-[Unreleased]: https://github.com/scrypster/muninndb/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/scrypster/muninndb/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/scrypster/muninndb/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/scrypster/muninndb/compare/v0.11.0...v0.12.0
 [0.4.10]: https://github.com/scrypster/muninndb/compare/v0.4.9-alpha...v0.4.10
 [0.2.6]: https://github.com/scrypster/muninndb/compare/v0.2.5...v0.2.6
