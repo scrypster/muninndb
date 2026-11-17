@@ -10,6 +10,32 @@ import (
 	"github.com/scrypster/muninndb/internal/prefix"
 )
 
+// countRawRelationshipKeys returns the number of RAW 0x21 keys in a vault.
+// Paired with countRelEntityIndexKeys so a failure can say WHICH path
+// DeleteEngram took: if 0x21 survives alongside 0x26, the delete fell through
+// to the key-only fallback and skipped deleteEntityLinks entirely; if 0x21 is
+// gone but 0x26 remains, deleteEntityLinks ran and its length guard skipped
+// the key.
+func countRawRelationshipKeys(t *testing.T, store *PebbleStore, ws [8]byte) int {
+	t.Helper()
+	p := make([]byte, 1+8)
+	p[0] = prefix.Relationship
+	copy(p[1:9], ws[:])
+	iter, err := PrefixIterator(store.db, p)
+	if err != nil {
+		t.Fatalf("0x21 iter: %v", err)
+	}
+	defer iter.Close()
+	n := 0
+	for valid := iter.First(); valid; valid = iter.Next() {
+		n++
+	}
+	if err := iter.Error(); err != nil {
+		t.Fatalf("0x21 iter error: %v", err)
+	}
+	return n
+}
+
 // countRelEntityIndexKeys returns the number of RAW 0x26 keys in a vault. A
 // ScanEntityRelationships assertion cannot substitute for it: that scan walks
 // the 0x26 index and resolves each entry to a 0x21 record, so an orphaned 0x26
@@ -358,8 +384,14 @@ func TestDeleteEngram_CleansRelEntityIndex(t *testing.T) {
 
 	// The raw count is the assertion that pins the length guard: the resolved
 	// scan above stays empty even when an orphaned 0x26 key survives.
-	require.Equal(t, 0, countRelEntityIndexKeys(t, store, ws),
-		"raw 0x26 key count after DeleteEngram must be zero")
+	afterRel := countRawRelationshipKeys(t, store, ws)
+	afterIdx := countRelEntityIndexKeys(t, store, ws)
+	require.Equal(t, 0, afterIdx,
+		"raw 0x26 key count after DeleteEngram must be zero (0x21 keys left: %d; "+
+			"0x21 > 0 means DeleteEngram took its key-only fallback and never ran "+
+			"deleteEntityLinks; 0x21 == 0 means deleteEntityLinks ran and its length "+
+			"guard skipped the key)", afterRel)
+	require.Equal(t, 0, afterRel, "raw 0x21 key count after DeleteEngram must be zero")
 
 	// After hard delete: 0x26 entries must be gone.
 	var after []RelationshipRecord
