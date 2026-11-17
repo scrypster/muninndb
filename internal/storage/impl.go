@@ -60,8 +60,13 @@ type PebbleStore struct {
 	// readOnly is set at open when the database refuses writes (a read-only
 	// open of a backup). No marker is read or written, and when the saved
 	// counts are not known to be clean every count is seeded by a scan.
-	readOnly           bool
-	countKeysUntrusted bool
+	readOnly bool
+	// countKeysUntrusted means every count is seeded from a scan, never from
+	// the saved key, for the rest of the process: set at a read-only open
+	// without a valid marker, and by ResetAllVaultCounts at promotion. In
+	// that mode a foreign commit also drops the counter of every vault it
+	// touches (vault_count.go).
+	countKeysUntrusted atomic.Bool
 	// foreignCommits is set, for the rest of the process, the first time a
 	// batch committed to this DB past the store's write path is reported to
 	// the store (InvalidateCommittedRepr, NoteCommittedRepr,
@@ -328,7 +333,7 @@ func (ps *PebbleStore) getOrInitCounter(ctx context.Context, wsPrefix [8]byte) *
 		// Try to read persisted count from Pebble
 		countKey := keys.VaultCountKey(wsPrefix)
 		val, err := Get(ps.db, countKey)
-		if err == nil && len(val) == 8 && !ps.countKeysUntrusted {
+		if err == nil && len(val) == 8 && !ps.countKeysUntrusted.Load() {
 			n := int64(binary.BigEndian.Uint64(val))
 			loaded.count.Store(n)
 			return

@@ -141,40 +141,80 @@ func (ps *PebbleStore) resetVaultCount(ws [8]byte) error {
 	return nil
 }
 
-// ResetAllVaultCounts resets the count of every vault this store has a saved
-// key or a live counter for, so each is seeded from a scan on next access.
-// A cluster follower applies the leader's batches as raw records and never
-// moves its own counts, so it is called when a follower becomes the leader:
-// only a leader prunes, and a stale count under max_engrams prunes real
-// memories. Each vault is reset under its own exclusive count lock.
-func (ps *PebbleStore) ResetAllVaultCounts() error {
-	vaults := make(map[[8]byte]struct{})
-	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: []byte{prefix.VaultCount}, UpperBound: []byte{prefix.VaultCount + 1}})
-	if err != nil {
-		return err
-	}
-	for valid := iter.First(); valid; valid = iter.Next() {
-		if k := iter.Key(); len(k) == 9 {
-			var ws [8]byte
-			copy(ws[:], k[1:9])
-			vaults[ws] = struct{}{}
-		}
-	}
-	if err := iter.Error(); err != nil {
-		iter.Close()
-		return err
-	}
-	iter.Close()
+// ResetAllVaultCounts makes every vault's count come from a scan of its
+// records on next access, for the rest of the process. A cluster follower
+// applies the leader's batches as raw records and never moves its own counts,
+// so it is called when a follower becomes the leader: only a leader prunes,
+// and a stale count under max_engrams prunes real memories.
+//
+// It writes nothing. It runs inside the promotion, while the node holds its
+// applier and election lock and no node in the cluster accepts a write, and
+// it used to delete every saved count with a synced write: 5.6 s at 1,000
+// vaults. Durable deletes are not needed. The saved keys are ignored for the
+// rest of the process (countKeysUntrusted), and they are trusted again only
+// after a clean Close writes the marker, which a store that applied foreign
+// commits never does (STO-30). A crash recounts regardless.
+//
+// The mode is set BEFORE the counters are dropped, so a reader that seeds a
+// new counter after the drop scans. Each counter is dropped under its vault's
+// exclusive count lock, so no incremental writer is between its seed and its
+// Add. The coalescer's entries are left alone: a pending change is saved from
+// the next counter, or leaves Close without a marker. Nothing here can fail,
+// so no vault is left stale by an error part way.
+func (ps *PebbleStore) ResetAllVaultCounts() {
+	ps.countKeysUntrusted.Store(true)
+	ps.dropAllCounters()
+}
+
+func (ps *PebbleStore) dropAllCounters() {
 	ps.vaultCounters.Range(func(k, _ any) bool {
-		vaults[k.([8]byte)] = struct{}{}
+		ps.dropCounter(k.([8]byte))
 		return true
 	})
-	for ws := range vaults {
-		if err := ps.resetVaultCount(ws); err != nil {
-			return err
-		}
+}
+
+// dropCounter forgets ws's in-memory count under the exclusive count lock.
+// Only safe while countKeysUntrusted is set: the next access seeds from a
+// scan, never from a saved key that may be stale.
+func (ps *PebbleStore) dropCounter(ws [8]byte) {
+	l := ps.countLock(ws)
+	l.Lock()
+	ps.vaultCounters.Delete(ws)
+	l.Unlock()
+}
+
+// dropCountersTouchedBy runs for a batch committed past the store's write path
+// (the replication applier). On a follower it does nothing. Once the store
+// seeds counts from scans (after promotion), a late entry from a deposed
+// leader is applied without moving any count, so the counter of every vault
+// whose records the batch touches is dropped and the next read rescans. An
+// unreadable batch drops every counter.
+func (ps *PebbleStore) dropCountersTouchedBy(repr []byte) {
+	if !ps.countKeysUntrusted.Load() || len(repr) == 0 {
+		return
 	}
-	return nil
+	touched := make(map[[8]byte]struct{})
+	r, _ := pebble.ReadBatch(repr)
+	for {
+		kind, k, _, ok, err := r.Next()
+		if err != nil {
+			ps.dropAllCounters()
+			return
+		}
+		if !ok {
+			break
+		}
+		if kind == pebble.InternalKeyKindLogData || len(k) < 9 || k[0] != prefix.Engram {
+			continue
+		}
+		// A record key is ws|id. A range delete starts at a vault's records.
+		var ws [8]byte
+		copy(ws[:], k[1:9])
+		touched[ws] = struct{}{}
+	}
+	for ws := range touched {
+		ps.dropCounter(ws)
+	}
 }
 
 // cleanShutdownKey marks that the 0x15 keys were saved by a clean Close. It is
@@ -239,7 +279,7 @@ func (ps *PebbleStore) reconcileCountsAtOpen() bool {
 	if werr := ps.db.LogData(nil, pebble.NoSync); errors.Is(werr, pebble.ErrReadOnly) {
 		ps.readOnly = true
 		if !trusted {
-			ps.countKeysUntrusted = true
+			ps.countKeysUntrusted.Store(true)
 			slog.Info("storage: read-only open without a clean-shutdown marker, vault counts are taken from a scan")
 		}
 		return false

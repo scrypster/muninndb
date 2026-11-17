@@ -101,39 +101,79 @@ func TestVaultCountResetAtPromotion_ResetsAStaleCount(t *testing.T) {
 	}
 }
 
-// server.go must install both. Removing either line leaves the functions above
-// tested and the server unprotected, so the source is checked for the calls.
+// server.go must install both, and the promotion hook must be in place before
+// the coordinator starts: set later (after startCoordinator, or from a
+// goroutine) it can miss the first promotion. Removing or moving either line
+// leaves the functions above tested and the server unprotected, so the source
+// is checked: each call must exist, and the BeforeBecomingCortex assignment
+// must sit in the same function as the startCoordinator call, outside any
+// function literal, and before it.
 func TestServerWiresVaultCountsIntoTheCluster(t *testing.T) {
 	f, err := parser.ParseFile(token.NewFileSet(), "server.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var applierWired, promotionWired bool
-	ast.Inspect(f, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.CallExpr:
-			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "wireApplierToStore" {
-				applierWired = true
+	var stack []ast.Node // enclosing FuncDecl and FuncLit nodes
+	var applierWired bool
+	var hookFunc, startFunc ast.Node
+	var hookPos, startPos token.Pos
+	top := func() ast.Node {
+		if len(stack) == 0 {
+			return nil
+		}
+		return stack[len(stack)-1]
+	}
+	var walk func(n ast.Node)
+	walk = func(n ast.Node) {
+		ast.Inspect(n, func(c ast.Node) bool {
+			if c == nil || c == n {
+				return c != nil
 			}
-		case *ast.AssignStmt:
-			for i, lhs := range x.Lhs {
-				sel, ok := lhs.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "BeforeBecomingCortex" || i >= len(x.Rhs) {
-					continue
+			switch x := c.(type) {
+			case *ast.FuncDecl, *ast.FuncLit:
+				stack = append(stack, x)
+				walk(x)
+				stack = stack[:len(stack)-1]
+				return false
+			case *ast.CallExpr:
+				if id, ok := x.Fun.(*ast.Ident); ok {
+					switch id.Name {
+					case "wireApplierToStore":
+						applierWired = true
+					case "startCoordinator":
+						if startFunc == nil {
+							startFunc, startPos = top(), x.Pos()
+						}
+					}
 				}
-				if call, ok := x.Rhs[i].(*ast.CallExpr); ok {
-					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "vaultCountResetAtPromotion" {
-						promotionWired = true
+			case *ast.AssignStmt:
+				for i, lhs := range x.Lhs {
+					sel, ok := lhs.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "BeforeBecomingCortex" || i >= len(x.Rhs) {
+						continue
+					}
+					if call, ok := x.Rhs[i].(*ast.CallExpr); ok {
+						if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "vaultCountResetAtPromotion" {
+							hookFunc, hookPos = top(), x.Pos()
+						}
 					}
 				}
 			}
-		}
-		return true
-	})
+			return true
+		})
+	}
+	walk(f)
 	if !applierWired {
 		t.Error("server.go no longer calls wireApplierToStore: a follower's clean Close certifies stale vault counts")
 	}
-	if !promotionWired {
-		t.Error("server.go no longer sets BeforeBecomingCortex to vaultCountResetAtPromotion: a new leader prunes from a follower's stale counts")
+	if hookFunc == nil {
+		t.Fatal("server.go no longer sets BeforeBecomingCortex to vaultCountResetAtPromotion: a new leader prunes from a follower's stale counts")
+	}
+	if startFunc == nil {
+		t.Fatal("server.go has no startCoordinator call: this check needs updating to where the coordinator now starts")
+	}
+	if hookFunc != startFunc || hookPos > startPos {
+		t.Error("server.go sets BeforeBecomingCortex inside a function literal or after startCoordinator: " +
+			"a promotion that runs first takes the leader role on a follower's stale counts")
 	}
 }

@@ -50,6 +50,7 @@ var commitResultForTest sync.Map // *PebbleStore -> func(error) error
 // records in repr were written without moving any count.
 func (ps *PebbleStore) InvalidateCommittedRepr(repr []byte) {
 	ps.foreignCommits.Store(true)
+	ps.dropCountersTouchedBy(repr)
 	ps.invalidateCommittedRepr(repr)
 }
 
@@ -59,6 +60,9 @@ func (ps *PebbleStore) InvalidateCommittedRepr(repr []byte) {
 // marks this process's vault counts as not certifiable.
 func (ps *PebbleStore) InvalidateAllCaches() {
 	ps.foreignCommits.Store(true)
+	if ps.countKeysUntrusted.Load() {
+		ps.dropAllCounters()
+	}
 	ps.invalidateAllCaches()
 }
 

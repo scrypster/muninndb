@@ -33,11 +33,11 @@ func wireApplierToStore(applier *replication.Applier, store *storage.PebbleStore
 // follower applied the leader's writes as raw records and never moved its own
 // vault counts. Only a leader prunes, and a stale count under max_engrams
 // prunes real memories, so every count is reset before the role changes and
-// is seeded from a scan on next access (STO-30).
+// is seeded from a scan on next access (STO-30). The reset writes nothing,
+// because it runs while no node in the cluster accepts a write.
 func vaultCountResetAtPromotion(store *storage.PebbleStore) func(epoch uint64) {
 	return func(epoch uint64) {
-		if err := store.ResetAllVaultCounts(); err != nil {
-			slog.Error("[cluster] vault count reset at promotion failed", "epoch", epoch, "err", err)
-		}
+		store.ResetAllVaultCounts()
+		slog.Info("[cluster] vault counts will be taken from a scan of each vault", "epoch", epoch)
 	}
 }

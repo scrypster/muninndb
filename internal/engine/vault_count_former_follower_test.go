@@ -173,3 +173,67 @@ func TestVaultCount_FormerFollowerStandaloneKeepsItsMemories(t *testing.T) {
 		t.Fatalf("a vault holding 5 under a cap of 5 was pruned to %d (pruned=%d)", left, pruned)
 	}
 }
+
+// TestVaultCount_LateDeleteAfterPromotionKeepsRealMemories: a node promoted
+// without a drain (a forced promote under write load, or a partition) can
+// still apply entries the deposed leader streams after the role changed. Two
+// late deletes arrived after a recall had read the vault on the new leader:
+// the count read 7 for 5 and the pruner deleted 2 real memories under a cap
+// of 5. A foreign commit after promotion now drops the touched vault's
+// counter, so the prune reads a fresh scan.
+func TestVaultCount_LateDeleteAfterPromotionKeepsRealMemories(t *testing.T) {
+	for _, readBeforeLate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("readBetweenFlipAndLateEntry=%v", readBeforeLate), func(t *testing.T) {
+			ctx := context.Background()
+			const vault = "weir-late-entries"
+			cfg := auth.VaultConfig{Name: vault, Public: true, Plasticity: &auth.PlasticityConfig{MaxEngrams: ptr(5)}}
+			L := ffOpen(t, "leader", vfs.NewMem())
+			F := ffOpen(t, "follower", vfs.NewMem())
+			t.Cleanup(func() { L.close(t); F.close(t) })
+			for _, n := range []*ffNode{L, F} {
+				if err := n.as.SetVaultConfig(cfg); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var leading bool
+			F.eng.SetWriteGate(func() error {
+				if leading {
+					return nil
+				}
+				return errors.New("not leader")
+			})
+			var ids []storage.ULID
+			for i := 0; i < 7; i++ {
+				r, err := L.eng.Write(ctx, &mbp.WriteRequest{Vault: vault, Concept: fmt.Sprintf("tide table %d", i), Content: fmt.Sprintf("the tide turned at the weir on day %d", i)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				id, err := storage.ParseULID(r.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, id)
+			}
+			ws := L.store.ResolveVaultPrefix(vault)
+			L.ship(t, F)
+			// The old leader forgets 2 just before it hears the claim. Not shipped yet.
+			for _, id := range ids[:2] {
+				if err := L.store.DeleteEngram(ctx, ws, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			F.store.ResetAllVaultCounts() // BeforeBecomingCortex
+			leading = true                // the role flips
+			if readBeforeLate {
+				_ = F.store.GetVaultCount(ctx, ws) // a recall or stats read on the new leader
+			}
+			L.ship(t, F) // the late entries
+			if _, err := F.eng.PruneVault(ctx, vault); err != nil {
+				t.Fatal(err)
+			}
+			if left := ffStored(t, F.store, ws); left != 5 {
+				t.Fatalf("a vault holding 5 under a cap of 5 was pruned to %d on the new leader", left)
+			}
+		})
+	}
+}

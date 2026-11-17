@@ -485,9 +485,7 @@ func TestVaultCountModel_PromotionResetsAFollowersCounts(t *testing.T) {
 	if got := ps.GetVaultCount(ctx, ws); got != 8 {
 		t.Fatalf("fixture: follower count %d before promotion, want the stale 8", got)
 	}
-	if err := ps.ResetAllVaultCounts(); err != nil {
-		t.Fatal(err)
-	}
+	ps.ResetAllVaultCounts()
 	if got := ps.GetVaultCount(ctx, ws); got != 5 {
 		t.Fatalf("count %d after promotion, the vault holds 5", got)
 	}
