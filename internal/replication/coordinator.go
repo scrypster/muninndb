@@ -228,8 +228,18 @@ type ClusterCoordinator struct {
 	started atomic.Bool
 
 	// Callbacks for the engine layer
-	OnBecameCortex func(epoch uint64) // engine should start cognitive workers
-	OnBecameLobe   func()             // engine should stop cognitive workers
+	//
+	// BeforeBecomingCortex runs inside takeLeaderRole BEFORE the role flips,
+	// while the applier is held, so no entry is applied and no local write or
+	// prune is let through as leader until it returns. It is for local state
+	// that must be right before this node acts as leader: the vault counts,
+	// which a follower's applied records never moved (STO-30). It runs under
+	// election.mu and the applier's lock and must not call back into the
+	// coordinator or the applier. A panic is recovered and logged, and the
+	// promotion goes ahead.
+	BeforeBecomingCortex func(epoch uint64)
+	OnBecameCortex       func(epoch uint64) // engine should start cognitive workers
+	OnBecameLobe         func()             // engine should stop cognitive workers
 }
 
 // Coordinator is a type alias for backward compatibility.
@@ -1845,10 +1855,15 @@ func (c *ClusterCoordinator) takeLeaderRole(epoch uint64) {
 		c.roleMu.Unlock()
 	}
 	if c.applier == nil || c.repLog == nil {
+		c.invokeBeforeBecomingCortex(epoch)
 		flip()
 		return
 	}
 	was, removed, err := c.applier.takeLead(epoch, func(applied uint64) {
+		// Under the applier's hold: nothing is applied between this and the
+		// flip, so local state prepared here is still right when the role
+		// changes.
+		c.invokeBeforeBecomingCortex(epoch)
 		previous, err := c.repLog.AdvanceTo(applied)
 		switch {
 		case err != nil:
@@ -1902,6 +1917,21 @@ func (c *ClusterCoordinator) reportHaltAtPromotion(epoch uint64, was HaltRecord,
 		"was_refused_because", was.Why,
 		"see", "docs/cluster-operations.md, \"A replica the leader refuses\"",
 	)
+}
+
+// invokeBeforeBecomingCortex runs BeforeBecomingCortex, recovered so a panic
+// cannot stop a promotion that has already been claimed.
+func (c *ClusterCoordinator) invokeBeforeBecomingCortex(epoch uint64) {
+	if c.BeforeBecomingCortex == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("cluster: BeforeBecomingCortex callback panicked",
+				"node", c.cfg.NodeID, "epoch", epoch, "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	c.BeforeBecomingCortex(epoch)
 }
 
 // invokeOnBecameCortex runs OnBecameCortex synchronously on the caller's
