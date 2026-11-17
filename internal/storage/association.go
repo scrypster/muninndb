@@ -847,6 +847,7 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	if err := checkRelTypeCollision(ps.db, wsPrefix, [16]byte(a), weight, [16]byte(b), relType); err != nil {
 		return fmt.Errorf("update assoc weight: %w", err)
 	}
+	testAssocGuardPoint("weight-update", wsPrefix, a, b)
 
 	if oldWeight > 0 {
 		batch.Delete(keys.AssocFwdKey(wsPrefix, [16]byte(a), oldWeight, [16]byte(b)), nil)

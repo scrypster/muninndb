@@ -50,12 +50,15 @@ func liveKeys(t *testing.T, ps *PebbleStore, ws [8]byte, src, dst ULID) []liveKe
 
 // interleave runs other at the guard seam for (op, src, dst), once: inline
 // when the pair's stripe is free (the window is open), on a goroutine when it
-// is held (other waits for the commit). wait joins the goroutine.
+// is held (other waits for the commit). wait joins the goroutine. stripe, when
+// set, names the pair whose stripe decides it instead of (src, dst): the one
+// the concurrent writer needs.
 type interleave struct {
-	once sync.Once
-	wg   sync.WaitGroup
-	err  error
-	ran  bool
+	once   sync.Once
+	wg     sync.WaitGroup
+	err    error
+	ran    bool
+	stripe *[2]ULID
 }
 
 func (il *interleave) install(t *testing.T, ps *PebbleStore, op string, src, dst ULID, other func() error) (restore func()) {
@@ -66,7 +69,11 @@ func (il *interleave) install(t *testing.T, ps *PebbleStore, op string, src, dst
 		}
 		il.once.Do(func() {
 			il.ran = true
-			if !ps.AssocPairStripeHeldForTesting(ws, s, d) {
+			hs, hd := s, d
+			if il.stripe != nil {
+				hs, hd = il.stripe[0], il.stripe[1]
+			}
+			if !ps.AssocPairStripeHeldForTesting(ws, hs, hd) {
 				il.err = other()
 				return
 			}
@@ -148,62 +155,78 @@ func TestUpdateAssocWeightBatch_NeverMovesOntoAnotherRelation(t *testing.T) {
 //     it, and the weight update then deletes the old key (gone) and Sets its
 //     own: two live keys for one edge.
 //
-// RED without the lockMany in UpdateAssocWeightBatch: the Link returns nil and
-// its edge is gone, and decay leaves two live keys.
+// Both forms are run: the batch (the Hebbian worker) and the single pair
+// (consolidation's transitive phase, the Hebbian store adapter).
+//
+// RED without the lockMany in UpdateAssocWeightBatch, or without the pair
+// lock in UpdateAssocWeight: the Link returns nil and its edge is gone, and
+// decay leaves two live keys.
 func TestUpdateAssocWeightBatch_HoldsThePairGuardThroughCommit(t *testing.T) {
-	t.Run("a link of another relation at the destination", func(t *testing.T) {
-		ps := openTestStore(t)
-		ws := ps.VaultPrefix("guard-orchard")
-		a := writeStampFixture(t, ps, ws, "plums are thinned by hand")
-		b := writeStampFixture(t, ps, ws, "plums are thinned with a pole")
-		rawEdge(t, ps, ws, a, b, RelRelatesTo, 0.8, time.Now(), 0.8, 2)
-
-		il := &interleave{}
-		defer il.install(t, ps, "weight-update", a, b, func() error {
-			return ps.WriteAssociation(context.Background(), ws, a, b, &Association{TargetID: b, RelType: RelSupersedes, Weight: 0.81, Confidence: 1, CreatedAt: time.Now()})
-		})()
-		if err := ps.UpdateAssocWeightBatch(context.Background(), []AssocWeightUpdate{{WS: ws, Src: a, Dst: b, Weight: 0.81, CountDelta: 1}}); err != nil {
-			t.Fatalf("weight update: %v", err)
+	move := func(ps *PebbleStore, single bool, ws [8]byte, a, b ULID, w float32) error {
+		if single {
+			return ps.UpdateAssocWeight(context.Background(), ws, a, b, w, 1)
 		}
-		il.wait(t)
+		return ps.UpdateAssocWeightBatch(context.Background(), []AssocWeightUpdate{{WS: ws, Src: a, Dst: b, Weight: w, CountDelta: 1}})
+	}
+	for _, single := range []bool{false, true} {
+		form := "batch"
+		if single {
+			form = "single"
+		}
+		t.Run(form+"/a link of another relation at the destination", func(t *testing.T) {
+			ps := openTestStore(t)
+			ws := ps.VaultPrefix("guard-orchard")
+			a := writeStampFixture(t, ps, ws, "plums are thinned by hand")
+			b := writeStampFixture(t, ps, ws, "plums are thinned with a pole")
+			rawEdge(t, ps, ws, a, b, RelRelatesTo, 0.8, time.Now(), 0.8, 2)
 
-		got := pairEdges(t, ps, ws, a, b)
-		if il.err == nil {
-			if _, ok := got[RelSupersedes]; !ok {
-				t.Errorf("the Link returned nil but its supersedes edge is gone (edges %v): the weight update wrote over it", got)
+			il := &interleave{}
+			defer il.install(t, ps, "weight-update", a, b, func() error {
+				return ps.WriteAssociation(context.Background(), ws, a, b, &Association{TargetID: b, RelType: RelSupersedes, Weight: 0.81, Confidence: 1, CreatedAt: time.Now()})
+			})()
+			if err := move(ps, single, ws, a, b, 0.81); err != nil {
+				t.Fatalf("weight update: %v", err)
 			}
-		} else if !errors.Is(il.err, ErrAssocRelTypeCollision) {
-			t.Errorf("the Link failed with %v, want ErrAssocRelTypeCollision", il.err)
-		}
-		if got[RelRelatesTo] != 0.81 {
-			t.Errorf("relates_to = %v, want moved to 0.81", got[RelRelatesTo])
-		}
-	})
+			il.wait(t)
 
-	t.Run("a decay chunk", func(t *testing.T) {
-		ps := openTestStore(t)
-		ws := ps.VaultPrefix("guard-orchard")
-		a := writeStampFixture(t, ps, ws, "figs ripen on old wood")
-		b := writeStampFixture(t, ps, ws, "figs ripen on new wood")
-		// Idle 200 days with one co-activation: decay clamps it to its floor.
-		rawEdge(t, ps, ws, a, b, RelRelatesTo, 0.8, time.Now().Add(-200*24*time.Hour), 0.8, 1)
+			got := pairEdges(t, ps, ws, a, b)
+			if il.err == nil {
+				if _, ok := got[RelSupersedes]; !ok {
+					t.Errorf("the Link returned nil but its supersedes edge is gone (edges %v): the weight update wrote over it", got)
+				}
+			} else if !errors.Is(il.err, ErrAssocRelTypeCollision) {
+				t.Errorf("the Link failed with %v, want ErrAssocRelTypeCollision", il.err)
+			}
+			if got[RelRelatesTo] != 0.81 {
+				t.Errorf("relates_to = %v, want moved to 0.81", got[RelRelatesTo])
+			}
+		})
 
-		il := &interleave{}
-		defer il.install(t, ps, "weight-update", a, b, func() error {
-			_, err := ps.DecayAssocWeights(context.Background(), ws, 30*24*time.Hour, 0.05, 0.05)
-			return err
-		})()
-		if err := ps.UpdateAssocWeightBatch(context.Background(), []AssocWeightUpdate{{WS: ws, Src: a, Dst: b, Weight: 0.81, CountDelta: 1}}); err != nil {
-			t.Fatalf("weight update: %v", err)
-		}
-		il.wait(t)
-		if il.err != nil {
-			t.Fatalf("decay: %v", il.err)
-		}
-		if got := liveKeys(t, ps, ws, a, b); len(got) != 1 {
-			t.Errorf("live a->b keys = %v, want exactly one", got)
-		}
-	})
+		t.Run(form+"/a decay chunk", func(t *testing.T) {
+			ps := openTestStore(t)
+			ws := ps.VaultPrefix("guard-orchard")
+			a := writeStampFixture(t, ps, ws, "figs ripen on old wood")
+			b := writeStampFixture(t, ps, ws, "figs ripen on new wood")
+			// Idle 200 days with one co-activation: decay clamps it to its floor.
+			rawEdge(t, ps, ws, a, b, RelRelatesTo, 0.8, time.Now().Add(-200*24*time.Hour), 0.8, 1)
+
+			il := &interleave{}
+			defer il.install(t, ps, "weight-update", a, b, func() error {
+				_, err := ps.DecayAssocWeights(context.Background(), ws, 30*24*time.Hour, 0.05, 0.05)
+				return err
+			})()
+			if err := move(ps, single, ws, a, b, 0.81); err != nil {
+				t.Fatalf("weight update: %v", err)
+			}
+			il.wait(t)
+			if il.err != nil {
+				t.Fatalf("decay: %v", il.err)
+			}
+			if got := liveKeys(t, ps, ws, a, b); len(got) != 1 {
+				t.Errorf("live a->b keys = %v, want exactly one", got)
+			}
+		})
+	}
 }
 
 // TestDecayAssocWeights_SkipsAnEdgeThatMovedSinceTheScan: decay scans a
@@ -331,6 +354,81 @@ func TestRestoreArchivedEdges_HoldsThePairGuardThroughCommit(t *testing.T) {
 		}
 	} else if !errors.Is(il.err, ErrAssocRelTypeCollision) {
 		t.Errorf("the Link failed with %v, want ErrAssocRelTypeCollision", il.err)
+	}
+}
+
+// TestRestoreArchivedEdges_HoldsTheMirroredPairsGuardThroughCommit (the delta
+// refute's D2): restoring a symmetric edge deletes its mirrored row (D, S),
+// which it read before the commit. That row is also where decay archives a live
+// D->S edge of the same relation. Unless the restore holds the (D, S) pair's
+// stripe as well, a decay chunk can archive the live D->S edge into that row
+// between the read and the commit, and the commit then deletes it: the D->S
+// edge is neither live nor archived.
+//
+// RED without the (dst, src) lock key in RestoreArchivedEdges (unless the two
+// pairs happen to share a stripe, one run in 256).
+func TestRestoreArchivedEdges_HoldsTheMirroredPairsGuardThroughCommit(t *testing.T) {
+	now := time.Now()
+	ps := openTestStore(t)
+	ws := ps.VaultPrefix("guard-orchard")
+	s := writeStampFixture(t, ps, ws, "medlars are bletted in November")
+	d := writeStampFixture(t, ps, ws, "medlars are bletted in December")
+	// An older decay archived S->D relates_to under both endpoints (#806).
+	rawArchived(t, ps, ws, s, d, RelRelatesTo, now.Add(-100*24*time.Hour), 0.8, 20)
+	rawArchived(t, ps, ws, d, s, RelRelatesTo, now.Add(-100*24*time.Hour), 0.8, 20)
+	// A separate live D->S relates_to edge, idle 200 days and co-activated
+	// enough that decay archives it (0.8 * 20 / 200 = 0.08 > 0.05).
+	rawEdge(t, ps, ws, d, s, RelRelatesTo, 0.8, now.Add(-200*24*time.Hour), 0.8, 20)
+
+	il := &interleave{stripe: &[2]ULID{d, s}}
+	defer il.install(t, ps, "lazy-restore", s, d, func() error {
+		_, err := ps.DecayAssocWeights(context.Background(), ws, 30*24*time.Hour, 0.05, 0.05)
+		return err
+	})()
+	if _, err := ps.RestoreArchivedEdges(context.Background(), ws, [16]byte(s), 10); err != nil {
+		t.Fatal(err)
+	}
+	il.wait(t)
+	if il.err != nil {
+		t.Fatalf("decay: %v", il.err)
+	}
+	live := liveKeys(t, ps, ws, d, s)
+	_, archived := archivedRel(t, ps, ws, d, s)
+	if len(live) == 0 && !archived {
+		t.Error("the D->S edge is neither live nor archived: the restore deleted the row decay had just archived it into")
+	}
+}
+
+// TestUpdateAssocWeightBatch_CollisionSkipsNamesOnlyTheRelationGuard (the
+// delta refute's D5): the Hebbian worker drops a batch's error when every skip
+// is a relation-guard skip, so CollisionSkips must leave every other skip out.
+// A dead endpoint counted as one is a fault logged at DEBUG and missing from
+// Stats().Errors.
+//
+// RED without the errors.Is filter in CollisionSkips.
+func TestUpdateAssocWeightBatch_CollisionSkipsNamesOnlyTheRelationGuard(t *testing.T) {
+	ps := openTestStore(t)
+	ws := ps.VaultPrefix("guard-orchard")
+	older := writeStampFixture(t, ps, ws, "walnuts are gathered in October")
+	newer := writeStampFixture(t, ps, ws, "walnuts are gathered in September")
+	now := time.Now()
+	rawEdge(t, ps, ws, older, newer, RelSupersedes, 1.0, now, 1.0, 0)
+	rawEdge(t, ps, ws, older, newer, RelRelatesTo, 0.95, now, 0.95, 4)
+	gone := ULID{0x01, 0x7f, 0x01}
+
+	err := ps.UpdateAssocWeightBatch(context.Background(), []AssocWeightUpdate{
+		{WS: ws, Src: older, Dst: gone, Weight: 0.2, CountDelta: 1},  // a dead endpoint
+		{WS: ws, Src: older, Dst: newer, Weight: 1.0, CountDelta: 1}, // onto the supersedes key
+	})
+	var skip *AssocBatchSkipError
+	if !errors.As(err, &skip) {
+		t.Fatalf("err = %v, want *AssocBatchSkipError", err)
+	}
+	if len(skip.Skipped) != 2 {
+		t.Fatalf("Skipped = %v, want both updates skipped", skip.Skipped)
+	}
+	if got := skip.CollisionSkips(); len(got) != 1 || got[0] != 1 {
+		t.Errorf("CollisionSkips() = %v, want [1]: the dead endpoint at 0 would be hidden as a relation-guard skip", got)
 	}
 }
 

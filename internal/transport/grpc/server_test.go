@@ -1178,6 +1178,29 @@ func TestLink_Error(t *testing.T) {
 	}
 }
 
+// TestLink_ACollisionIsFailedPrecondition: a link that would replace an edge of
+// another relation in the same direction at the same weight (STO-15) is a
+// refusal the caller acts on by changing the weight. It used to reach a gRPC
+// client as codes.Unknown and be logged as a server fault.
+func TestLink_ACollisionIsFailedPrecondition(t *testing.T) {
+	refusal := fmt.Errorf("link refused, nothing was written: a supersedes link holds that weight (%w). Write the relates_to link at a different weight", storage.ErrAssocRelTypeCollision)
+	eng := &mockEngine{
+		linkFn: func(ctx context.Context, req *pb.LinkRequest) (*pb.LinkResponse, error) {
+			return nil, refusal
+		},
+	}
+	srv := newPublicTestServer(t, eng)
+
+	_, err := srv.Link(context.Background(), &pb.LinkRequest{SourceId: "a", TargetId: "b", RelType: 5, Weight: 0.8})
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.FailedPrecondition {
+		t.Fatalf("Link: %v (code %v), want FailedPrecondition", err, st.Code())
+	}
+	if st.Message() != refusal.Error() {
+		t.Errorf("message = %q, want the refusal unchanged", st.Message())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Streaming RPC tests
 // ---------------------------------------------------------------------------

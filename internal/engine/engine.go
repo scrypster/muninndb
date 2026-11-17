@@ -4028,6 +4028,19 @@ func (e *Engine) Unsubscribe(ctx context.Context, subID string) error {
 }
 
 // Link implements mbp.EngineAPI.Link.
+// linkCollisionError is the refusal a caller sees when a link would replace an
+// edge of another relation stored under the same key (STO-15). A link's key
+// holds its direction and its weight but not its relation, so two relations
+// from one memory to another at one weight would share it. The refusal names
+// both relations, says nothing was written, and gives the way out. It is per
+// direction: the same relation from the other memory is another key. errors.Is
+// against storage.ErrAssocRelTypeCollision holds, which is what REST answers
+// 409 and gRPC FailedPrecondition on.
+func linkCollisionError(c *storage.AssocRelTypeCollisionError) error {
+	return fmt.Errorf("link refused, nothing was written: %s already has a %s link to %s at weight %v, and a link is stored under a key that holds its direction and weight but not its relation, so a %s link at that weight would replace it (%w). Write the %s link at a different weight",
+		c.Src.String(), relTypeName(c.Existing), c.Dst.String(), c.Weight, relTypeName(c.New), storage.ErrAssocRelTypeCollision, relTypeName(c.New))
+}
+
 func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkResponse, error) {
 	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
@@ -4082,6 +4095,10 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 	}
 
 	if err := e.store.WriteAssociation(ctx, wsPrefix, sourceID, targetID, assoc); err != nil {
+		var collision *storage.AssocRelTypeCollisionError
+		if errors.As(err, &collision) {
+			return nil, linkCollisionError(collision)
+		}
 		return nil, fmt.Errorf("write association: %w", err)
 	}
 
