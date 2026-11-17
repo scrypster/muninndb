@@ -627,6 +627,19 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		batch.Delete(keys.EngramKey(wsPrefix, [16]byte(id)), nil)
 		batch.Delete(keys.MetaKey(wsPrefix, [16]byte(id)), nil)
 		batch.Delete(keys.LeaseKey(wsPrefix, [16]byte(id)), nil)
+		// The entity graph is derivable from the engram ID alone (0x20/0x23
+		// links, the 0x21 relationship row and its two 0x26 index entries), so
+		// the fallback has to clean it too. Skipping it orphans those keys
+		// forever and a later engram that reuses the same entity names inherits
+		// the stale index rows — which is how a hard delete could leave a
+		// relationship visible after the memory was gone. Indexes that need the
+		// engram's own fields (state, creator, tags) cannot be derived here and
+		// are a separate, still-open gap.
+		entityNames, linkErr := ps.deleteEntityLinks(wsPrefix, [16]byte(id), batch)
+		if linkErr != nil {
+			slog.Warn("storage: entity link cleanup failed on fallback delete, links may be orphaned",
+				"engram", id.String(), "err", linkErr)
+		}
 		if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 			mu.Unlock()
 			return err
@@ -634,6 +647,11 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		ps.replicateBatch(batch) // under the stripe: commit order == log order
 		mu.Unlock()
 		ps.cache.Delete(wsPrefix, id)
+		for _, name := range entityNames {
+			if err := ps.DecrementEntityMentionCount(ctx, wsPrefix, name); err != nil {
+				slog.Warn("storage: entity mention decrement failed on fallback delete", "entity", name, "err", err)
+			}
+		}
 		return nil
 	}
 
