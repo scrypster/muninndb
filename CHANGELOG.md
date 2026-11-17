@@ -122,14 +122,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Rollback:** no schema change, so an older binary still starts on the same data. The
     next start of this version after an older one has changed a count recounts again.
   - **Clusters:** a follower applies the leader's writes without moving its own counts, so
-    its counts are stale while it follows. Two things keep that from deleting memories. A
-    node resets every count when it is promoted, before it accepts writes or prunes as the
-    leader. And a node that applied any write from a leader never marks its counts clean,
-    so its next start recounts. Before this, a former follower run on its own (cluster
-    disabled, or a replica's data directory restored as a standalone server) trusted its
-    stale counts: in a test, a vault holding 5 under `max_engrams: 5` was pruned to 2. A
-    follower that applied writes also recounts at every restart, which reads every memory
-    record once.
+    its counts are stale while it follows. A node now stops trusting its saved counts when it
+    is promoted, before it accepts writes or prunes as the leader, and takes every count from
+    a scan of the vault instead. This writes nothing to disk, so a promotion is not slowed by
+    the number of vaults. After promotion, a write the old leader sends late makes the next
+    read of that vault rescan. And a node that applied any write from a leader never marks
+    its counts clean, so its next start recounts. Before this, a former follower run on its
+    own (cluster disabled, or a replica's data directory restored as a standalone server)
+    trusted its stale counts: in a test, a vault holding 5 under `max_engrams: 5` was pruned
+    to 2. A follower that applied writes also recounts at every restart, which reads every
+    memory record once.
   - **Not covered:**
     - An older binary that is killed within about 100 ms of its last write leaves counts
       that the next start of this version trusts.
@@ -140,6 +142,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       the engine before it closes the store, so only a request that outlived the 25 second
       listener shutdown could do this. A shutdown that overruns its 30 second limit exits
       without writing the record, and the next start recounts.
+    - After a promotion that does not wait for the old leader to finish (a forced promote
+      under write load, or a network partition), a delete the old leader sends late can
+      still be missed by a prune that reads the vault's count in the moment between that
+      delete landing and the count being dropped. Such a prune can delete up to as many
+      real memories as that late batch deleted, in a vault with `max_engrams`. A graceful
+      handoff waits for the old leader first and is not exposed.
     - A delete of a memory whose record cannot be read (corrupt, or written in a format
       this build cannot decode) removes the record without lowering the count. The count
       stays one too high, and a clean restart keeps it.
