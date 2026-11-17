@@ -24,8 +24,9 @@ jobs:
       id-token: write
       contents: read
 
+    # PyPI trusts this job through publishers registered for this environment.
     environment:
-      name: pypi
+      name: pypi-release
       url: https://pypi.org/p/muninn-python
 
     steps:
