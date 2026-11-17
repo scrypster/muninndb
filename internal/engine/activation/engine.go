@@ -715,6 +715,27 @@ type ActivationEngine struct {
 	// drainLog applies the entry to assocLog) so tests can await full log
 	// visibility. See WaitLogIdle.
 	logWG sync.WaitGroup
+	// scoreClock, when set, replaces the wall clock at the two places scoring
+	// reads it: phase 4's activation-log recency and phase 6's `now` (recency
+	// and decay on weighted_sum and CGDN, validity windows). nil = time.Now.
+	// Test-only. See SetScoreClockForTesting.
+	scoreClock func() time.Time
+}
+
+// SetScoreClockForTesting pins the clock scoring reads. Production never calls
+// it. It must be called before the engine serves its first Run, because the
+// field is read without synchronisation. A golden-file test uses it so the
+// time between writing fixtures and recalling them cannot move a score.
+func (e *ActivationEngine) SetScoreClockForTesting(now func() time.Time) {
+	e.scoreClock = now
+}
+
+// scoreNow is the clock scoring reads: the pinned test clock, or wall time.
+func (e *ActivationEngine) scoreNow() time.Time {
+	if e.scoreClock != nil {
+		return e.scoreClock()
+	}
+	return time.Now()
 }
 
 // New creates a new ActivationEngine.
@@ -1636,7 +1657,7 @@ func (e *ActivationEngine) phase4HebbianBoost(ctx context.Context, ws [8]byte, v
 		return
 	}
 
-	now := time.Now().Unix()
+	now := e.scoreNow().Unix()
 	recentWeights := make(map[storage.ULID]float64, len(recent))
 	// recencyTau is a decay TIME CONSTANT (τ), used as exp(-age/τ), not a
 	// half-life (2^(-age/h)). The two differ by ln(2): the half-life this
@@ -2417,7 +2438,7 @@ func (e *ActivationEngine) phase6Score(
 		})
 	}
 
-	now := time.Now()
+	now := e.scoreNow()
 	scored := make([]scoredItem, 0, len(all))
 	// COG-28: shadows produced by the OTHER declared-supersession signature —
 	// a still-active record whose ValidUntil was closed (Link(supersedes) /

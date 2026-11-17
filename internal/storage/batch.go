@@ -620,6 +620,14 @@ func (b *pebbleStoreBatch) Commit() error {
 	if b.committed {
 		return fmt.Errorf("batch already committed")
 	}
+	// Count locks of the vaults this batch adds engrams to, shared, BEFORE the
+	// stripe locks taken below and before the commit (vault_count.go).
+	countWS := make([][8]byte, 0, len(b.pendingItems))
+	for _, item := range b.pendingItems {
+		countWS = append(countWS, item.wsPrefix)
+	}
+	hold := b.ps.holdCounts(context.Background(), countWS...)
+	defer hold.release()
 	// Queued read-modify-writes are applied now, under their stripe locks,
 	// to the records as committed — and the locks are held through the
 	// commit so nothing can land between that read and this write.
@@ -726,18 +734,11 @@ func (b *pebbleStoreBatch) Commit() error {
 	}
 
 	// Post-commit side effects — mirrors PebbleStore.WriteEngram post-commit work.
-	ctx := context.Background()
 	for _, item := range b.pendingItems {
 		ws := item.wsPrefix
 		eng := item.eng
 
-		vc := b.ps.getOrInitCounter(ctx, ws)
-		newCount := vc.count.Add(1)
-		if b.ps.counterFlush != nil {
-			if current, ok := b.ps.vaultCounters.Load(ws); ok && current.(*vaultCounter) == vc {
-				b.ps.counterFlush.Submit(ws, newCount)
-			}
-		}
+		hold.add(ws, 1)
 
 		if b.ps.gc != nil {
 			idBytes := [16]byte(eng.ID)

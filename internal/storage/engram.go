@@ -600,6 +600,10 @@ func (ps *PebbleStore) StampValidUntilLocked(ctx context.Context, wsPrefix [8]by
 // DeleteEngram performs a hard delete: removes the engram, all association keys,
 // and all secondary indexes. Reads the engram first to gather index data.
 func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id ULID) error {
+	// The vault's count lock, shared, before the stripe and before the commit,
+	// so the decrement is atomic with the delete per vault (vault_count.go).
+	hold := ps.holdCounts(ctx, wsPrefix)
+	defer hold.release()
 	// Serialize against CompareAndSet on the same engram: hold the per-engram
 	// stripe lock across the read + delete-batch-commit, mirroring what
 	// CompareAndSet does. Otherwise a concurrent CAS can read the engram, this
@@ -932,19 +936,14 @@ func (ps *PebbleStore) DeleteEngram(ctx context.Context, wsPrefix [8]byte, id UL
 		}
 	}
 
-	// Decrement vault count synchronously to avoid a race where callers
-	// observe a stale count after DeleteEngram returns.
-	vc := ps.getOrInitCounter(ctx, wsPrefix)
-	newCount := vc.count.Add(-1)
-	if newCount < 0 {
-		vc.count.Store(0)
-		newCount = 0
+	// The in-memory count drops now, so a caller never reads a stale count
+	// after DeleteEngram returns. The key is the sweep's to save: this path
+	// used to write it directly, and a write overlapping the delete could then
+	// leave the delete's older count as the saved one.
+	if h := ps.deleteBeforeCountForTest; h != nil {
+		h()
 	}
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(newCount))
-	if err := ps.db.Set(keys.VaultCountKey(wsPrefix), buf, pebble.Sync); err != nil {
-		slog.Warn("storage: failed to persist vault count", "error", err)
-	}
+	hold.add(wsPrefix, -1)
 
 	return nil
 }

@@ -45,12 +45,28 @@ var commitResultForTest sync.Map // *PebbleStore -> func(error) error
 // InvalidateCommittedRepr applies commitBatch's invalidation to a batch that
 // was committed to this store's DB by someone else — the replication applier
 // on a follower, which writes the leader's batch reprs straight into Pebble.
-func (ps *PebbleStore) InvalidateCommittedRepr(repr []byte) { ps.invalidateCommittedRepr(repr) }
+//
+// It also marks this process's vault counts as not certifiable (STO-30): the
+// records in repr were written without moving any count.
+func (ps *PebbleStore) InvalidateCommittedRepr(repr []byte) {
+	ps.foreignCommits.Store(true)
+	ps.dropCountersTouchedBy(repr)
+	ps.invalidateCommittedRepr(repr)
+}
 
 // InvalidateAllCaches drops every read-through cache after bumping every
 // guard stripe — for a wholesale replacement of the DB contents (a follower
-// installing a snapshot from the leader).
+// installing a snapshot from the leader). Like InvalidateCommittedRepr, it
+// marks this process's vault counts as not certifiable.
 func (ps *PebbleStore) InvalidateAllCaches() {
+	ps.foreignCommits.Store(true)
+	if ps.countKeysUntrusted.Load() {
+		ps.dropAllCounters()
+	}
+	ps.invalidateAllCaches()
+}
+
+func (ps *PebbleStore) invalidateAllCaches() {
 	ps.cache.InvalidateAll()
 	ps.metaCache.Purge()
 	ps.assocCache.Purge()
@@ -66,7 +82,7 @@ func (ps *PebbleStore) invalidateCommittedRepr(repr []byte) {
 		kind, k, v, ok, err := r.Next()
 		if err != nil {
 			// A corrupt repr cannot be walked: fall back to everything.
-			ps.InvalidateAllCaches()
+			ps.invalidateAllCaches()
 			return
 		}
 		if !ok {

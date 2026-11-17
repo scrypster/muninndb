@@ -43,7 +43,7 @@ prefix — see the vault-reuse note at the bottom).
 | 0x12 | ws | CoherenceKey | storage-only since #618 |
 | 0x13 | ws | VaultWeights | storage-only since #618 |
 | 0x14 | ws+src(16)+dst(16) | AssocWeightIndex float32 | storage-only since #618 |
-| 0x15 | ws | BE int64 count | vault engram count ("sole user" per comment) |
+| 0x15 | ws | BE int64 count | vault engram count. Only the 9-byte key is a count (the episode keyspace shares the byte with longer keys). A cache of the in-memory counter, written in steady state only by the coalescer's sweep, trusted only after a clean shutdown and recounted from 0x01 otherwise (STO-30, `storage/vault_count.go`). Exported with the vault (`export.go`) but ignored on import, not copied by clone or merge |
 | 0x16 | ws+id(16)+ts(8)+seq(4) | provenance entry (**JSON**, additively extensible) | async worker; the value is `provenance.ProvenanceEntry` marshalled with encoding/json, so a new *optional* field needs no version byte: old entries decode with the field ABSENT (never a zero value posing as data), and new entries decode on an old binary, which ignores the unknown key. `Details` (evolve's predecessor_id / reason / effective_at; extensible per-operation) was added this way. Renaming or retyping an existing field, or making a new field load-bearing for correctness, WOULD require a real format version |
 | 0x17 | ws | migration version+cursor | |
 | 0x18 | ws+ulid | quantize params + int8 embedding | ERF v2 vector |
@@ -77,6 +77,7 @@ prefix — see the vault-reuse note at the bottom).
 
 | Prefix | Key shape | Value | Notes |
 |---|---|---|---|
+| 0xFF "vcount_clean" | none (global singleton) | BE uint64 FNV-64 of every 0x15 count key and value | **clean-shutdown marker for the vault counts (STO-30).** Written by `PebbleStore.Close` after its final sweep, never by a process that applied a replicated commit, deleted by `NewPebbleStore` at open. Absent or mismatched means recount. Lives with the other `0xFF` ASCII-named singletons (`mig_ver` in `storage/migrate`, `last_mol_seq` in `wal`), which no prefix scan of any binary reaches, so older binaries ignore it |
 | 0x40 | hash16 | Capability (JSON) | cap_ tokens (#612), relocated off 0x15/0x16 |
 | 0x41 | vault+0x00+capID(8) | storageHash16 | cap_ vault index |
 | 0x42 | username-bytes | AdminUser (JSON) | relocated from 0x11 by #618 |

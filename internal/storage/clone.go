@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,7 +9,6 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/prefix"
 	"github.com/scrypster/muninndb/internal/storage/erf"
-	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
 // incrementWS returns a copy of ws with the value incremented by 1 (big-endian),
@@ -81,6 +79,17 @@ func (ps *PebbleStore) CloneVaultData(
 	// Bulk raw-KV copy bypasses the per-engram lifecycle hooks: drop the
 	// target's retired set so its next reader rebuilds it (retired.go).
 	defer ps.resetRetired(wsTarget)
+	// The target's count is reset on EVERY exit. A bulk copy never computes a
+	// count, and it commits batches as it goes, so a copy that stops part way
+	// (a cancelled context at engine Stop, an I/O error) has still changed what
+	// is stored. Returning before the reset left the old count in place, the
+	// raw batches never mark the vault changed, Close wrote the clean marker,
+	// and the next start trusted it (5 for 517 measured).
+	defer func() {
+		if err := ps.resetVaultCount(wsTarget); err != nil {
+			slog.Warn("vault count reset failed after a bulk copy", "err", err)
+		}
+	}()
 	wsSourceNext, err := incrementWS(wsSource)
 	if err != nil {
 		return 0, fmt.Errorf("clone: %w", err)
@@ -289,17 +298,8 @@ func (ps *PebbleStore) CloneVaultData(
 	// (WriteVaultName was already called by the engine under vaultOpsMu before
 	// this goroutine was launched; the cache entry was written there.)
 
-	// ---- Phase 4: Write computed VaultCountKey for target ----
-	// Encode as BigEndian int64 (matches getOrInitCounter read path in impl.go).
-	vaultCountKey := keys.VaultCountKey(wsTarget)
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(copiedEngrams))
-	if err := ps.db.Set(vaultCountKey, buf, pebble.NoSync); err != nil {
-		return copiedEngrams, fmt.Errorf("clone: write vault count: %w", err)
-	}
-	// Seed the in-memory counter so GetVaultCount is immediately correct.
-	vc := ps.getOrInitCounter(ctx, wsTarget)
-	vc.count.Store(copiedEngrams)
+	// ---- Phase 4: the target's count ----
+	// Reset by the defer at the top of this function (vault_count.go).
 
 	// ---- Phase 5: Reset coherence for target (write zeroed [7]int64) ----
 	if err := ps.WriteCoherence(wsTarget, [7]int64{}); err != nil {
@@ -330,6 +330,17 @@ func (ps *PebbleStore) MergeVaultData(
 	// Bulk raw-KV copy bypasses the per-engram lifecycle hooks: drop the
 	// target's retired set so its next reader rebuilds it (retired.go).
 	defer ps.resetRetired(wsTarget)
+	// The target's count is reset on EVERY exit. A bulk copy never computes a
+	// count, and it commits batches as it goes, so a copy that stops part way
+	// (a cancelled context at engine Stop, an I/O error) has still changed what
+	// is stored. Returning before the reset left the old count in place, the
+	// raw batches never mark the vault changed, Close wrote the clean marker,
+	// and the next start trusted it (5 for 517 measured).
+	defer func() {
+		if err := ps.resetVaultCount(wsTarget); err != nil {
+			slog.Warn("vault count reset failed after a bulk copy", "err", err)
+		}
+	}()
 	wsSourceNext, err := incrementWS(wsSource)
 	if err != nil {
 		return 0, fmt.Errorf("merge: %w", err)
@@ -565,19 +576,8 @@ func (ps *PebbleStore) MergeVaultData(
 		return mergedEngrams, fmt.Errorf("merge: write merged coherence: %w", err)
 	}
 
-	// ---- Phase 4: Update VaultCountKey for target ----
-	// Count is the post-merge total: existing target count + newly merged engrams.
-	existingCount := ps.GetVaultCount(ctx, wsTarget)
-	newTotal := existingCount + mergedEngrams
-	vaultCountKey := keys.VaultCountKey(wsTarget)
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(newTotal))
-	if err := ps.db.Set(vaultCountKey, buf, pebble.NoSync); err != nil {
-		return mergedEngrams, fmt.Errorf("merge: write vault count: %w", err)
-	}
-	// Update in-memory counter.
-	vc := ps.getOrInitCounter(ctx, wsTarget)
-	vc.count.Store(newTotal)
+	// ---- Phase 4: the target's count ----
+	// Reset by the defer at the top of this function (vault_count.go).
 
 	return mergedEngrams, nil
 }
