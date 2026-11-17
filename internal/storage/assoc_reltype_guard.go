@@ -25,6 +25,24 @@ import (
 // See STO-15 in docs/internals/invariants.md.
 var ErrAssocRelTypeCollision = errors.New("association write would replace a different rel_type at the same weight")
 
+// AssocRelTypeCollisionError is the ErrAssocRelTypeCollision a guarded write
+// returns, with the two relations it names, so a caller that answers a person
+// (engine.Link) can name them instead of printing their numbers. errors.Is
+// against ErrAssocRelTypeCollision holds through it, and its text is the one
+// the guard has always returned.
+type AssocRelTypeCollisionError struct {
+	Existing, New RelType
+	Weight        float32
+	Src, Dst      ULID
+}
+
+func (e *AssocRelTypeCollisionError) Error() string {
+	return fmt.Sprintf("%v: existing rel_type %v at weight %v between %s and %s, new rel_type %v",
+		ErrAssocRelTypeCollision, e.Existing, e.Weight, e.Src.String(), e.Dst.String(), e.New)
+}
+
+func (e *AssocRelTypeCollisionError) Unwrap() error { return ErrAssocRelTypeCollision }
+
 // checkRelTypeCollision refuses a forward-association write when a value
 // already exists at the exact (ws, src, weight, dst) key and decodes a
 // DIFFERENT RelType than newRelType. A missing key, a decode failure (treated
@@ -57,6 +75,5 @@ func checkRelTypeCollision(db *pebble.DB, wsPrefix [8]byte, src [16]byte, weight
 	if relType == newRelType {
 		return nil
 	}
-	return fmt.Errorf("%w: existing rel_type %v at weight %v between %s and %s, new rel_type %v",
-		ErrAssocRelTypeCollision, relType, weight, ULID(src).String(), ULID(dst).String(), newRelType)
+	return &AssocRelTypeCollisionError{Existing: relType, New: newRelType, Weight: weight, Src: ULID(src), Dst: ULID(dst)}
 }

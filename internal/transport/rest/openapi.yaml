@@ -2869,6 +2869,12 @@ paths:
           $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          description: "Refused, nothing was written. Either endpoint is soft-deleted, or a link of another relation in the same direction already has this weight (a link's key holds its direction and weight but not its relation). The message names both relations. Write the link at a different weight."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
 

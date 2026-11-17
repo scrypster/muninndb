@@ -28,6 +28,7 @@ import (
 	"github.com/scrypster/muninndb/internal/metrics"
 	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/replication"
+	"github.com/scrypster/muninndb/internal/storage"
 	mbp "github.com/scrypster/muninndb/internal/transport/mbp"
 	"golang.org/x/time/rate"
 )
@@ -998,6 +999,14 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, engine.ErrEngramSoftDeleted) {
+			s.sendError(r, w, http.StatusConflict, ErrInvalidAssociation, err.Error())
+			return
+		}
+		// A link that would replace an edge of another relation at the same
+		// weight in the same direction (STO-15) is the caller's to change, by
+		// writing it at another weight. It is a conflict with what is stored,
+		// not a server fault: a 500 hid the reason and made clients retry it.
+		if errors.Is(err, storage.ErrAssocRelTypeCollision) {
 			s.sendError(r, w, http.StatusConflict, ErrInvalidAssociation, err.Error())
 			return
 		}

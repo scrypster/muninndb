@@ -2336,3 +2336,123 @@ unrelated.
 text on byte-identical frozen recall responses, invented corpus) is pre-registered in the
 design and prepared but not run; its HARM branch (correct use of a moderate gold row falls
 10 points or more) would revert the tool and guide wording and leave the doc corrections.
+
+### Association decay spares supersedes edges and never writes over another relation (2026-11-16)
+
+**What was found.** A review of the inline-supersedes work reproduced, on develop and through
+the real decay pass, five ways decay removed or moved a supersedes edge: archived after a day
+when declared just above the floor, archived about 120 days idle once the Hebbian worker had
+co-activated the pair, deleted by the first pass when declared with a negative weight, and
+erased by a floor collision with another relation on the same pair, in either order. Each left
+the target stamped with no successor, so the fork guard admitted a rival, and a recall's lazy
+restore then made a permanent fork. The floor collision also erases a non-supersedes relation.
+
+**What was decided, and why.**
+- *Decay skips supersedes edges entirely.* A supersedes edge is a declaration that something is
+  retired, not a measure of co-activation, so nothing about its weight should change what it
+  declares. Recall reads a declared chain through the relation, not the weight.
+- *A move onto a key held by another relation is not made: the edge keeps its weight.* The
+  alternatives were nudging it to the next free key (new weights that no one chose, and a
+  search loop) or archiving it (which loses the edge from live reads). With decay running every
+  minute or so against a 30-day half-life, an edge reaches the floor in small steps, so where it
+  is kept off the floor key it sits just above `minWeight`, about 0.05, which is close to the
+  floor it was headed for. An archive that would replace another relation's 0x25 row clamps to
+  the floor instead, for the same reason.
+- *The check holds the pairs' STO-15 locks through the commit,* because a check without them
+  reopens the race #925 closed for `WriteAssociation`.
+- *Negative weights are not clamped on REST, gRPC or MBP in this change.* With supersedes edges
+  exempt, a negative weight can no longer remove a declaration. On any other relation the key
+  already saturates to 0, every reader sees weight 0, and decay removing such an edge is the
+  documented fate of an edge with no positive peak. Clamping or refusing out-of-range weights
+  on those transports changes what a public API accepts, and is its own decision.
+- *Archived supersedes rows are restored once per vault, by the leader, under the target's lock.*
+  The lazy restore runs on recall and cannot hold the target's evolve lock, so it now leaves
+  supersedes rows alone. Without a one-off restore those rows would then never come back and
+  their targets would look free forever. The restore runs from the leader's decay pass, not the
+  per-node startup pass, because its decision depends on a target's current successors: a
+  lagging follower deciding alone could fork a target the leader does not. When a target already
+  has another successor, the restore changes nothing and logs the three memories, because either
+  answer (restore into a fork, or delete the archived claim) would be the server choosing.
+- A census of a copy of production data (15 vaults) found no archived supersedes row, 122
+  supersedes edges at their floor, and 1,894 supersedes pairs that also carry another relation,
+  so the floor collision was the live exposure there and the restore is insurance for other
+  stores.
+
+**Second review (2026-11-16).** An adversarial review found one regression, two defects in the
+new restore code, and eight guards no test pinned. What changed, and why:
+- *The weight move checks its destination, and holds the pairs' guard locks through the commit.*
+  The regression: a supersedes edge declared at 1.0 from an older memory onto a newer one, with
+  a relates_to edge on the same directed pair, was erased by ordinary history-view recalls,
+  because the Hebbian worker moved relates_to up to 1.0 with a plain `Set`. Develop erased it too
+  when the recalls came before its first decay pass moved the supersedes edge off 1.0 (the review's
+  probe I, and the effect check through the binary). With supersedes exempt from decay it could
+  happen at any time (probe I2).
+  Skipping supersedes inside the Hebbian update would not close it: the edge that moves is the
+  other one. The review proposed the check alone. A check without the lock lets a Link pass its
+  own check at the same destination before the move commits (the race the STO-15 lock closed
+  for `WriteAssociation`), and lets a decay chunk commit inside the move's read-to-commit window,
+  which leaves two keys for one edge. Holding the lock closes both, and the Hebbian worker runs
+  in the background, so waiting behind a decay chunk costs recall nothing.
+- *A move refused for that reason is not a fault.* The edge keeps its weight, the worker logs it
+  at DEBUG, leaves it out of `Stats().Errors`, and suppresses its callback. Counted as a fault it
+  would have logged an ERROR every flush window for as long as the two relations share the pair.
+  The cost is named: that relation stops learning on that pair while the other holds the key.
+- *The restore's watermark is its own key (0x31), not value 2 of 0x2E.* One byte holds one
+  version sequence. With both passes in 0x2E, a later bump of `assocWeightRepairVersion` would
+  have made the startup repair skip vaults the restore had marked, or re-run on every boot. A
+  new prefix byte is what the registry asks of a new watermark, and costs one entry in
+  `prefix.All()` and in `ClearVault`'s list.
+- *A row whose source is live on the target again is dropped, not restored.* Restoring it wrote
+  a second live key for one declaration.
+- *The lazy restore removes a symmetric edge's mirrored row only when it holds the same
+  relation.* The (dst, src) key can hold another edge's row, and an older binary's decay
+  archived across relations. This one was open on develop since the mirror was added (#806).
+- *Rows the restore leaves because another relation holds their key are now named in a WARN,*
+  not only counted.
+- *Clone, merge and export still drop the 0x25 archive.* It is in none of their prefix lists,
+  so they drop archived supersedes declarations too. Carrying 0x25 changes what those operations
+  transport, which is its own decision. The step 1 text claimed a merged vault keeps its
+  archived rows, and that was wrong.
+- A second census of the same copy of production data counted how a supersedes edge is stored:
+  all 2,581 newer to older (the direction `evolve` and inline supersedes write), none older to
+  newer. Hebbian moves only older to newer pairs, so the regression above had no live instance
+  there. 1,894 of the 2,581 share their directed pair with another relation.
+- *Effect check through the real binary (2026-11-16).* Develop (2aeb67f0) and this branch, each on
+  its own copy of the same production data, with invented vaults, driven over MCP and REST. The
+  binary has no decay clock, so time was moved offline between passes by setting the invented
+  edges' `lastActivated` back. Decay's clock is `lastActivated`, or `createdAt` when
+  `lastActivated` is 0, which it is on every edge `muninn_link` writes, and a non-zero value
+  overrides that fallback. On develop, a replaced memory lost its
+  `superseded_by` in the history view and accepted a rival link in five of seven shapes (a
+  negative weight deleted at the first pass, an edge at 1.0 erased by recall learning, two edges
+  archived after a day, two relations meeting at one floor key after 200 days, a co-activated edge
+  archived after 125 days). In a sixth (G) it kept the supersedes edge and silently lost the other
+  relation's link. With time moved in two jumps that showed at the +200 day pass. At the real
+  cadence (a pass every 30 simulated minutes) it happens at day 6.333, mid-decay, when the
+  relates_to edge's new ceiling lands exactly on the key the supersedes edge moved to two hours
+  earlier (0.692429), and the supersedes edge's own move then deletes that key. The survivor is
+  the same. Recall's lazy restore then forked two memories, whose
+  evolve was refused as forked. On the branch every replaced memory kept its successor, every rival was
+  refused, and recall forked nothing. The branch's one-off restore, run over develop's data, put
+  back the archived edge whose target was free, left the one whose target a rival now held with a
+  WARN naming all three, logged one INFO line with the counts, and did not run again on restart.
+
+**Third review (2026-11-16).** A delta review of the second round found no data loss, three guards
+no test pinned, a cost not named, and a refusal that reached callers as a server fault.
+- *Each guard now has a test that fails without it:* the single-pair weight move's lock (a decay
+  chunk inside its window left two keys for one edge), the lazy restore's lock on the mirrored
+  pair (a decay chunk archived a live D to S edge into the mirrored row, and the restore then
+  deleted it), and `CollisionSkips` counting only relation-guard skips (a dead endpoint counted as
+  one would have dropped out of `Stats().Errors`).
+- *The refusal is the caller's to act on, so no transport reports it as a fault.* `engine.Link`
+  names both relations and says to choose another weight (the storage error carries both
+  relations, `AssocRelTypeCollisionError`, with its old text). REST answers 409, as it does for a
+  soft-deleted endpoint, where it answered 500 with "an internal error occurred", logged an ERROR,
+  and the Python SDK retried it three times. gRPC returns FailedPrecondition, the code the server
+  already uses for "fix something first", where it returned Unknown and logged an ERROR. MBP
+  already returned an error frame with code 4005 and the engine's text, and MCP returns that text
+  as a tool error. Nothing but the error mapping changed.
+- *The weight move's cost is named, not fixed here.* Holding every pair's stripe through the
+  commit is what closes the windows. A batch of more than about 1,400 pairs takes all 256 stripes,
+  and the measured waits are in COG-27 residual 8. Chunking the batch changes how much of a
+  batch commits together, which is its own decision, and is the next increment.

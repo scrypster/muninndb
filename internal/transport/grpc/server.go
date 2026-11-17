@@ -13,6 +13,7 @@ import (
 
 	"github.com/scrypster/muninndb/internal/auth"
 	"github.com/scrypster/muninndb/internal/engine/trigger"
+	"github.com/scrypster/muninndb/internal/storage"
 	"github.com/scrypster/muninndb/internal/transport/mbp"
 	pb "github.com/scrypster/muninndb/proto/gen/go/muninn/v1"
 	"google.golang.org/grpc"
@@ -500,6 +501,13 @@ func (s *Server) Link(ctx context.Context, req *pb.LinkRequest) (*pb.LinkRespons
 	req.Vault = vault
 	resp, err := s.engine.Link(ctx, req)
 	if err != nil {
+		// A link that would replace an edge of another relation at the same
+		// weight in the same direction (STO-15) is refused, and the caller
+		// changes the weight. Bare, it reached the client as codes.Unknown and
+		// was logged here as a server fault.
+		if errors.Is(err, storage.ErrAssocRelTypeCollision) {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
 		slog.Error("link failed", "error", err)
 		return nil, err
 	}

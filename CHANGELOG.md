@@ -42,6 +42,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Association decay no longer touches a `supersedes` link, and no longer erases one link with
+  another. A `supersedes` link is what marks a memory as replaced, and decay treated it like any
+  other link. It could archive it (one declared at a very low weight, after a day, or one that
+  recall had often returned beside the memory it replaced, after about four months unused),
+  delete it (one sent with a negative weight over REST, gRPC or MBP), or overwrite it when
+  another link in the same direction between the same two memories decayed to the same weight. The replaced memory
+  still stayed out of ordinary recall. But in the history view (`include_invalid`, `as_of`) it
+  lost its `superseded_by` and `current_version`, and a later link or evolve naming it was
+  accepted where it should have been refused. Where the link had been archived, once recall
+  touched it again the memory had two successors for good. From then on its history names no
+  current version, and every later supersede or evolve of it is refused as forked. To tell
+  whether a store was affected, look for a memory you replaced whose history view shows no
+  `superseded_by`, or a refusal that calls one of your memories forked. After the upgrade, the
+  leader's first decay pass puts back each archived `supersedes` link whose memory nothing else
+  has replaced since, and logs how many it restored. It leaves a link archived, and a WARN names
+  it, where a link of another relation between the same two memories now sits at the weight it
+  would go back at. It cannot put back a link whose memory has been deleted. Where something
+  else has replaced the memory since, the memory has two declared replacements. The server
+  changes neither: the live replacement stays in effect, the archived one stays archived, and a
+  WARN names the memory and both replacements. To keep the archived one instead, permanently
+  delete the live one and declare the archived one again with `muninn_link`. Vault clone, merge
+  and export do not carry archived links, so a vault copied that way has none to put back.
+  Decay, the archive restore and the learning that strengthens links on recall also no longer
+  overwrite a link of one relation with a link of another between the same two memories, which
+  used to happen when both reached the same weight. Recall learning could do it with ordinary
+  history view recalls: a `supersedes` link declared at weight 1.0 from an older memory onto a
+  newer one was erased once another link between the same two memories climbed to 1.0. Such a
+  link now keeps the weight it has. A link is stored under a key that holds its direction and its
+  weight but not its relation. So a link of another relation from the same memory to the same
+  memory, at the weight a `supersedes` link there already has, is refused for as long as both
+  exist. The same link in the other direction is written. The refusal names both relations and
+  says to choose another weight. REST answers 409 (it answered 500 with no reason, which the
+  Python SDK retried), gRPC returns FailedPrecondition (it returned Unknown), MBP returns an error
+  frame with code 4005, and MCP returns a tool error. Before, such a link was accepted once decay
+  had moved the `supersedes` link, and a later decay pass erased one of the two when it moved one
+  onto the key the other held. The learning that strengthens links on recall now holds the locks
+  of every pair in its batch until the batch is written. A batch of more than about 1,400 pairs
+  holds all of them, and links, evolves and recall's restore of archived links wait in every vault
+  until it is written. Measured with a batch of 4,950 pairs, a link in another vault waited up to
+  84 to 166 ms (37 to 50 ms before). During a full decay pass over 100,000 links, a batch of 45
+  pairs waited 54 to 55 ms at the 99th percentile (2 to 3 ms before).
 - Swift SDK: `writeBatch` no longer fails on every successful batch. The SDK expected each
   item of the response to carry `created_at`, which the server has never sent, so decoding
   threw `keyNotFound` after the memories had already been stored. `BatchWriteResult` now has
