@@ -1178,6 +1178,29 @@ func TestLink_Error(t *testing.T) {
 	}
 }
 
+// TestLink_ACollisionIsFailedPrecondition: a link that would replace an edge of
+// another relation in the same direction at the same weight (STO-15) is a
+// refusal the caller acts on by changing the weight. It used to reach a gRPC
+// client as codes.Unknown and be logged as a server fault.
+func TestLink_ACollisionIsFailedPrecondition(t *testing.T) {
+	refusal := fmt.Errorf("link refused, nothing was written: a supersedes link holds that weight (%w). Write the relates_to link at a different weight", storage.ErrAssocRelTypeCollision)
+	eng := &mockEngine{
+		linkFn: func(ctx context.Context, req *pb.LinkRequest) (*pb.LinkResponse, error) {
+			return nil, refusal
+		},
+	}
+	srv := newPublicTestServer(t, eng)
+
+	_, err := srv.Link(context.Background(), &pb.LinkRequest{SourceId: "a", TargetId: "b", RelType: 5, Weight: 0.8})
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.FailedPrecondition {
+		t.Fatalf("Link: %v (code %v), want FailedPrecondition", err, st.Code())
+	}
+	if st.Message() != refusal.Error() {
+		t.Errorf("message = %q, want the refusal unchanged", st.Message())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Streaming RPC tests
 // ---------------------------------------------------------------------------
@@ -1563,16 +1586,15 @@ func TestListVaults_Success(t *testing.T) {
 	srv := newPublicTestServer(t, eng)
 
 	// ListVaults requires an authenticated caller — inject a key into the context.
+	// The key is pinned to "default", so that is the one vault it is told about,
+	// though the server holds two (SEC-25).
 	ctx := context.WithValue(context.Background(), auth.ContextAPIKey, &auth.APIKey{Vault: "default", Mode: auth.ModeFull})
 	resp, err := srv.ListVaults(ctx, &pb.ListVaultsRequest{})
 	if err != nil {
 		t.Fatalf("ListVaults: %v", err)
 	}
-	if len(resp.Vaults) != 2 {
-		t.Errorf("len(Vaults) = %d, want 2", len(resp.Vaults))
-	}
-	if resp.Vaults[0] != "default" || resp.Vaults[1] != "work" {
-		t.Errorf("Vaults = %v, want [default work]", resp.Vaults)
+	if len(resp.Vaults) != 1 || resp.Vaults[0] != "default" {
+		t.Errorf("Vaults = %v, want [default]", resp.Vaults)
 	}
 }
 

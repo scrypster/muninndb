@@ -532,6 +532,35 @@ func (e *evolveErrorEngine) Evolve(_ context.Context, _, _, _, _ string) (*Evolv
 	return nil, errors.New("evolve failed")
 }
 
+// An evolve the engine refuses as an invalid request is the caller's to fix. It
+// must never surface as a 500 storage failure; it gets the status POST
+// /api/engrams gives the same error. This pins the mapping, not a particular
+// reason: the engine decides what is invalid.
+func TestEvolveEndpoint_InvalidRequestIsNotAStorageError(t *testing.T) {
+	eng := &evolveInvalidRequestEngine{}
+	server := NewServer("localhost:8080", eng, nil, nil, nil, EmbedInfo{}, EnrichInfo{}, nil, "", nil)
+
+	body := `{"new_content":"updated","reason":"fix"}`
+	req := httptest.NewRequest("POST", "/api/engrams/"+testEngramID+"/evolve", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d: an engine ErrInvalidRequest from evolve was not mapped to "+
+			"the invalid-request status; body=%s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "not acceptable as sent") {
+		t.Errorf("the refusal's reason did not reach the response body: %s", w.Body.String())
+	}
+}
+
+type evolveInvalidRequestEngine struct{ MockEngine }
+
+func (e *evolveInvalidRequestEngine) Evolve(_ context.Context, _, _, _, _ string) (*EvolveResponse, error) {
+	return nil, fmt.Errorf("evolve: not acceptable as sent: %w", engine.ErrInvalidRequest)
+}
+
 // ---------------------------------------------------------------------------
 // handleConsolidateEngrams — error paths (71.4%)
 // ---------------------------------------------------------------------------

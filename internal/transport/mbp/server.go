@@ -1,7 +1,6 @@
 package mbp
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -9,6 +8,8 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/scrypster/muninndb/internal/auth"
@@ -38,6 +39,36 @@ type Server struct {
 	wg        sync.WaitGroup
 	shutdownM sync.Mutex
 	tlsConfig *tls.Config // nil = plain TCP
+
+	// maxConns is the most connections the listener holds at once
+	// (connection_cap.go). Zero until the server serves, when it is resolved
+	// from the memory limit or the override.
+	maxConns    int
+	refusals    chan net.Conn // refused connections waiting for a courtesy answer
+	openConns   atomic.Int64
+	capRefused  atomic.Int64 // refused since the last warning
+	capLastWarn atomic.Int64 // UnixNano of the last warning
+	capWarnings atomic.Int64 // warnings logged
+	// handshakeTimeout overrides helloTimeout when positive. Tests set it so
+	// they do not wait fifteen seconds for a silent connection to be closed.
+	handshakeTimeout time.Duration
+	// decodeBudget overrides connDecodeBudget when positive. Tests set it to
+	// watch the budget work without megabyte payloads.
+	decodeBudget int64
+	// decodedInFlight is the decompressed payload charged to every
+	// connection's budget right now, in bytes. It returns to zero when no
+	// compressed frame is being handled.
+	decodedInFlight atomic.Int64
+	// replyStall overrides replyStallTimeout when positive. Tests set it so
+	// they do not wait fifteen seconds for a stalled connection to be closed.
+	replyStall time.Duration
+	// repliesUnwritten is the reply payload queued on every connection and not
+	// yet written to its socket, in bytes (reply_flow.go).
+	repliesUnwritten atomic.Int64
+	// stalledClosed counts connections closed because they stopped taking
+	// their replies; stallLastWarn rate-limits the log line about it.
+	stalledClosed atomic.Int64
+	stallLastWarn atomic.Int64
 }
 
 // NewServer creates a new MBP server.
@@ -58,12 +89,25 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.addr, err)
 	}
+	return s.ServeListener(ctx, ln)
+}
+
+// ServeListener serves on a listener the caller already holds, and blocks until
+// Shutdown is called. It closes ln on return. A caller that binds port 0 itself
+// knows the address before anything is served and knows the listener is its
+// own, which a "pick a free port, release it, bind it again" sequence cannot
+// promise.
+func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
 	if s.tlsConfig != nil {
 		ln = tls.NewListener(ln, s.tlsConfig)
 		slog.Info("mbp: TLS enabled", "addr", ln.Addr().String())
 	}
-	slog.Info("mbp: listening", "addr", ln.Addr().String())
+	if s.maxConns <= 0 {
+		s.maxConns = resolveMaxConnections()
+	}
+	slog.Info("mbp: listening", "addr", ln.Addr().String(), "max_connections", s.maxConns, "set_with", maxConnectionsEnv)
 	s.listener = ln
+	s.startRefusers()
 
 	// Accept connections in a goroutine
 	s.wg.Add(1)
@@ -137,12 +181,48 @@ func (s *Server) acceptLoop(ctx context.Context) {
 			continue
 		}
 
+		// A place for it, or a refusal: the listener holds a bounded number of
+		// connections (SEC-28).
+		if !s.admitConnection() {
+			s.refuseAtCap(conn)
+			continue
+		}
+
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer s.releaseConnection()
 			s.handleConnection(ctx, conn)
 		}()
 	}
+}
+
+// Limits on a connection that has not authenticated yet (SEC-27). Until HELLO
+// succeeds the peer has shown no credential, so what it can make the server
+// hold has to be small and has to end.
+const (
+	// helloTimeout is how long a connection has to complete the handshake:
+	// from accept to HELLO_OK written. It is one deadline for the whole
+	// exchange, not one per read, so a peer that sends a byte now and then does
+	// not keep it open. The value is the REST server's ReadTimeout, which is
+	// the same bound on the same thing there: the time a client has to deliver
+	// a request. Like that one it is fixed, not configurable.
+	helloTimeout = 15 * time.Second
+
+	// maxHelloPayload is the largest HELLO payload read. A HELLO holds a
+	// version, a key (46 bytes), a vault name (at most 64), a client name and
+	// a few capability names; 64 KiB is several hundred times that. A frame
+	// header that declares more is refused before anything is allocated for
+	// it. Without this, the 16 bytes of a header declaring MaxPayloadSize made
+	// the server allocate 16 MiB for a peer that had not authenticated.
+	maxHelloPayload = 64 * 1024
+)
+
+func (s *Server) helloDeadline() time.Time {
+	if s.handshakeTimeout > 0 {
+		return time.Now().Add(s.handshakeTimeout)
+	}
+	return time.Now().Add(helloTimeout)
 }
 
 // handleConnection handles a single client connection.
@@ -153,9 +233,17 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// The handshake is on a clock: everything up to HELLO_OK, reads and writes
+	// both. It is taken off once the session exists (below).
+	_ = conn.SetDeadline(s.helloDeadline())
+
 	// Read the HELLO frame first
-	helloFrame, err := ReadFrame(conn)
+	helloFrame, err := readFrameLimited(conn, maxHelloPayload)
 	if err != nil {
+		if errors.Is(err, ErrPayloadTooLarge) {
+			s.writeErrorFrame(conn, 0, ErrAuthFailed, "HELLO payload too large")
+			return
+		}
 		s.writeErrorFrame(conn, 0, ErrAuthFailed, "failed to read HELLO")
 		return
 	}
@@ -197,6 +285,10 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	// (COG-11), because auth.ObserveFromContext returns false. Use the key's
 	// actual mode — a blanket ModeFull here would let an observe MBP key stamp
 	// verified, turning the over-block into a real SEC-14 under-block.
+	//
+	// The same value is what dispatchFrame checks every later frame against
+	// (SEC-20, frame_modes.go). It is set once, here: the handshake is not
+	// repeated on a connection, so the mode cannot change under it.
 	connMode := auth.ModeFull
 	if helloReq.AuthMethod == "token" {
 		key, err := s.authStore.ValidateAPIKey(helloReq.Token)
@@ -207,8 +299,26 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		scope.key = &key
 		connMode = key.Mode
 	}
+	// Ending the session stops the reader; the frames already being handled
+	// finish and are answered (the refusal that ended it among them), and then
+	// the connection is closed (readerLoop, SEC-22).
+	// flow is this connection's account of the replies it has not read and the
+	// requests being handled for it (reply_flow.go, SEC-30).
+	flow := newConnFlow(&s.repliesUnwritten)
+	var endOnce sync.Once
+	scope.end = func() {
+		endOnce.Do(func() {
+			_ = conn.SetReadDeadline(time.Now())
+			flow.stop() // the reader may be waiting on the account, not on the socket
+		})
+	}
 	connCtx = withVaultScope(connCtx, scope)
 	connCtx = context.WithValue(connCtx, auth.ContextMode, connMode)
+	connCtx = withDecodeBudget(connCtx, s.connDecodeBudget(), &s.decodedInFlight)
+	connCtx = withConnFlow(connCtx, flow)
+	// A reader waiting on the account is released when the connection's
+	// context ends, as one waiting on the socket is by the socket closing.
+	defer context.AfterFunc(connCtx, flow.abandon)()
 
 	// Resolve and validate the HELLO vault under the new scope, then pin the
 	// request to it so the engine registers (and the response advertises) the
@@ -219,6 +329,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 	helloReq.Vault = resolvedVault
+	scope.openedOn = resolvedVault
 
 	// Call engine's Hello handler
 	helloResp, err := s.engine.Hello(connCtx, &helloReq)
@@ -247,12 +358,16 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// Start writer goroutine
-	writeCh := make(chan *Frame, 256)
-	writerErr := make(chan error, 1)
-	go s.writerLoop(conn, writeCh, writerErr)
+	// The session exists. From here the connection is not on the handshake's
+	// clock: a client may hold it open and idle between requests.
+	_ = conn.SetDeadline(time.Time{})
 
-	// Start reader loop
+	// Start writer goroutine
+	writeCh := make(chan *Frame, replyQueueLen)
+	writerErr := make(chan error, 1)
+	go s.writerLoop(conn, writeCh, writerErr, flow)
+
+	// Start reader loop. When it returns, no handler is still running.
 	s.readerLoop(connCtx, conn, writeCh, helloResp.Capabilities)
 
 	close(writeCh)
@@ -268,8 +383,24 @@ const maxConcurrentFrames = 64
 
 // readerLoop reads frames and dispatches them to handlers.
 // A semaphore limits per-connection goroutine concurrency to maxConcurrentFrames.
+//
+// It returns only when every handler it started has finished. The caller
+// closes writeCh next, and a handler that went to answer after that would be
+// sending on a closed channel — a panic, in a goroutine nothing recovers, that
+// ends the whole server process. Any client could cause it by disconnecting
+// with a request still being handled (SEC-22). The handlers are not cut short:
+// what the client asked for before it left is carried out, and the answers
+// nobody is there to read are dropped by the writer.
 func (s *Server) readerLoop(ctx context.Context, conn net.Conn, writeCh chan *Frame, negotiatedCapabilities []string) {
 	sem := make(chan struct{}, maxConcurrentFrames)
+	flow := flowOf(ctx)
+	// Taking every slot is waiting for every handler: each holds one until it
+	// returns.
+	defer func() {
+		for i := 0; i < cap(sem); i++ {
+			sem <- struct{}{}
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -277,9 +408,21 @@ func (s *Server) readerLoop(ctx context.Context, conn net.Conn, writeCh chan *Fr
 		default:
 		}
 
+		// Not while this connection has replies backed up or enough being
+		// handled already: a connection that is not reading its answers stops
+		// being read from (reply_flow.go). The reader holds nothing while it
+		// waits here.
+		if flow != nil && !flow.waitToRead() {
+			return
+		}
+
 		frame, err := ReadFrame(conn)
 		if err != nil {
 			return // Connection closed or read error
+		}
+		held := len(frame.Payload)
+		if flow != nil {
+			flow.requestRead(held)
 		}
 
 		// Acquire semaphore slot before spawning; blocks if maxConcurrentFrames
@@ -289,63 +432,57 @@ func (s *Server) readerLoop(ctx context.Context, conn net.Conn, writeCh chan *Fr
 		// Launch handler goroutine
 		go func(f *Frame) {
 			defer func() { <-sem }()
+			if flow != nil {
+				defer flow.requestDone(held)
+			}
 			s.dispatchFrame(ctx, f, writeCh, negotiatedCapabilities)
 		}(frame)
 	}
 }
 
-// writerLoop serializes frames to the connection.
-func (s *Server) writerLoop(conn net.Conn, writeCh chan *Frame, errCh chan error) {
-	bw := bufio.NewWriter(conn)
-	defer bw.Flush()
-
-	for frame := range writeCh {
-		if err := WriteFrame(bw, frame); err != nil {
-			errCh <- err
-			return
-		}
-		bw.Flush()
+// dispatchFrame routes a frame to its handler. It is the one place every frame
+// after HELLO passes, so it is where the credential's mode is enforced
+// (SEC-20): admit decides, and no handler is reached by a frame the
+// connection's mode may not send.
+func (s *Server) dispatchFrame(ctx context.Context, frame *Frame, writeCh chan *Frame, negotiatedCapabilities []string) {
+	// Before the payload is decompressed or decoded and before the engine is
+	// called: the answer depends on the frame type and the connection alone, so
+	// it is the same whether or not the request is well formed or its target
+	// exists.
+	// Is there still a session? What authorised it at HELLO — a key, or a
+	// public vault — is checked again for every frame, of every type, so a key
+	// revoked or expired while the connection is open stops working on the
+	// next frame rather than when the client chooses to reconnect (SEC-23).
+	if ended := s.sessionEnded(ctx); ended != "" {
+		s.queueErrorFrame(ctx, writeCh, frame.CorrelationID, ErrAuthFailed, ended)
+		endSession(ctx)
+		return
 	}
 
-	errCh <- nil
-}
+	mode, _ := ctx.Value(auth.ContextMode).(string)
+	handle, code, refusal := admit(frameRoutes, frame.Type, mode)
+	if handle == nil {
+		s.queueErrorFrame(ctx, writeCh, frame.CorrelationID, code, refusal)
+		return
+	}
 
-// dispatchFrame routes a frame to the appropriate handler.
-func (s *Server) dispatchFrame(ctx context.Context, frame *Frame, writeCh chan *Frame, negotiatedCapabilities []string) {
-	// Check if payload should be decompressed
+	// Decompress only now, for a frame that was admitted, into at most what a
+	// frame may carry, and charged to this connection's budget until the
+	// handler is done with it (compress.go, decode_budget.go). A frame that
+	// does not fit the budget is answered, not held: nothing here waits.
 	var payload []byte = frame.Payload
 	if (frame.Flags & FlagCompressed) != 0 {
-		decompressed, err := DecompressPayload(frame.Payload)
+		decompressed, release, err := decodeCharged(ctx, frame.Payload)
 		if err != nil {
-			s.queueErrorFrame(writeCh, frame.CorrelationID, ErrInternal, "decompression failed")
+			code, message := decompressionFailure(err)
+			s.queueErrorFrame(ctx, writeCh, frame.CorrelationID, code, message)
 			return
 		}
+		defer release()
 		payload = decompressed
 	}
 
-	// Dispatch by type
-	switch frame.Type {
-	case TypeWrite:
-		s.handleWrite(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeRead:
-		s.handleRead(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeActivate:
-		s.handleActivate(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeSubscribe:
-		s.handleSubscribe(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeUnsub:
-		s.handleUnsub(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeLink:
-		s.handleLink(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeForget:
-		s.handleForget(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypeStat:
-		s.handleStat(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	case TypePing:
-		s.handlePing(ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
-	default:
-		s.queueErrorFrame(writeCh, frame.CorrelationID, ErrInternal, fmt.Sprintf("unknown message type: 0x%02X", frame.Type))
-	}
+	handle(s, ctx, frame.CorrelationID, payload, writeCh, negotiatedCapabilities)
 }
 
 // Handler methods
@@ -353,53 +490,60 @@ func (s *Server) dispatchFrame(ctx context.Context, frame *Frame, writeCh chan *
 func (s *Server) handleWrite(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
 	var req WriteRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid write request")
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidEngram, "invalid write request")
 		return
 	}
 
 	resolved, err := s.scopeVault(ctx, req.Vault)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrAuthFailed, err.Error())
 		return
 	}
 	req.Vault = resolved
 
 	resp, err := s.engine.Write(ctx, &req)
 	if err != nil {
-		s.queueEngineError(writeCh, corrID, err, ErrStorageError)
+		s.queueEngineError(ctx, writeCh, corrID, err, ErrStorageError)
 		return
 	}
 
-	s.queueFrame(writeCh, TypeWriteOK, corrID, resp, caps)
+	s.queueFrame(ctx, writeCh, TypeWriteOK, corrID, resp, caps)
 }
 
 func (s *Server) handleRead(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
 	var req ReadRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid read request")
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidEngram, "invalid read request")
 		return
 	}
 
 	resolved, err := s.scopeVault(ctx, req.Vault)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrAuthFailed, err.Error())
 		return
 	}
 	req.Vault = resolved
 
+	// Room for the reply, before the work: see reply_flow.go.
+	ctx, giveBack, ok := s.reserveReply(ctx, writeCh, corrID, readReplyBound)
+	if !ok {
+		return
+	}
+	defer giveBack()
+
 	resp, err := s.engine.Read(ctx, &req)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrEngramNotFound, err.Error())
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrEngramNotFound, err.Error())
 		return
 	}
 
-	s.queueFrame(writeCh, TypeReadResp, corrID, resp, caps)
+	s.queueFrame(ctx, writeCh, TypeReadResp, corrID, resp, caps)
 }
 
 func (s *Server) handleActivate(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
 	var req ActivateRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid activate request")
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidEngram, "invalid activate request")
 		return
 	}
 	// Clamp a negative threshold: the in-process negative-means-bypass contract
@@ -410,146 +554,158 @@ func (s *Server) handleActivate(ctx context.Context, corrID uint64, payload []by
 
 	resolved, err := s.scopeVault(ctx, req.Vault)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrAuthFailed, err.Error())
 		return
 	}
 	req.Vault = resolved
 
 	// The response frame is the ActivateResponse verbatim, so it carries the
 	// COG-35 associated block: the engine may build it and record its ids.
+	// Room for the reply, before the work: see reply_flow.go.
+	ctx, giveBack, ok := s.reserveReply(ctx, writeCh, corrID, activateReplyBound(req.MaxResults))
+	if !ok {
+		return
+	}
+	defer giveBack()
+
 	resp, err := s.engine.Activate(WithAssociatedRendered(ctx), &req)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrIndexError, err.Error())
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrIndexError, err.Error())
 		return
 	}
 
-	s.queueActivateResponse(writeCh, corrID, resp, caps)
+	s.queueActivateResponse(ctx, writeCh, corrID, resp, caps)
 }
 
+// msgSubscribeNotServed is what SUBSCRIBE is answered with.
+const msgSubscribeNotServed = "subscriptions are not delivered over this protocol: use the REST stream (GET /api/subscribe, server-sent events) or the gRPC Subscribe call"
+
+// handleSubscribe refuses. Nothing is delivered over MBP: the server writes no
+// ACTIVATION frame and never has. SUBSCRIBE used to be answered SUB_OK with the
+// status "active" all the same, which told a client it would be sent pushes
+// that could not come. It is refused by name, with where subscriptions do work
+// (SEC-26).
+//
+// A session that may not read, or that names a vault it may not use, is refused
+// for that first, as for every other frame: the answer to those does not
+// depend on what the protocol offers.
 func (s *Server) handleSubscribe(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
 	var req SubscribeRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid subscribe request")
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidEngram, "invalid subscribe request")
 		return
 	}
-
-	resolved, err := s.scopeVault(ctx, req.Vault)
-	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+	if _, err := s.scopeVault(ctx, req.Vault); err != nil {
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrAuthFailed, err.Error())
 		return
 	}
-	req.Vault = resolved
-
-	resp, err := s.engine.Subscribe(ctx, &req)
-	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrSubscriptionNotFound, err.Error())
-		return
-	}
-
-	s.queueFrame(writeCh, TypeSubOK, corrID, resp, caps)
+	s.queueErrorFrame(ctx, writeCh, corrID, ErrSubscriptionNotFound, msgSubscribeNotServed)
 }
 
+// handleUnsub has nothing to end: no subscription is made over MBP. It answers
+// as UNSUB of an id nobody holds always has, whatever id it is sent, so the
+// answer says nothing about whether a subscription with that id exists
+// elsewhere, and it reaches none (SEC-26).
 func (s *Server) handleUnsub(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
 	var req UnsubscribeRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid unsub request")
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidEngram, "invalid unsub request")
 		return
 	}
-
-	err := s.engine.Unsubscribe(ctx, req.SubID)
-	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrSubscriptionNotFound, err.Error())
-		return
-	}
-
-	s.queueFrame(writeCh, TypeUnsubOK, corrID, &UnsubscribeResponse{OK: true}, caps)
+	s.queueFrame(ctx, writeCh, TypeUnsubOK, corrID, &UnsubscribeResponse{OK: true}, caps)
 }
 
 func (s *Server) handleLink(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
 	var req LinkRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInvalidAssociation, "invalid link request")
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidAssociation, "invalid link request")
 		return
 	}
 
 	resolved, err := s.scopeVault(ctx, req.Vault)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrAuthFailed, err.Error())
 		return
 	}
 	req.Vault = resolved
 
 	resp, err := s.engine.Link(ctx, &req)
 	if err != nil {
-		s.queueEngineError(writeCh, corrID, err, ErrInvalidAssociation)
+		s.queueEngineError(ctx, writeCh, corrID, err, ErrInvalidAssociation)
 		return
 	}
 
-	s.queueFrame(writeCh, TypeLinkOK, corrID, resp, caps)
+	s.queueFrame(ctx, writeCh, TypeLinkOK, corrID, resp, caps)
 }
 
 func (s *Server) handleForget(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
 	var req ForgetRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid forget request")
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidEngram, "invalid forget request")
 		return
 	}
 
 	resolved, err := s.scopeVault(ctx, req.Vault)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrAuthFailed, err.Error())
 		return
 	}
 	req.Vault = resolved
 
 	resp, err := s.engine.Forget(ctx, &req)
 	if err != nil {
-		s.queueEngineError(writeCh, corrID, err, ErrStorageError)
+		s.queueEngineError(ctx, writeCh, corrID, err, ErrStorageError)
 		return
 	}
 
-	s.queueFrame(writeCh, TypeForgetOK, corrID, resp, caps)
+	s.queueFrame(ctx, writeCh, TypeForgetOK, corrID, resp, caps)
 }
 
 func (s *Server) handleStat(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
 	var req StatRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInvalidEngram, "invalid stat request")
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidEngram, "invalid stat request")
 		return
 	}
 
 	resolved, err := s.scopeVault(ctx, req.Vault)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrAuthFailed, err.Error())
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrAuthFailed, err.Error())
 		return
 	}
 	req.Vault = resolved
 
 	resp, err := s.engine.Stat(ctx, &req)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrStorageError, err.Error())
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrStorageError, err.Error())
 		return
 	}
 
-	s.queueFrame(writeCh, TypeStatResp, corrID, resp, caps)
+	s.queueFrame(ctx, writeCh, TypeStatResp, corrID, resp, caps)
 }
 
 func (s *Server) handlePing(ctx context.Context, corrID uint64, payload []byte, writeCh chan *Frame, caps []string) {
+	// PONG repeats what PING carried, so what PING may carry is small
+	// (maxPingPayload).
+	if len(payload) > maxPingPayload {
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInvalidEngram, "ping payload too large: at most 1024 bytes are echoed")
+		return
+	}
 	var req PingRequest
 	if err := DecodeMsgpack(payload, &req); err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInternal, "invalid ping request")
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInternal, "invalid ping request")
 		return
 	}
 
-	s.queueFrame(writeCh, TypePong, corrID, &PongResponse{Data: req.Data}, caps)
+	s.queueFrame(ctx, writeCh, TypePong, corrID, &PongResponse{Data: req.Data}, caps)
 }
 
 // Utility methods
 
-func (s *Server) queueFrame(writeCh chan *Frame, frameType uint8, corrID uint64, payload interface{}, caps []string) {
+func (s *Server) queueFrame(ctx context.Context, writeCh chan *Frame, frameType uint8, corrID uint64, payload interface{}, caps []string) {
 	data, err := EncodeMsgpack(payload)
 	if err != nil {
-		s.queueErrorFrame(writeCh, corrID, ErrInternal, "failed to encode response")
+		s.queueErrorFrame(ctx, writeCh, corrID, ErrInternal, "failed to encode response")
 		return
 	}
 
@@ -572,66 +728,62 @@ func (s *Server) queueFrame(writeCh chan *Frame, frameType uint8, corrID uint64,
 		flags |= FlagCompressed
 	}
 
-	frame := &Frame{
+	s.enqueue(ctx, writeCh, &Frame{
 		Version:       0x01,
 		Type:          frameType,
 		Flags:         flags,
 		PayloadLength: uint32(len(data)),
 		CorrelationID: corrID,
 		Payload:       data,
-	}
-
-	select {
-	case writeCh <- frame:
-	default:
-		// Channel full, drop frame (should not happen with buffered channel)
-	}
+	})
 }
 
-func (s *Server) queueActivateResponse(writeCh chan *Frame, corrID uint64, resp *ActivateResponse, caps []string) {
+func (s *Server) queueActivateResponse(ctx context.Context, writeCh chan *Frame, corrID uint64, resp *ActivateResponse, caps []string) {
 	// For now, send as a single frame
 	// TODO: implement multi-frame streaming for large result sets
-	s.queueFrame(writeCh, TypeActivateResp, corrID, resp, caps)
+	s.queueFrame(ctx, writeCh, TypeActivateResp, corrID, resp, caps)
 }
 
 // queueEngineError classifies an engine error before framing it. A write that
 // reached a non-Cortex node gets ErrNotCortex (4015) with the leader hint in the
 // message, never the generic storage/association code — a client cannot retry
 // against the right node if the wire says "storage error" (#596).
-func (s *Server) queueEngineError(writeCh chan *Frame, corrID uint64, err error, fallback ErrorCode) {
+func (s *Server) queueEngineError(ctx context.Context, writeCh chan *Frame, corrID uint64, err error, fallback ErrorCode) {
 	code := fallback
 	if errors.Is(err, ErrNotLeader) {
 		code = ErrNotCortex
 	}
-	s.queueErrorFrame(writeCh, corrID, code, err.Error())
+	s.queueErrorFrame(ctx, writeCh, corrID, code, err.Error())
 }
 
-func (s *Server) queueErrorFrame(writeCh chan *Frame, corrID uint64, code ErrorCode, message string) {
-	errPayload := &ErrorPayload{
-		Code:      code,
-		Message:   message,
-		RequestID: uuid.New().String()[:8],
-	}
-
-	data, err := EncodeMsgpack(errPayload)
-	if err != nil {
+func (s *Server) queueErrorFrame(ctx context.Context, writeCh chan *Frame, corrID uint64, code ErrorCode, message string) {
+	frame, ok := errorFrame(corrID, code, message)
+	if !ok {
 		// Can't even encode the error, give up
 		return
 	}
+	s.enqueue(ctx, writeCh, frame)
+}
 
-	frame := &Frame{
+// errorFrame builds an error frame. It reports false if the payload could not
+// be encoded.
+func errorFrame(corrID uint64, code ErrorCode, message string) (*Frame, bool) {
+	data, err := EncodeMsgpack(&ErrorPayload{
+		Code:      code,
+		Message:   message,
+		RequestID: uuid.New().String()[:8],
+	})
+	if err != nil {
+		return nil, false
+	}
+	return &Frame{
 		Version:       0x01,
 		Type:          TypeError,
 		Flags:         0,
 		PayloadLength: uint32(len(data)),
 		CorrelationID: corrID,
 		Payload:       data,
-	}
-
-	select {
-	case writeCh <- frame:
-	default:
-	}
+	}, true
 }
 
 func (s *Server) writeErrorFrame(conn net.Conn, corrID uint64, code ErrorCode, message string) {

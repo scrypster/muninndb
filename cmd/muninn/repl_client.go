@@ -62,15 +62,11 @@ func isTLSCertError(err error) bool {
 	return errors.As(err, &certErr)
 }
 
-func (r *replState) cmdShowVaults() {
+// cmdShowVaults prints the vaults the server lists to this caller, and reports
+// what happened, so a caller can tell a list from no list.
+func (r *replState) cmdShowVaults() vaultListOutcome {
 	addrs, _ := readAddrsFile(defaultDataDir())
-	restPort := "8475"
-	if addrs.RestAddr != "" {
-		if _, p, err := net.SplitHostPort(addrs.RestAddr); err == nil && p != "" {
-			restPort = p
-		}
-	}
-	apiURL := healthURL("MUNINNDB_ADMIN_URL", addrs.Scheme, restPort) + "/api/vaults"
+	apiURL := showVaultsBase() + "/api/vaults"
 
 	// Loopback https skips cert verification (internal-CA self-inspection); an
 	// off-host MUNINNDB_ADMIN_URL stays verified — this request carries the admin
@@ -79,10 +75,16 @@ func (r *replState) cmdShowVaults() {
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return
+		return vaultListFailed
 	}
-	if r.sessionCookie != "" {
-		req.AddCookie(&http.Cookie{Name: "session", Value: r.sessionCookie})
+	// The server reads the admin session from "muninn_session". Under any
+	// other name the cookie is ignored and the list is the caller's own vault
+	// only. It is sent only to the host that issued it (sessionCookieFor).
+	if cookie := sessionCookieFor(req.URL, r.sessionCookie, r.sessionHosts...); cookie != "" {
+		if len(r.sessionHosts) > 0 {
+			announceSessionSentElsewhere(req.URL, r.sessionHosts[0]) // the first is the issuer
+		}
+		req.AddCookie(&http.Cookie{Name: "muninn_session", Value: cookie})
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -90,26 +92,27 @@ func (r *replState) cmdShowVaults() {
 			fmt.Fprintf(os.Stderr, "Error: TLS certificate verification failed for %s: %v\n", apiURL, err)
 			fmt.Println("The server's certificate is not trusted. Install its CA into the system")
 			fmt.Println("trust store, or point MUNINNDB_ADMIN_URL at a loopback address.")
-			return
+			return vaultListUnreachable
 		}
 		fmt.Fprintf(os.Stderr, "Error connecting to server: %v\n", err)
 		fmt.Println("Is muninn running? Try: muninn start")
-		return
+		return vaultListUnreachable
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		// Fallback: show static message
-		fmt.Println("  default   (built-in)")
-		fmt.Println()
-		fmt.Printf("  For full vault list, open: %s\n", webUIDisplay(addrs)[0])
-		return
+		// The server lists nothing to a caller it has no admin session for when
+		// the default vault is locked. Say that; do not print a vault it did
+		// not list.
+		fmt.Println("  The server lists no vaults without an admin sign-in.")
+		fmt.Printf("  For the full vault list, open: %s\n", webUIDisplay(addrs)[0])
+		return vaultListRefused
 	}
 
 	var result any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
-		return
+		return vaultListFailed
 	}
 
 	// The API may return []string, []vault, or {vaults: []} — handle all forms.
@@ -141,12 +144,12 @@ func (r *replState) cmdShowVaults() {
 	if len(vaults) == 0 && len(vaultNames) == 0 {
 		fmt.Println("  No vaults found.")
 		fmt.Println("  Vaults are created automatically when your AI tools store their first memory.")
-		return
+		return vaultsListed
 	}
 
 	if len(vaults) > 0 {
 		formatVaultTable(vaults)
-		return
+		return vaultsListed
 	}
 
 	// String-only vault list — filter out test vaults and display cleanly.
@@ -165,6 +168,7 @@ func (r *replState) cmdShowVaults() {
 	if userVaults == 0 && testVaults > 0 {
 		fmt.Println("  No user vaults found (only test vaults).")
 	}
+	return vaultsListed
 }
 
 func (r *replState) cmdShowMemories() {
@@ -413,9 +417,36 @@ func isEmptyMCPResult(result map[string]any) bool {
 	return trimmed == "" || trimmed == "[]" || trimmed == "{}" || trimmed == "null"
 }
 
+// showVaultsBase is the server `show vaults` asks: MUNINNDB_ADMIN_URL, or this
+// machine's own daemon at the address it recorded when it started.
+func showVaultsBase() string {
+	addrs, _ := readAddrsFile(defaultDataDir())
+	restPort := "8475"
+	if addrs.RestAddr != "" {
+		if _, p, err := net.SplitHostPort(addrs.RestAddr); err == nil && p != "" {
+			restPort = p
+		}
+	}
+	return healthURL("MUNINNDB_ADMIN_URL", addrs.Scheme, restPort)
+}
+
+// runShowVaults is `muninn show vaults` outside the shell. Every vault is an
+// admin's answer (SEC-25), so it signs in the way `muninn vault list` does when
+// that needs no prompt, with the default credentials, and says so when the
+// list it printed is not every vault.
 func runShowVaults() {
 	r := &replState{mcpURL: "http://127.0.0.1:8750"}
-	r.cmdShowVaults()
+	signIn := signInForVaultList("root", "", false)
+	r.sessionCookie, r.sessionHosts = vaultCookie, []string{sessionIssuer(), vaultPairedHost}
+	// Signed in means signed in to the server the list comes from.
+	if signIn == signedIn && !signedInTo(showVaultsBase()) {
+		signIn = signInElsewhere
+	}
+	outcome := r.cmdShowVaults()
+	printVaultListNotice(signIn, outcome)
+	if code := vaultListExitCode(signIn, outcome); code != 0 {
+		osExit(code)
+	}
 }
 
 // prettyPrint extracts text content from an MCP result and prints it.

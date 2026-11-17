@@ -180,7 +180,9 @@ type EngineStore interface {
 	// A pair whose existing metadata cannot be read is skipped rather than
 	// overwritten with fabricated defaults, and reported through an error that
 	// also exposes SkippedUpdates() []int (indices into updates). Callers that
-	// act on an update landing must consult it.
+	// act on an update landing must consult it. An update whose move would land
+	// on a key another relation holds is skipped too (STO-15), and listed again
+	// by CollisionSkips() []int: that edge keeps its weight, which is not a fault.
 	UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error
 
 	// GetConfidence reads the confidence value from 0x02 metadata for an engram.

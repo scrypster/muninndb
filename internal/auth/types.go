@@ -51,4 +51,8 @@ const (
 	ContextVault  contextKey = "auth_vault"
 	ContextMode   contextKey = "auth_mode"
 	ContextAPIKey contextKey = "auth_apikey"
+	// ContextAdminSession is set (to true) only by the two middlewares that
+	// have verified an admin session cookie. Read it with
+	// AdminSessionFromContext.
+	ContextAdminSession contextKey = "auth_admin_session"
 )

@@ -1420,13 +1420,22 @@ func (e *Engine) Hello(ctx context.Context, req *mbp.HelloRequest) (*mbp.HelloRe
 
 	// Register the vault name so it appears in ListVaults even before the
 	// first engram is written (idempotent, cheap).
+	//
+	// This is a write, so two things hold. The CALLER must already have been
+	// authorised for req.Vault: every transport hands Hello the vault it
+	// resolved for the request, never one the client only named (SEC-29). And
+	// it happens on the Cortex only, like every client-originated write (#596):
+	// a Lobe answers the handshake and leaves the name to arrive by
+	// replication, once the Cortex has it.
 	vaultName := req.Vault
 	if vaultName == "" {
 		vaultName = "default"
 	}
-	wsPrefix := e.store.ResolveVaultPrefix(vaultName)
-	if err := e.store.WriteVaultName(wsPrefix, vaultName); err != nil {
-		slog.Warn("engine: Hello: failed to persist vault name", "vault", vaultName, "err", err)
+	if e.refuseNonLeaderWrite() == nil {
+		wsPrefix := e.store.ResolveVaultPrefix(vaultName)
+		if err := e.store.WriteVaultName(wsPrefix, vaultName); err != nil {
+			slog.Warn("engine: Hello: failed to persist vault name", "vault", vaultName, "err", err)
+		}
 	}
 
 	return &mbp.HelloResponse{
@@ -1484,6 +1493,24 @@ func importanceFromRequest(p *float32) float32 {
 		v = 0.01
 	}
 	return v
+}
+
+// confidenceFromRequest resolves a caller-asserted confidence into the stored
+// representation. Confidence multiplies straight into the recall score, so a
+// value outside (0,1] is never stored: above 1 clamps to 1, and NaN, zero or a
+// negative value mean "not supplied" and return 0, which the storage layer
+// writes as 1.0. A WRITE therefore cannot store 0 — it never could — and this
+// makes the rest of the range honest (a request for 5 used to be stored as 5).
+// It governs writes only: the confidence of a stored memory is moved by other
+// paths (contradiction evidence, AdjustConfidence), which have their own bounds.
+func confidenceFromRequest(c float32) float32 {
+	if math.IsNaN(float64(c)) || c <= 0 {
+		return 0
+	}
+	if c > 1 {
+		return 1
+	}
+	return c
 }
 
 // observeWriteFloor records, per vault, an engram that was persisted with no
@@ -1645,7 +1672,7 @@ func (e *Engine) Write(ctx context.Context, req *mbp.WriteRequest) (*mbp.WriteRe
 		Concept:    req.Concept,
 		Content:    req.Content,
 		Tags:       req.Tags,
-		Confidence: req.Confidence,
+		Confidence: confidenceFromRequest(req.Confidence),
 		Stability:  req.Stability,
 		Importance: importanceFromRequest(req.Importance),
 		Embedding:  req.Embedding,
@@ -2140,6 +2167,34 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 		}
 	}
 
+	// Resolve the caller's trust and confidence ONCE, before the branch is
+	// chosen, so an invalid or unauthorised trust label is refused on every
+	// branch. Resolved only on the content-change branch, an identical-content
+	// re-sync accepted trust="nonsense" — and trust=verified from a context
+	// that may not assert it — with no error. The values themselves are applied
+	// only where something is written: create (through Write) and content
+	// change (through evolveAtInternal); the identical-content branch is a
+	// no-op and ignores them.
+	//
+	// Before #872 both were honored on the CREATE branch and silently discarded
+	// on the content-change branch, so a sync job stamping trust=verified on
+	// every run produced a verified record on first sync and an inferred one on
+	// every re-sync, with no error and no warning — principle #1. A re-sync's
+	// confidence is live for the first time here, so it is range-checked like
+	// any stored confidence (confidenceFromRequest).
+	var trustPtr *storage.TrustLevel
+	if req.Trust != "" {
+		lvl, tErr := resolveTrust(ctx, req.Trust)
+		if tErr != nil {
+			return nil, tErr
+		}
+		trustPtr = &lvl
+	}
+	var confPtr *float32
+	if c := confidenceFromRequest(req.Confidence); c > 0 {
+		confPtr = &c
+	}
+
 	keyHash := sha256.Sum256([]byte(req.IdempotentID))
 	mu := e.upsertKeyLock(wsPrefix, keyHash)
 	mu.Lock()
@@ -2219,8 +2274,13 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 	// inherits Concept/Tags/MemoryType/TypeLabel from the predecessor when
 	// concept == ""; pass the caller's concept only if set, embedding when
 	// supplied, importance when asserted. EffectiveAt defaults to now inside
-	// EvolveAt. Trust is set to TrustInferred internally by EvolveAt — the
-	// existing behavior, which upsert inherits.
+	// EvolveAt.
+	//
+	// Trust and confidence were resolved at the top of this function. nil (not
+	// supplied) falls through to evolveAtInternal's defaults, which differ by
+	// field: trust is inherited from the head — through the same gate an
+	// asserted verified clears — and confidence is NOT inherited (the successor
+	// is written at 1.0).
 	concept := req.Concept // "" → EvolveAt inherits the predecessor's concept
 	newID, evErr := e.evolveAtInternal(
 		ctx,
@@ -2234,6 +2294,8 @@ func (e *Engine) writeUpsert(ctx context.Context, wsPrefix [8]byte, req *mbp.Wri
 		req.Importance,
 		time.Time{},
 		&keyHash,
+		trustPtr,
+		confPtr,
 	)
 	if evErr != nil {
 		return nil, fmt.Errorf("upsert evolve: %w", evErr)
@@ -2514,7 +2576,7 @@ func (e *Engine) WriteBatch(ctx context.Context, reqs []*mbp.WriteRequest) ([]*m
 			Concept:    req.Concept,
 			Content:    req.Content,
 			Tags:       req.Tags,
-			Confidence: req.Confidence,
+			Confidence: confidenceFromRequest(req.Confidence),
 			Stability:  req.Stability,
 			Importance: importanceFromRequest(req.Importance),
 			Embedding:  req.Embedding,
@@ -3912,12 +3974,25 @@ func (e *Engine) Subscribe(ctx context.Context, req *mbp.SubscribeRequest) (*mbp
 
 // SubscribeWithDeliver registers a subscription and immediately sets a delivery
 // function that is called (in a goroutine by DeliveryRouter) on every push.
-// Returns the subscription ID. Pass deliver=nil to register without a delivery
-// function (useful for MBP clients that pull via the stream).
+// Returns the subscription ID.
+//
+// With deliver == nil NOTHING IS REGISTERED: an id is returned and that is all.
+// A subscription with no delivery function can never tell anyone anything, and
+// one cannot be attached later. Registering it anyway cost the vault one of
+// its subscription places, cost an embedding call, and cost the trigger worker
+// an evaluation on every write to the vault, on behalf of a subscriber that
+// could not be reached. MBP is the caller this is for: its SUBSCRIBE has never
+// delivered a push (the server writes no ACTIVATION frame), and thirteen
+// connections with no key used it to fill a public vault's limit and shut out
+// the REST and gRPC subscribers who can be delivered to (SEC-26).
+//
+// The id is always chosen here, a fresh random one. req.SubscriptionID is
+// ignored: ids are one namespace across every vault, so an id a client could
+// choose is an id it could choose to be somebody else's (SEC-26).
 func (e *Engine) SubscribeWithDeliver(ctx context.Context, req *mbp.SubscribeRequest, deliver trigger.DeliverFunc) (string, error) {
-	subID := req.SubscriptionID
-	if subID == "" {
-		subID = uuid.New().String()
+	subID := uuid.New().String()
+	if deliver == nil {
+		return subID, nil
 	}
 
 	// Resolve vault to a routing uint32 using the same BigEndian convention
@@ -3953,6 +4028,19 @@ func (e *Engine) Unsubscribe(ctx context.Context, subID string) error {
 }
 
 // Link implements mbp.EngineAPI.Link.
+// linkCollisionError is the refusal a caller sees when a link would replace an
+// edge of another relation stored under the same key (STO-15). A link's key
+// holds its direction and its weight but not its relation, so two relations
+// from one memory to another at one weight would share it. The refusal names
+// both relations, says nothing was written, and gives the way out. It is per
+// direction: the same relation from the other memory is another key. errors.Is
+// against storage.ErrAssocRelTypeCollision holds, which is what REST answers
+// 409 and gRPC FailedPrecondition on.
+func linkCollisionError(c *storage.AssocRelTypeCollisionError) error {
+	return fmt.Errorf("link refused, nothing was written: %s already has a %s link to %s at weight %v, and a link is stored under a key that holds its direction and weight but not its relation, so a %s link at that weight would replace it (%w). Write the %s link at a different weight",
+		c.Src.String(), relTypeName(c.Existing), c.Dst.String(), c.Weight, relTypeName(c.New), storage.ErrAssocRelTypeCollision, relTypeName(c.New))
+}
+
 func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkResponse, error) {
 	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
@@ -4007,6 +4095,10 @@ func (e *Engine) Link(ctx context.Context, req *mbp.LinkRequest) (*mbp.LinkRespo
 	}
 
 	if err := e.store.WriteAssociation(ctx, wsPrefix, sourceID, targetID, assoc); err != nil {
+		var collision *storage.AssocRelTypeCollisionError
+		if errors.As(err, &collision) {
+			return nil, linkCollisionError(collision)
+		}
 		return nil, fmt.Errorf("write association: %w", err)
 	}
 
@@ -4309,7 +4401,49 @@ func (e *Engine) cleanSearchIndexesAfterHardDelete(wsPrefix [8]byte, id [16]byte
 }
 
 // Stat implements mbp.EngineAPI.Stat.
+//
+// The answer is about ONE vault unless the request says ServerWide — and no
+// client can say that (the field has no wire name; see mbp.StatRequest). So a
+// transport that hands the engine the vault its caller is entitled to cannot
+// leak another vault's name, size or existence through Stat, whichever
+// transport it is and whether or not it remembered to filter (SEC-24).
 func (e *Engine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatResponse, error) {
+	if !req.ServerWide {
+		return e.statVault(ctx, req.Vault), nil
+	}
+	return e.statServer(ctx, req.Vault), nil
+}
+
+// statVault is the answer for a caller entitled to one vault. Every figure is
+// that vault's own: VaultCount is the one vault in scope, the coherence block
+// has at most its entry, and the store's on-disk size — one figure for every
+// vault — is left out.
+func (e *Engine) statVault(ctx context.Context, vault string) *mbp.StatResponse {
+	if vault == "" {
+		// An unnamed vault is the default vault, as everywhere else. It is
+		// never "all of them": that is what ServerWide is for.
+		vault = "default"
+	}
+	resp := &mbp.StatResponse{
+		Scope:       mbp.StatScopeVault,
+		EngramCount: e.store.GetVaultCount(ctx, e.store.ResolveVaultPrefix(vault)),
+		VaultCount:  1,
+	}
+	if e.coherence != nil {
+		for _, snap := range e.coherence.Snapshots() {
+			if snap.VaultName == vault {
+				resp.CoherenceScores = map[string]mbp.CoherenceResult{vault: coherenceResult(snap)}
+				break
+			}
+		}
+	}
+	return resp
+}
+
+// statServer is the server-wide answer: every vault's coherence entry by name,
+// the vault count and the on-disk size. EngramCount is vault's own when a
+// vault is named and the server's total otherwise.
+func (e *Engine) statServer(ctx context.Context, vault string) *mbp.StatResponse {
 	vaultNames, _ := e.store.ListVaultNames()
 
 	// Count all vaults: data vaults + config-only (empty) vaults, deduplicated.
@@ -4333,12 +4467,13 @@ func (e *Engine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatRespo
 	}
 
 	engramCount := e.engramCount.Load()
-	if req.Vault != "" {
-		wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
+	if vault != "" {
+		wsPrefix := e.store.ResolveVaultPrefix(vault)
 		engramCount = e.store.GetVaultCount(ctx, wsPrefix)
 	}
 
 	resp := &mbp.StatResponse{
+		Scope:        mbp.StatScopeServer,
 		EngramCount:  engramCount,
 		VaultCount:   vaultCount,
 		StorageBytes: e.store.DiskSize(),
@@ -4350,19 +4485,23 @@ func (e *Engine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatRespo
 		if len(snapshots) > 0 {
 			resp.CoherenceScores = make(map[string]mbp.CoherenceResult, len(snapshots))
 			for _, snap := range snapshots {
-				resp.CoherenceScores[snap.VaultName] = mbp.CoherenceResult{
-					Score:                snap.Score,
-					OrphanRatio:          snap.OrphanRatio,
-					ContradictionDensity: snap.ContradictionDensity,
-					DuplicationPressure:  snap.DuplicationPressure,
-					TemporalVariance:     snap.TemporalVariance,
-					TotalEngrams:         snap.TotalEngrams,
-				}
+				resp.CoherenceScores[snap.VaultName] = coherenceResult(snap)
 			}
 		}
 	}
 
-	return resp, nil
+	return resp
+}
+
+func coherenceResult(snap coherence.Result) mbp.CoherenceResult {
+	return mbp.CoherenceResult{
+		Score:                snap.Score,
+		OrphanRatio:          snap.OrphanRatio,
+		ContradictionDensity: snap.ContradictionDensity,
+		DuplicationPressure:  snap.DuplicationPressure,
+		TemporalVariance:     snap.TemporalVariance,
+		TotalEngrams:         snap.TotalEngrams,
+	}
 }
 
 // ListVaults returns all vault names that have been written to.
@@ -4611,6 +4750,19 @@ func (e *Engine) UpdateLifecycleState(ctx context.Context, vault, id, state stri
 // SetTrust changes the trust label of an engram identified by id (string ULID).
 // trust must be one of "verified", "inferred", "external", "untrusted".
 // Returns an error if the engram is not found or trust is invalid.
+//
+// Two rules it shares with the rest of the write path (#872):
+//
+//   - Setting verified clears the gate that asserting it on a write clears and
+//     that inheriting it through an evolve clears (SEC-14): resolveTrust. Every
+//     engine path that can put verified on a record goes through that one
+//     function, so the rule holds independent of how the call was routed.
+//   - A superseded target is refused, naming the current version. A level set
+//     on a retired version changes nothing recall serves, so a revocation aimed
+//     at a stale id used to succeed and be lost. The check and the write run
+//     under the id's evolve lock: an evolve of the same memory either sees the
+//     new level and carries it, or has already retired the target and this
+//     call is refused.
 func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
 	if err := e.refuseWrite(ctx); err != nil {
 		return err
@@ -4619,10 +4771,21 @@ func (e *Engine) SetTrust(ctx context.Context, vault, id, trust string) error {
 	if err != nil {
 		return fmt.Errorf("parse trust: %w", err)
 	}
+	if level == storage.TrustVerified {
+		if _, err := resolveTrust(ctx, trust); err != nil {
+			return err
+		}
+	}
 	ws := e.store.ResolveVaultPrefix(vault)
 	ulid, err := storage.ParseULID(id)
 	if err != nil {
 		return fmt.Errorf("parse id: %w", err)
+	}
+	mu := e.evolveLock(ws, ulid)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := e.refuseSupersededTrustTarget(ctx, ws, ulid); err != nil {
+		return err
 	}
 	if err := e.store.UpdateTrust(ctx, ws, ulid, level); err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -4761,17 +4924,33 @@ func (e *Engine) Evolve(ctx context.Context, vault, oldID, newContent, reason st
 // predecessor's ValidUntil stamp (half-open [from, until) windows meet exactly);
 // the zero time defaults to now.
 func (e *Engine) EvolveAt(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time) (storage.ULID, error) {
-	return e.evolveAtInternal(ctx, vault, oldID, newContent, reason, embedding, concept, entities, importance, effectiveAt, nil)
+	return e.evolveAtInternal(ctx, vault, oldID, newContent, reason, embedding, concept, entities, importance, effectiveAt, nil, nil, nil)
 }
 
-// evolveAtInternal is EvolveAt with an optional upsert key hash. When non-nil,
-// the 0x30 upsert-key forward index for (wsPrefix, *upsertKeyHash) is re-pointed
-// to the successor ULID INSIDE the evolve's atomic batch — so a content-change
+// evolveAtInternal is EvolveAt with an optional upsert key hash and optional
+// caller-asserted trust and confidence. When upsertKeyHash is non-nil, the
+// 0x30 upsert-key forward index for (wsPrefix, *upsertKeyHash) is re-pointed to
+// the successor ULID INSIDE the evolve's atomic batch — so a content-change
 // upsert never leaves the durable pointer aimed at the soft-deleted predecessor
-// (#556, scrypster's #1 trap: the re-point must be crash-atomic with the evolve,
-// never a separate commit). Public Evolve/EvolveAt pass nil (unchanged behavior);
-// only Engine.writeUpsert passes a non-nil pointer on the content-change path.
-func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time, upsertKeyHash *[32]byte) (storage.ULID, error) {
+// (#556, scrypster's #1 trap: the re-point must be crash-atomic with the
+// evolve, never a separate commit).
+//
+// trustOverride/confOverride carry a value the caller asserted on THIS write;
+// non-nil wins. nil means different things for the two, on purpose: a nil
+// trustOverride INHERITS the predecessor's trust, a nil confOverride writes the
+// successor at 1.0 — confidence is not carried (see the successor literal).
+// Public Evolve/EvolveAt pass nil for all three (their surfaces expose no trust
+// or confidence argument; adding one is deferred); only Engine.writeUpsert,
+// whose request DOES carry trust and confidence, passes them. Containing the
+// extra parameters in the unexported method is the same containment
+// upsertKeyHash uses: no embedded-library, MCP or REST signature moves.
+//
+// trustOverride must already have been through resolveTrust — the SEC-14 gate on
+// trust=verified lives there, and evolveAtInternal does not re-check an asserted
+// level. A nil trustOverride that would INHERIT verified is checked here, by the
+// same resolveTrust: an inherited verified clears the same gate as an asserted
+// one.
+func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent, reason string, embedding []float32, concept string, entities []mbp.InlineEntity, importance *float32, effectiveAt time.Time, upsertKeyHash *[32]byte, trustOverride *storage.TrustLevel, confOverride *float32) (storage.ULID, error) {
 	// Append-mode credentials cannot evolve (modify an existing memory). Guarding
 	// EvolveAt covers Evolve too, since Evolve delegates here (#687 + valid-time).
 	// Via refuseWrite so the cluster single-writer gate lands here too (#596) —
@@ -4850,6 +5029,50 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 	if importance != nil {
 		newImportance = importanceFromRequest(importance)
 	}
+	// TRUST is inherited, never manufactured by the verb (#872, COG-37). An
+	// evolve replaces a record's CONTENT; it does not re-adjudicate who vouched
+	// for it.
+	//
+	// The old hardcoded TrustInferred laundered an "untrusted" marking off any
+	// record simply by rewording it, and demoted a human-verified one on every
+	// routine curation — which, for a Decision/Goal/Constraint/Identity with no
+	// explicit importance, silently moved it from EffectiveImportance 0.70000005
+	// (verified bump, at or above HighImportanceFloor) to 0.6, i.e. out of the
+	// COG-20 MaxEngrams prune exemption. TrustUnset (0x00, legacy records
+	// written before the field existed) normalizes to TrustInferred, matching
+	// resolveTrust("").
+	//
+	// An INHERITED verified clears the same gate as an ASSERTED one (SEC-14): a
+	// caller that may not assert verified on a write may not produce a verified
+	// successor. Both go through resolveTrust, here in the engine, as defence in
+	// depth: the rule holds independent of transport routing. Refused, never
+	// downgraded — a silent drop to inferred is the demotion this fix exists to
+	// stop. It is decided before anything is written. Pinned per mode by
+	// TestEvolve_VerifiedCarry_ClearsTheStampGate.
+	newTrust := oldEng.Trust
+	if newTrust == storage.TrustUnset {
+		newTrust = storage.TrustInferred
+	}
+	if trustOverride != nil {
+		newTrust = *trustOverride
+	} else if newTrust == storage.TrustVerified {
+		if _, err := resolveTrust(ctx, "verified"); err != nil {
+			return storage.ULID{}, fmt.Errorf("evolve: predecessor is trust=verified: %w", err)
+		}
+	}
+	// CONFIDENCE is NOT carried from the predecessor: the successor is written
+	// at 1.0 unless the caller supplied a value on this write. That is a
+	// decision (#872), not an omission, and 1.0 is not a neutral default — a
+	// memory stored at 0.4 still comes back at 1.0 after an evolve.
+	// Reason: carrying it would also carry a contradiction penalty onto the text
+	// that resolved the conflict, and nothing on MCP or REST can set a
+	// confidence back afterwards (#901). Carrying is held for a change that also
+	// adds that route. Pinned by TestEvolve_PinnedDecision_DoesNotCarryConfidence,
+	// which fails when this changes; COG-37 has the measurements.
+	newConfidence := float32(1.0)
+	if confOverride != nil && *confOverride > 0 {
+		newConfidence = *confOverride
+	}
 	newEng := &storage.Engram{
 		ID:         newULID,
 		Concept:    concept,
@@ -4858,14 +5081,14 @@ func (e *Engine) evolveAtInternal(ctx context.Context, vault, oldID, newContent,
 		MemoryType: oldEng.MemoryType,
 		TypeLabel:  oldEng.TypeLabel,
 		Importance: newImportance,
-		Confidence: 1.0,
+		Confidence: newConfidence, // 1.0 or the caller's value; never the predecessor's (#872, #901)
 		Stability:  30.0,
 		State:      storage.StateActive,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 		LastAccess: now,
 		Embedding:  embedding,
-		Trust:      storage.TrustInferred, // all new MCP writes default to inferred
+		Trust:      newTrust,
 		ValidFrom:  effectiveAt,
 	}
 
@@ -5809,6 +6032,9 @@ func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
 		return
 	}
 	for _, vaultName := range vaults {
+		// Before the vault's own decay gate: rows an older binary archived
+		// are restored even in a vault whose decay is now switched off.
+		e.restoreArchivedSupersedesOnce(ctx, vaultName, e.store.ResolveVaultPrefix(vaultName))
 		resolved := e.ResolveVaultPlasticity(vaultName)
 		// COG-16 unchanged: AssocDecayFactor is still the gate. It is now only
 		// a switch — the rate lives in AssocHalfLifeDays (#762).

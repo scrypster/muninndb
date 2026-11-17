@@ -58,6 +58,7 @@ func TestKeyPrefixesAreUnique(t *testing.T) {
 		{"LeaseKey", LeaseKey(ws, id)},
 		{"EvolveRepairMarkKey", EvolveRepairMarkKey(ws)},
 		{"AssocWeightRepairMarkKey", AssocWeightRepairMarkKey(ws)},
+		{"SupersedesRestoreMarkKey", SupersedesRestoreMarkKey(ws)},
 	}
 
 	seen := make(map[byte]string)
@@ -499,6 +500,7 @@ func TestKeyConstructors_UseRegistryBytes(t *testing.T) {
 		{"EvolveRepairMark", EvolveRepairMarkKey(ws)[0], prefix.EvolveRepairMark},
 		{"UpsertKey", UpsertKeyKey(ws, id32)[0], prefix.UpsertKey},
 		{"AssocWeightRepairMark", AssocWeightRepairMarkKey(ws)[0], prefix.AssocWeightRepairMark},
+		{"SupersedesRestoreMark", SupersedesRestoreMarkKey(ws)[0], prefix.SupersedesRestoreMark},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

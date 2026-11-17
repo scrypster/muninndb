@@ -168,6 +168,14 @@ and remain the reviewer's job.
 
 16. **A write path that accepts inline edges to existing memories** (`associations` or `relationships` on `mbp.WriteRequest`, or any new field or writer that stores an edge at write time — a tree node that gains relationships, a proto field that carries them) → a `supersedes` among them is a declaration, not an edge (COG-38). A writer that creates a memory routes it through `commitNewEngramSuperseding` (or through `Engine.Write`, as `WriteBatch` does per item); never `Set` it with the engram. Gate it with `refuseInlineSupersedesForAppend` at the writer's own entry point if the writer can be reached without passing through `Engine.Write` (the upsert path is, from `WriteBatch`). Then add the writer to the per-writer tests in `internal/engine/engine_inline_supersedes_test.go` and its credential rows to the mode table, and say so in the surface's own description of the field (`inlineRelationshipsDescription` in `internal/mcp/tools.go`, `WriteRequest.relationships`/`associations` in `openapi.yaml`). Today's surfaces: MCP sends `relationships`; REST accepts both fields (`rest.WriteRequest` is `mbp.WriteRequest`), and the REST SDKs send `relationships`; gRPC carries `associations` only (the proto has no `relationships`); MBP carries both; `RememberTree`/`AddChild` carry neither. Nothing mechanical detects a new writer that skips this — a storage-level inline `Set` of a supersedes edge still works and is exactly the pre-COG-38 defect.
 
+17. **A frame type the MBP client listener serves** (`internal/transport/mbp/`) → route it in
+    `frameRoutes` (`frame_modes.go`) WITH its class — control, read, mutate, or mutate-and-read,
+    the class the same operation has on REST, gRPC and MCP — and record the same decision in
+    `wantFrameClasses` plus a row in `matrixOps` (`mode_matrix_test.go`). A route without a
+    class is refused to every credential, and `TestEveryDispatchedFrameHasAModeClass` fails
+    until the two tables agree (SEC-20). A response that streams must still be opened by a
+    routed frame, so the mode check covers it.
+
 ## Live drift found during the guardian audit (worth fixing)
 
 - ~~**Windows CI tests the wrong embedding model.**~~ — fixed. `ci.yml`'s Windows job now

@@ -1072,7 +1072,7 @@ func TestCoherenceRegistryAfterWrite(t *testing.T) {
 		}
 	}
 
-	stat, err := eng.Stat(ctx, &mbp.StatRequest{})
+	stat, err := eng.Stat(ctx, &mbp.StatRequest{Vault: vault})
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
@@ -2067,7 +2067,8 @@ func TestStat_CountsConfigOnlyVaults(t *testing.T) {
 	}
 
 	// Stat() must count both config-only vaults (no data written to either).
-	resp, err := eng.Stat(ctx, &mbp.StatRequest{})
+	// The vault count is a server-wide figure, so it is asked for as one.
+	resp, err := eng.Stat(ctx, &mbp.StatRequest{ServerWide: true})
 	if err != nil {
 		t.Fatalf("Stat after SetVaultConfig: %v", err)
 	}
@@ -2100,7 +2101,7 @@ func TestStat_DeduplicatesVaultCount(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	resp, err := eng.Stat(ctx, &mbp.StatRequest{})
+	resp, err := eng.Stat(ctx, &mbp.StatRequest{ServerWide: true})
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
@@ -2119,7 +2120,7 @@ func TestStat_DefaultVaultMinimum(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	resp, err := eng.Stat(ctx, &mbp.StatRequest{})
+	resp, err := eng.Stat(ctx, &mbp.StatRequest{ServerWide: true})
 	if err != nil {
 		t.Fatalf("Stat on empty engine: %v", err)
 	}
@@ -2280,9 +2281,18 @@ func TestActivate_TrustPropagation(t *testing.T) {
 	}
 }
 
-// TestEvolve_AutoStampsTrustInferred verifies that Evolve auto-stamps
-// TrustInferred on the new engram it creates.
-func TestEvolve_AutoStampsTrustInferred(t *testing.T) {
+// TestEvolve_InferredPredecessorStaysInferred: an evolve of an ordinary
+// (inferred) memory produces an inferred successor.
+//
+// Renamed from TestEvolve_AutoStampsTrustInferred (#872). Under the old
+// semantics evolve HARDCODED TrustInferred on every successor; it now inherits
+// the predecessor's level. This test's outcome is unchanged either way — and
+// that is precisely why it never caught the defect: its fixture writes with no
+// trust, so the predecessor is already inferred and "stamped" and "inherited"
+// are indistinguishable here. It is kept as the ordinary-case pin, with an
+// explicit premise assertion so a future reader can see what it does and does
+// not prove; the discriminating cases live in engine_evolve_trust_test.go.
+func TestEvolve_InferredPredecessorStaysInferred(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -2294,6 +2304,13 @@ func TestEvolve_AutoStampsTrustInferred(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
+	}
+	// State the premise this test rests on: the predecessor is inferred, so a
+	// passing result says nothing about whether the level was carried or minted.
+	if pre, err := eng.Read(ctx, &mbp.ReadRequest{Vault: "test", ID: writeResp.ID}); err != nil {
+		t.Fatalf("Read predecessor: %v", err)
+	} else if pre.Trust != uint8(storage.TrustInferred) {
+		t.Fatalf("premise: predecessor trust = %d, want %d (TrustInferred)", pre.Trust, storage.TrustInferred)
 	}
 
 	newULID, err := eng.Evolve(ctx, "test", writeResp.ID, "Evolved content after trust stamp.", "trust test evolution", nil, "")
@@ -2329,7 +2346,8 @@ func TestEngine_SetTrust(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	if err := eng.SetTrust(context.Background(), "default", resp.ID, "verified"); err != nil {
+	// verified is gated (SEC-14): SetTrust needs a context whose mode may assert it.
+	if err := eng.SetTrust(withMode(auth.ModeWrite), "default", resp.ID, "verified"); err != nil {
 		t.Fatalf("SetTrust: %v", err)
 	}
 
@@ -2347,8 +2365,10 @@ func TestEngine_SetTrust(t *testing.T) {
 
 	// SetTrust on a nonexistent engram returns an error
 	fakeID := "01ARZ3NDEKTSV4RRFFQ69G5FAV" // valid ULID format but no such engram
-	if err := eng.SetTrust(context.Background(), "default", fakeID, "verified"); err == nil {
-		t.Error("expected error for nonexistent engram")
+	// Under a mode that clears the verified gate, so the error is the missing
+	// engram and not the gate.
+	if err := eng.SetTrust(withMode(auth.ModeWrite), "default", fakeID, "verified"); !errors.Is(err, ErrEngramNotFound) {
+		t.Errorf("SetTrust on a nonexistent engram: err = %v, want ErrEngramNotFound", err)
 	}
 }
 

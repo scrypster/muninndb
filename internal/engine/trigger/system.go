@@ -22,6 +22,10 @@ type TriggerConfig struct {
 var (
 	ErrVaultSubscriptionLimitReached  = errors.New("trigger: per-vault subscription limit reached")
 	ErrGlobalSubscriptionLimitReached = errors.New("trigger: global subscription limit reached")
+	// ErrSubscriptionIDTaken is returned when a subscription is offered under an
+	// id that is already registered. The engine assigns ids itself, so this is
+	// a bug in a caller, never something a client can cause.
+	ErrSubscriptionIDTaken = errors.New("trigger: subscription id already registered")
 )
 
 const (
@@ -467,7 +471,10 @@ func (ts *TriggerSystem) Start(ctx context.Context) {
 
 // Subscribe adds a new subscription.
 func (ts *TriggerSystem) Subscribe(sub *Subscription) error {
-	// T3: enforce subscription caps before registering.
+	// T3: enforce subscription caps before registering. This first look is so
+	// that a subscriber to a full vault is refused before its context is
+	// embedded, which is the expensive part; it does not hold the limit. What
+	// holds it is addWithin below, which checks and counts in one step.
 	if ts.config.MaxTotalSubscriptions > 0 && ts.registry.CountTotal() >= ts.config.MaxTotalSubscriptions {
 		return ErrGlobalSubscriptionLimitReached
 	}
@@ -498,8 +505,7 @@ func (ts *TriggerSystem) Subscribe(sub *Subscription) error {
 		}
 	}
 
-	ts.registry.Add(sub)
-	return nil
+	return ts.registry.addWithin(sub, ts.config.MaxSubscriptionsPerVault, ts.config.MaxTotalSubscriptions)
 }
 
 // Unsubscribe removes a subscription.

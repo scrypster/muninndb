@@ -1195,3 +1195,14 @@ func AssocWeightRepairMarkKey(ws [8]byte) []byte {
 	copy(key[1:9], ws[:])
 	return key
 }
+
+// SupersedesRestoreMarkKey constructs the per-vault watermark key (0x31) for
+// the one-time restore of supersedes edges an older binary's decay archived.
+// Value: one byte, the restore version that last completed over the vault.
+// Key: 0x31 | wsPrefix(8) = 9 bytes
+func SupersedesRestoreMarkKey(ws [8]byte) []byte {
+	key := make([]byte, 1+8)
+	key[0] = prefix.SupersedesRestoreMark
+	copy(key[1:9], ws[:])
+	return key
+}

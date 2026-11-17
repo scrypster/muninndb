@@ -75,6 +75,14 @@ func seqCounterKey() []byte { return metaKey("seq_counter") }
 // lastAppliedKey persists the applier's watermark (formerly 0x19 0x02 "last_app").
 func lastAppliedKey() []byte { return metaKey("last_applied") }
 
+// replHaltKey holds the record of a refusal this node was given as a follower:
+// the leader it asked held a different entry at this node's position, or none
+// (Applier.Halt). The key existing is the halt, whatever its value decodes to.
+// It is metadata, so ReplicationLog.Prune's DeleteRange over the entry
+// sub-range cannot reach it. It is local to this node and is never shipped in
+// a snapshot (skipFromSnapshot).
+func replHaltKey() []byte { return metaKey("repl_halt") }
+
 // schemaVersionKey persists the on-disk schema version (formerly 0x19 0x03 "schema_v").
 func schemaVersionKey() []byte { return metaKey("schema_version") }
 

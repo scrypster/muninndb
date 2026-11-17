@@ -38,13 +38,39 @@ func (r *SubscriptionRegistry) CountTotal() int {
 	return n
 }
 
-func (r *SubscriptionRegistry) Add(sub *Subscription) {
+// Add registers a subscription, and reports whether it did. A subscription
+// whose id is already registered is NOT added: replacing the entry under an id
+// would leave the earlier subscription listed for its vault with nothing able
+// to remove it, and would hand whoever chose the id the means to have the
+// earlier owner's unsubscribe remove the wrong one (SEC-26).
+func (r *SubscriptionRegistry) Add(sub *Subscription) bool {
+	return r.addWithin(sub, 0, 0) == nil
+}
+
+// addWithin registers a subscription if its vault holds fewer than maxPerVault
+// and the registry fewer than maxTotal (zero means no limit), and says which
+// limit refused it otherwise. The counts are read and raised under one lock,
+// so the limits hold however many subscribers arrive at once. Read first and
+// raised later, as they were, every subscriber that arrived while a vault was
+// one short of full was let in: 200 at once put 198 subscriptions into a vault
+// that allowed 10.
+func (r *SubscriptionRegistry) addWithin(sub *Subscription, maxPerVault, maxTotal int) error {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if maxTotal > 0 && r.totalCount >= maxTotal {
+		return ErrGlobalSubscriptionLimitReached
+	}
+	if maxPerVault > 0 && r.vaultCount[sub.VaultID] >= maxPerVault {
+		return ErrVaultSubscriptionLimitReached
+	}
+	if _, taken := r.byID[sub.ID]; taken {
+		return ErrSubscriptionIDTaken
+	}
 	r.byID[sub.ID] = sub
 	r.byVault[sub.VaultID] = append(r.byVault[sub.VaultID], sub)
 	r.vaultCount[sub.VaultID]++
 	r.totalCount++
-	r.mu.Unlock()
+	return nil
 }
 
 func (r *SubscriptionRegistry) Remove(id string) {

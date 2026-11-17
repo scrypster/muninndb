@@ -82,18 +82,28 @@ func seedReadOnlyPair(t *testing.T, eng *Engine, as *auth.Store, store *storage.
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
+	// Distinct, ordered creation times. An id's millisecond comes from its
+	// CreatedAt and NewULID draws fresh entropy per call, so two writes in the
+	// same millisecond sorted at random. The Hebbian worker learns only on the
+	// key min(id)->max(id). When the partner sorted first it strengthened the
+	// partner->probe key and the seeded probe->partner edge stayed at 0.1
+	// (forced: 11 of 20 runs failed with "0.1 -> 0.1").
+	probeAt := time.Now().Add(-2 * time.Second)
+	partnerAt := probeAt.Add(time.Second)
 	probeResp, err := eng.Write(ctx, &mbp.WriteRequest{
-		Vault:   vault,
-		Concept: "kiln firing schedule",
-		Content: "the bisque kiln ramps at eighty degrees an hour to cone zero four",
+		Vault:     vault,
+		CreatedAt: &probeAt,
+		Concept:   "kiln firing schedule",
+		Content:   "the bisque kiln ramps at eighty degrees an hour to cone zero four",
 	})
 	if err != nil {
 		t.Fatalf("Write(probe): %v", err)
 	}
 	partnerResp, err := eng.Write(ctx, &mbp.WriteRequest{
-		Vault:   vault,
-		Concept: "glaze mixing ratio",
-		Content: "the celadon glaze is mixed at one part ash to two parts feldspar",
+		Vault:     vault,
+		CreatedAt: &partnerAt,
+		Concept:   "glaze mixing ratio",
+		Content:   "the celadon glaze is mixed at one part ash to two parts feldspar",
 	})
 	if err != nil {
 		t.Fatalf("Write(partner): %v", err)
@@ -198,6 +208,17 @@ func TestActivate_NotReadOnly_StillHebbianStrengthens(t *testing.T) {
 		t.Fatalf("GetAssocWeight: %v", err)
 	}
 	if after <= initialWeight {
+		// Report what tells the causes apart: the worker learns only the key
+		// min(id)->max(id), so a probe that sorts after its partner sends the
+		// update to the reverse key (the CI failure, see seedReadOnlyPair). A
+		// zero score skips the pair. The worker's counters show an event
+		// that never arrived, was dropped, or failed to persist.
+		reverse, _ := store.GetAssocWeight(ctx, ws, partnerID, probeID)
+		for _, a := range resp.Activations {
+			t.Logf("activation %s score=%v", a.ID, a.Score)
+		}
+		t.Logf("probe=%s partner=%s probe sorts first=%v reverse-key weight=%v worker=%+v",
+			probeID, partnerID, probeID.String() < partnerID.String(), reverse, hw.Stats())
 		t.Errorf("ordinary (read_only:false) recall did not strengthen the "+
 			"probe/partner association (%v -> %v); the fix must not disable "+
 			"Hebbian learning outright", initialWeight, after)

@@ -153,10 +153,23 @@ func runClusterStatus(args []string) {
 	outputJSON := fs.Bool("json", false, "Output raw JSON")
 	fs.Parse(args)
 
-	healthResp, err := httpGet(*addr + "/v1/cluster/health")
+	healthResp, healthCode, err := httpGetStatus(*addr + "/v1/cluster/health")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to reach server at %s: %v\n", *addr, err)
 		os.Exit(1)
+	}
+	if healthCode != http.StatusOK {
+		// The server was reached and answered, so neither message says it was
+		// not: that sends an operator looking at the network. A replica a
+		// leader has refused answers 503 with the reason, from the moment it
+		// starts, and the reason is the thing to show.
+		if reason := healthRefusalReason(healthResp); reason != "" {
+			fmt.Fprintf(os.Stderr, "Error: node is refusing to replicate: %s\n", reason)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: server at %s answered HTTP %d: %s\n", *addr, healthCode, strings.TrimSpace(string(healthResp)))
+		}
+		osExit(1)
+		return
 	}
 
 	var health map[string]interface{}
@@ -471,6 +484,41 @@ func httpGet(url string) ([]byte, error) {
 	}
 
 	return body, nil
+}
+
+// httpGetStatus is httpGet for a caller that needs the body of an answer that
+// is not 200. It returns the status code instead of turning it into an error.
+// An error means the server was not reached or the body could not be read.
+func httpGetStatus(url string) (body []byte, status int, err error) {
+	client := httpClientForURL(url, 5*time.Second)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	addClusterSecretAuth(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return body, resp.StatusCode, nil
+}
+
+// healthRefusalReason returns the reason a /v1/cluster/health body gives for a
+// node that has stopped replicating, or "" when the body carries none.
+func healthRefusalReason(body []byte) string {
+	var health struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		return ""
+	}
+	return health.Reason
 }
 
 func httpPost(url string) ([]byte, error) {

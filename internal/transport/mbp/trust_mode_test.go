@@ -8,7 +8,9 @@ import (
 )
 
 // modeRecEngine records the credential mode present in ctx when an op reaches
-// the engine. Read is universally allowed for every mode, so it is the probe.
+// the engine. No single frame type is open to every mode (an ingest-only key
+// may not read, an observe key may not write — SEC-20), so it records on both
+// Read and Write and each case sends the one its mode may send.
 type modeRecEngine struct {
 	stubEngine
 	gotMode string
@@ -17,6 +19,11 @@ type modeRecEngine struct {
 func (e *modeRecEngine) Read(ctx context.Context, req *ReadRequest) (*ReadResponse, error) {
 	e.gotMode, _ = ctx.Value(auth.ContextMode).(string)
 	return e.stubEngine.Read(ctx, req)
+}
+
+func (e *modeRecEngine) Write(ctx context.Context, req *WriteRequest) (*WriteResponse, error) {
+	e.gotMode, _ = ctx.Value(auth.ContextMode).(string)
+	return e.stubEngine.Write(ctx, req)
 }
 
 // TestMBP_ContextMode_ThreadedFromCredential proves the MBP HELLO handler
@@ -31,11 +38,13 @@ func TestMBP_ContextMode_ThreadedFromCredential(t *testing.T) {
 		authMethod string
 		keyMode    string // "" when authMethod == none
 		wantMode   string
+		write      bool // probe with WRITE instead of READ
 	}{
-		{"full-token", "token", "full", auth.ModeFull},
-		{"observe-token", "token", "observe", auth.ModeObserve},
-		{"write-token", "token", "write", auth.ModeWrite},
-		{"none-open", "none", "", auth.ModeFull},
+		{"full-token", "token", "full", auth.ModeFull, false},
+		{"observe-token", "token", "observe", auth.ModeObserve, false},
+		{"write-token", "token", "write", auth.ModeWrite, true},
+		{"append-token", "token", "append", auth.ModeAppend, false},
+		{"none-open", "none", "", auth.ModeFull, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -57,9 +66,16 @@ func TestMBP_ContextMode_ThreadedFromCredential(t *testing.T) {
 			if f.Type != TypeHelloOK {
 				t.Fatalf("%s: expected HELLO_OK, got 0x%02x", tc.name, f.Type)
 			}
-			resp := sendAndReceive(t, c, TypeRead, 1, &ReadRequest{ID: "e-1"})
-			if resp.Type != TypeReadResp {
-				t.Fatalf("%s: expected TypeReadResp, got 0x%02x", tc.name, resp.Type)
+			if tc.write {
+				resp := sendAndReceive(t, c, TypeWrite, 1, &WriteRequest{Concept: "c", Content: "x"})
+				if resp.Type != TypeWriteOK {
+					t.Fatalf("%s: expected TypeWriteOK, got 0x%02x", tc.name, resp.Type)
+				}
+			} else {
+				resp := sendAndReceive(t, c, TypeRead, 1, &ReadRequest{ID: "e-1"})
+				if resp.Type != TypeReadResp {
+					t.Fatalf("%s: expected TypeReadResp, got 0x%02x", tc.name, resp.Type)
+				}
 			}
 			if eng.gotMode != tc.wantMode {
 				t.Errorf("%s: engine saw ctx mode %q, want %q", tc.name, eng.gotMode, tc.wantMode)

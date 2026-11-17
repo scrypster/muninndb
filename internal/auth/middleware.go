@@ -58,6 +58,18 @@ func (s *Store) VaultAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			writeVaultRequestError(w, http.StatusBadRequest, resolveErr)
 			return
 		}
+		// A name no vault can have is refused as that, before it is looked up:
+		// the caller has shown no credential and chose the name, and the answer
+		// below repeats it (SEC-27). The status and code are the ones such a
+		// request has always been given, 401 VAULT_LOCKED; only the message
+		// differs. Every path that makes a vault public has checked its name
+		// against the same rule, so no reachable vault is refused here.
+		if !IsValidVaultName(vault) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"code":"VAULT_LOCKED","error":"invalid vault name"}`))
+			return
+		}
 		cfg, err := s.GetVaultConfig(vault)
 		if err != nil || !cfg.Public {
 			w.Header().Set("Content-Type", "application/json")
@@ -105,6 +117,7 @@ func (s *Store) AdminAPIMiddleware(secret []byte, next http.HandlerFunc) http.Ha
 			vault = "default"
 		}
 		ctx := context.WithValue(r.Context(), ContextVault, vault)
+		ctx = context.WithValue(ctx, ContextAdminSession, true)
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -124,12 +137,44 @@ func (s *Store) VaultAuthWithAdminBypass(secret []byte, next http.HandlerFunc) h
 			}
 			ctx := context.WithValue(r.Context(), ContextVault, vault)
 			ctx = context.WithValue(ctx, ContextMode, ModeFull)
+			ctx = context.WithValue(ctx, ContextAdminSession, true)
 			next(w, r.WithContext(ctx))
 			return
 		}
 		// Fall through to standard vault auth (Bearer token or public vault).
 		s.VaultAuthMiddleware(next)(w, r)
 	}
+}
+
+// AdminSessionFromContext reports whether the request was authenticated by a
+// verified admin session cookie — the console operator, who may see every
+// vault — as opposed to a vault API key or an open vault, which entitle the
+// caller to one vault. Only AdminAPIMiddleware and VaultAuthWithAdminBypass set
+// it, and only after the cookie has verified; a request that falls through to
+// vault auth never carries it. Handlers use it to decide whether a server-wide
+// answer may be given (SEC-24).
+func AdminSessionFromContext(ctx context.Context) bool {
+	admin, _ := ctx.Value(ContextAdminSession).(bool)
+	return admin
+}
+
+// VaultsVisibleTo narrows the list of every vault on the server to the vaults
+// the request's caller may be told exist: all of them for a verified admin
+// session, and otherwise the ONE vault the request was authorised for — the
+// key's vault, or the public vault a caller with no key named. A caller
+// entitled to one vault is not told the names of the others (SEC-25).
+//
+// The caller's own vault is listed whether or not it has anything in it yet.
+// A context that carries no vault at all gets nothing.
+func VaultsVisibleTo(ctx context.Context, all []string) []string {
+	if AdminSessionFromContext(ctx) {
+		return all
+	}
+	vault, _ := ctx.Value(ContextVault).(string)
+	if vault == "" {
+		return []string{}
+	}
+	return []string{vault}
 }
 
 // Mode enforcement uses two layers — documented here for future reference:

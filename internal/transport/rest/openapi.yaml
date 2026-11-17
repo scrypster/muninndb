@@ -104,6 +104,7 @@ components:
           type: number
           format: float
           default: 0
+          description: "Belief that the fact is true, in (0,1]. Omitted, 0 or negative means not supplied, and the memory is stored at 1.0; a value above 1 is stored as 1. A write cannot store 0."
         stability:
           type: number
           format: float
@@ -126,7 +127,7 @@ components:
         upsert_mode:
           type: boolean
           default: false
-          description: "When true with idempotent_id set, keep one stable memory per key: created on first use, evolved (superseding the previous version, which stays retrievable as history) when the content changes, and a no-op when the content is identical. Requires idempotent_id. On the evolve step only content, concept and importance are taken from the request; tags, confidence and trust are inherited from the previous version."
+          description: "When true with idempotent_id set, keep one stable memory per key: created on first use, evolved (superseding the previous version, which stays retrievable as history) when the content changes, and a no-op when the content is identical. Requires idempotent_id. On the evolve step content always comes from the request, and tags, memory type and type label are always inherited from the previous version; concept, importance and trust are inherited too unless the request supplies them, in which case the request's value is honored (trust=verified, supplied or inherited, requires a write or full credential). Confidence is not inherited: a confidence in (0,1] on the request is applied, otherwise the new version is stored at 1.0. These values apply only when the content changes: an identical-content call is a no-op and applies none of them, though an invalid or unauthorised trust is still rejected."
         memory_type:
           type: integer
           format: uint8
@@ -1035,20 +1036,42 @@ components:
 
     StatResponse:
       type: object
+      description: >-
+        Statistics for the scope named in `scope`. A vault API key, or no
+        credential on a public vault, entitles the caller to one vault and the
+        answer covers that vault only. Only an admin session gets the
+        server-wide answer.
       properties:
-        engramCount:
+        scope:
+          type: string
+          enum: [vault, server]
+          description: >-
+            What the figures cover. `vault`: the caller's one vault. `server`:
+            every vault on the server (admin session only).
+        engram_count:
           type: integer
           format: int64
-        vaultCount:
+          description: "Engrams in the request's vault."
+        vault_count:
           type: integer
-        indexSize:
+          description: >-
+            At `vault` scope, always 1 (the vault in scope). At `server` scope,
+            the number of vaults on the server.
+        index_size:
           type: integer
           format: int64
-        storageBytes:
+          description: "Vector index bytes for the request's vault."
+        storage_bytes:
           type: integer
           format: int64
+          description: >-
+            At `server` scope, the store's on-disk size. At `vault` scope,
+            always 0: the on-disk size is one figure for every vault.
         coherence:
           type: object
+          description: >-
+            Coherence metrics keyed by vault name. At `vault` scope, at most
+            the caller's own vault. At `server` scope, every vault.
           additionalProperties:
             $ref: "#/components/schemas/CoherenceResult"
 
@@ -1994,6 +2017,13 @@ components:
         replication_lag:
           type: integer
           format: int64
+        reason:
+          type: string
+          description: >-
+            Why the status is not ok when the lag does not explain it. Set on a
+            replica that has stopped replicating because its leader refused it:
+            it holds an entry the leader does not. The status is then `down`
+            and the response is a 503.
 
     ClusterNodesResponse:
       type: object
@@ -2230,8 +2260,15 @@ paths:
   /api/hello:
     post:
       tags: [health]
-      summary: "Protocol handshake — returns session metadata."
-      security: []
+      summary: "Protocol handshake — returns session metadata and registers the vault's name."
+      description: >-
+        Registers the name of the vault the request is authorised for, so the
+        vault is listed before anything is written to it. With an API key that
+        is the key's vault, and naming any other is refused. With no key the
+        vault named must be public. Under an admin session it is the vault
+        named in the body.
+      security:
+        - BearerAuth: []
       requestBody:
         required: false
         content:
@@ -2265,6 +2302,10 @@ paths:
                     type: array
                     items:
                       type: string
+        "400":
+          description: "The body names a vault other than the one the request is authorised for, or something that is not a vault name."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /api/workers:
     get:
@@ -2282,7 +2323,12 @@ paths:
   /api/stats:
     get:
       tags: [health]
-      summary: "Return database statistics."
+      summary: "Return statistics for the caller's vault."
+      description: >-
+        Answers about the one vault the caller is entitled to: the key's vault,
+        or the public vault named in `vault`. Nothing about any other vault is
+        returned. With an admin session the answer is server-wide
+        (`scope: server`).
       security:
         - BearerAuth: []
       parameters:
@@ -2504,6 +2550,7 @@ paths:
     post:
       tags: [cognitive]
       summary: "Evolve the content of an engram, preserving history."
+      description: "Creates a new version of the memory and keeps the old one as history. The new version carries the previous version's trust level: editing the content does not clear an `untrusted` flag and does not drop a `verified` one. The response carries the new id only; nothing in it says which level was carried. REST has no operation that changes the trust level of an existing memory today; it can be changed with `muninn_trust` over MCP. Confidence is not carried: the new version is stored at confidence 1.0."
       security:
         - BearerAuth: []
       parameters:
@@ -2538,6 +2585,12 @@ paths:
           $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "422":
+          description: "The request was well-formed but the engine refused it as invalid. Nothing was written."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2774,7 +2827,14 @@ paths:
             default: 10
       responses:
         "200":
-          description: "SSE event stream (text/event-stream)."
+          description: >-
+            SSE event stream (text/event-stream). Events: `subscribed` once,
+            `push` for each delivery, `ping` every 30 seconds, and `error` when
+            the server ends the stream. The stream is authorised for as long as
+            what authorised it holds: before every push and on every ping the
+            server checks the API key again (or, with no key, that the vault is
+            still public) and ends the stream with an `error` event when the
+            key has been revoked or has expired.
           content:
             text/event-stream:
               schema:
@@ -2809,6 +2869,12 @@ paths:
           $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          description: "Refused, nothing was written. Either endpoint is soft-deleted, or a link of another relation in the same direction already has this weight (a link's key holds its direction and weight but not its relation). The message names both relations. Write the link at a different weight."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -2871,21 +2937,24 @@ paths:
   /api/vaults:
     get:
       tags: [vault]
-      summary: "List all vault names."
+      summary: "List the vaults the caller may be told about."
+      description: >-
+        With a vault API key, or no credential on a public vault, the list is
+        the caller's one vault. Only an admin session is told every vault on
+        the server.
       security:
         - BearerAuth: []
       responses:
         "200":
-          description: "Vault names."
+          description: >-
+            Vault names, as a JSON array. One name for a key or a public-vault
+            caller; every vault for an admin session.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  vaults:
-                    type: array
-                    items:
-                      type: string
+                type: array
+                items:
+                  type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -4327,7 +4396,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ClusterHealthResponse"
         "503":
-          description: "Cluster down."
+          description: "This node is down for cluster purposes: no role yet, too far behind, or a replica that has stopped replicating (see `reason`)."
           content:
             application/json:
               schema:

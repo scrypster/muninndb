@@ -953,6 +953,7 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_GC_PERCENT            Go GC target percentage (default: 200)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_GLOBAL_RPS Global rate limit requests/sec (default: 1000)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_PER_IP_RPS Per-IP rate limit requests/sec (default: 100)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_MBP_MAX_CONNECTIONS   Most MBP connections held at once (default: derived from MUNINN_MEM_LIMIT_GB, 16 at 4 GB)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_INTERVAL        Automated backup interval (e.g. 6h, 30m); empty = disabled\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_DIR             Directory to write automated backups into\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_RETAIN          Number of automated backups to keep (default: 5)\n")
@@ -1298,22 +1299,7 @@ func runServer() {
 	}
 	store := storage.NewPebbleStore(db, storeCfg)
 	if applier != nil {
-		// A follower applies the leader's batches straight into Pebble, past the
-		// store's write path. Both consumers run on every attempted commit
-		// (success or error) and on a resnapshot, in this order: the read-
-		// through caches are invalidated first (cache_guard.go), then the
-		// retired set re-derives each touched entry from the stored record
-		// (retired.go) — that re-derive reads Pebble directly, never a cache.
-		applier.SetCommitHooks(
-			func(repr []byte) {
-				store.InvalidateCommittedRepr(repr)
-				store.NoteCommittedRepr(repr)
-			},
-			func() {
-				store.InvalidateAllCaches()
-				store.ResetAllRetired()
-			},
-		)
+		wireApplierToStore(applier, store)
 	}
 
 	// Run startup migrations before the engine is built.
@@ -1480,6 +1466,7 @@ func runServer() {
 		var cogHeb *cognitive.HebbianWorker
 		var cogTransition *cognitive.TransitionWorker
 
+		coordinator.BeforeBecomingCortex = vaultCountResetAtPromotion(store)
 		coordinator.OnBecameCortex = func(epoch uint64) {
 			slog.Info("[cluster] node promoted to Cortex — starting cognitive workers", "epoch", epoch)
 			cogHeb = cognitive.NewHebbianWorker(hebbianStore)

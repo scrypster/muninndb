@@ -22,8 +22,8 @@ A cognitive memory database for AI agents. Stores memories ("engrams"), retrieve
 ### SSE Push (Server-Sent Events)
 - `GET /api/subscribe` opens a long-lived SSE connection over REST
 - gRPC has bidirectional streaming `Subscribe` RPC
-- MBP has native push frames
-- All three protocols deliver real-time `ActivationPush` events
+- MBP does not deliver push events: a `SUBSCRIBE` over MBP is refused with an error that names the two above
+- REST and gRPC deliver real-time `ActivationPush` events
 
 ### Push Trigger Types
 - `new_write` — a new engram was written that matches your subscription context

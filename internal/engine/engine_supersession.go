@@ -274,6 +274,17 @@ func (e *Engine) applySupersessionWithGate(ctx context.Context, ws [8]byte, resu
 	return results, injected
 }
 
+// supersederRetracted reports whether a successor reached on a supersedes walk
+// voids the supersession at that hop: it was archived, or plainly forgotten
+// (soft-deleted with its validity left open). A successor that was itself
+// superseded is soft-deleted AND stamped, and does not void it. Recall's head
+// walk and the trust check share this rule so they agree on which version is
+// served (see RETRACTION vs. FURTHER SUPERSESSION below).
+func supersederRetracted(eng *storage.Engram) bool {
+	return eng.State == storage.StateArchived ||
+		(eng.State == storage.StateSoftDeleted && eng.ValidUntil.IsZero())
+}
+
 // resolveSupersessionHead walks the RelSupersedes chain upward from startID to
 // the effective head UNDER THE CALLER'S VIEW: the deepest chain node that is
 // both nameable (existence-visible: lease, trust, filters — gate.Nameable)
@@ -499,8 +510,7 @@ func (e *Engine) resolveSupersessionHeadCached(ctx context.Context, ws [8]byte, 
 		// A→B→C returned nothing at all, which is #763 again with an extra hop.
 		// StateArchived still stops the walk unconditionally (a storage-tier
 		// fact whose payload is not guaranteed resident).
-		if eng.State == storage.StateArchived ||
-			(eng.State == storage.StateSoftDeleted && eng.ValidUntil.IsZero()) {
+		if supersederRetracted(eng) {
 			sawRetracted = true
 			break // superseder retracted → supersession voided at this hop, for every caller
 		}

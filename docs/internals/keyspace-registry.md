@@ -43,7 +43,7 @@ prefix — see the vault-reuse note at the bottom).
 | 0x12 | ws | CoherenceKey | storage-only since #618 |
 | 0x13 | ws | VaultWeights | storage-only since #618 |
 | 0x14 | ws+src(16)+dst(16) | AssocWeightIndex float32 | storage-only since #618 |
-| 0x15 | ws | BE int64 count | vault engram count ("sole user" per comment) |
+| 0x15 | ws | BE int64 count | vault engram count. Only the 9-byte key is a count (the episode keyspace shares the byte with longer keys). A cache of the in-memory counter, written in steady state only by the coalescer's sweep, trusted only after a clean shutdown and recounted from 0x01 otherwise (STO-30, `storage/vault_count.go`). Exported with the vault (`export.go`) but ignored on import, not copied by clone or merge |
 | 0x16 | ws+id(16)+ts(8)+seq(4) | provenance entry (**JSON**, additively extensible) | async worker; the value is `provenance.ProvenanceEntry` marshalled with encoding/json, so a new *optional* field needs no version byte: old entries decode with the field ABSENT (never a zero value posing as data), and new entries decode on an old binary, which ignores the unknown key. `Details` (evolve's predecessor_id / reason / effective_at; extensible per-operation) was added this way. Renaming or retyping an existing field, or making a new field load-bearing for correctness, WOULD require a real format version |
 | 0x17 | ws | migration version+cursor | |
 | 0x18 | ws+ulid | quantize params + int8 embedding | ERF v2 vector |
@@ -69,13 +69,15 @@ prefix — see the vault-reuse note at the bottom).
 | **0x2C** | ws+Hash(tagKey)(4)+value+0x00+id(16) | — | **ordered raw-tag-range index (S1).** Distinct from 0x0C: keys on `Hash(tagKey)` (the part before the first `:`) with the raw VALUE bytes sorted after it, so a bounded range scan (e.g. `due:<=2026-07-27`) is a real Pebble range scan, not a post-hoc filter. Only tags containing `:` get an entry (gates write-amp to key:value tag conventions). The `0x00` separator after value resolves prefix-of-each-other values ("2026" < "2026-07" because `0x00 < '-'`). A tag value containing a `0x00` byte is rejected at write time (`storage.WriteRawTagIndexEntry`). Hash collisions between two distinct tag keys make their ranges interleave — phase-6 `passesMetaFilter` re-checks the real tag, so correctness holds and only perf degrades, mirroring 0x0C's own collision tolerance. Maintained at every 0x0C write/delete site (`internal/storage/batch.go`, `impl.go`, `engram.go`); backfilled for pre-existing data by migration v4 (`internal/storage/migrate/v4_raw_tag_range.go`). Seeds activation candidates via `ActivationEngine.seedTagCandidates`/`ScanRawTagRange` for `tag_prefix` filters with `lte`/`gte`/`lt`/`gt`/`eq`, instead of only being checked in phase 6. |
 | **0x2D** | ws+EntityNameHash(cue)(8)+intentionID(16) | msgpack {one_shot, created_at, fired_count, last_fired_at, cues[]} | **armed-intention index (THE PUSH, prospective memory).** One key per (intention, cue entity); `ScanArmedForEntity` is a 17-byte-prefix scan consulted ONLY inside recall/remember tool handlers when the cue entity is focal — nothing polls it. The value duplicates the full cue list across an intention's keys so a one-shot fire deletes every sibling key atomically (`MarkIntentionFired`) and entity-merge can rewrite stale cue names (`RelinkProspectiveIntent`, mirroring the 0x26 relink; called from `MergeEntity`). Cleared by `ClearVault`. NOT exported/cloned (intentions are session-arming state; documented residual). Stale keys for a deleted intention engram are inert — the firing rule re-verifies the engram (exists, active, ValidAt) before delivery. The design doc allocated 0x2C for this index, but 0x2C was taken by RawTagRange (S1) first; 0x2D is the real allocation. |
 | **0x2E** | ws | 1B repair version | **pre-fix full-weight association-key repair watermark (#756).** The original `WeightComplement` overflowed at weight exactly 1.0 and wrote those 0x03/0x04 keys at the weight-0.0 complement (`0xFFFFFFFF`), where they read back as weight 0; the encoder was fixed byte-compatibly in #757 but the misplaced keys remain. `Engine.runLegacyFullWeightAssocRepair` scans 0x03 for that complement and, when the pair's 0x14 index reads **exactly 1.0**, relocates fwd/rev to the true 1.0 position (complement `0x00000000`) carrying the value bytes verbatim, deleting the legacy position; any other index value is left alone. Presence at the current version skips the scan. A one-shot watermark is sound because the fixed encoder cannot create new damage of this kind. Cleared by `ClearVault`. Edges a decay pass already clamped or deleted are unrepairable **and unidentifiable** — no count is claimed for them, and neither are pre-0x14-era pairs that carry no weight index at all. `runPruneWorker` gates assoc decay (`Engine.decayAllVaults`) on the pass completing **cleanly**: a pass that errored leaves the gate shut for the process lifetime and logs at ERROR, because decay over a still-damaged vault destroys that evidence permanently and unidentifiably. The pass is **local to each node** — nothing is replicated (the #681 precedent); it is deterministic and idempotent, so nodes converge. Upgrade the **leader first**, and upgrade followers promptly: an ungated old-binary node can destroy its own evidence before it is upgraded. |
-| **0x2F** | 0x01\|seq_be64(8) (log entry) / 0x02\|name (metadata) | msgpack ReplicationEntry / raw | **the whole `internal/replication` keyspace (#726).** Relocated off 0x19, where it overlapped `prefix.Idempotency` byte-for-byte. The second discriminator byte is load-bearing: the entry sub-range is exactly `[0x2F 0x01, 0x2F 0x02)`, so `ReplicationLog.Prune`'s `DeleteRange` is structurally confined to log entries and cannot reach the metadata (seq counter, last-applied, schema version, cluster epoch, node role, snap-complete) or anything else. Constructors in `internal/replication/keys.go`; **global, not vault-scoped**, so it belongs in none of the four `prefix_lists_test.go` lists. Migrated by `internal/storage/migrate/v5_replication_prefix_relocate.go`, which moves the metadata and DROPS the legacy log entries behind a positive per-key identification (never a range delete — receipts share the old range) |
+| **0x2F** | 0x01\|seq_be64(8) (log entry) / 0x02\|name (metadata) | msgpack ReplicationEntry / raw | **the whole `internal/replication` keyspace (#726).** Relocated off 0x19, where it overlapped `prefix.Idempotency` byte-for-byte. The second discriminator byte is load-bearing: the entry sub-range is exactly `[0x2F 0x01, 0x2F 0x02)`, so `ReplicationLog.Prune`'s `DeleteRange` is structurally confined to log entries and cannot reach the metadata (seq counter, last-applied, schema version, cluster epoch, node role, snap-complete, refusal record) or anything else. Constructors in `internal/replication/keys.go`; **global, not vault-scoped**, so it belongs in none of the four `prefix_lists_test.go` lists. Migrated by `internal/storage/migrate/v5_replication_prefix_relocate.go`, which moves the metadata and DROPS the legacy log entries behind a positive per-key identification (never a range delete — receipts share the old range) |
 | **0x30** | ws+sha256(32) | engramID(16) | upsert forward-index — `idempotent_id` → engram pin (#556); relocation history 0x2B → 0x2D → 0x2E → 0x2F → 0x30 (0x2F taken by Replication, #726) |
+| **0x31** | ws | 1B restore version | **archived supersedes restore watermark (2026-11-16).** An older binary's association decay could archive a supersedes edge to 0x25, after which its target looked free. The leader's decay pass over a vault the startup repair has swept (0x2E at or above its version) restores each such row once (`restoreArchivedSupersedesOnce`) and then writes this mark, so the restore is not repeated. It runs on the cluster leader (or a standalone node) only, behind `decayAllVaults`' leader gate, and its batches are replicated, because what it decides depends on a target's current successors and a lagging follower deciding alone could fork a target the leader does not. The mark itself is local, like 0x2E: a node that becomes leader later runs the restore over its own copy. Its failure never parks decay. Cleared by `ClearVault`. It is its own key and not a value of 0x2E because one byte holds one version sequence: with both passes in 0x2E, a later bump of `assocWeightRepairVersion` would have made the startup repair skip vaults or re-run on every boot. Rows that reach a vault after the mark is written (a downgrade and re-upgrade, an older leader's batches) are not restored (COG-27 residual 4). |
 
 ## Auth prefixes (`internal/auth/keys.go`)
 
 | Prefix | Key shape | Value | Notes |
 |---|---|---|---|
+| 0xFF "vcount_clean" | none (global singleton) | BE uint64 FNV-64 of every 0x15 count key and value | **clean-shutdown marker for the vault counts (STO-30).** Written by `PebbleStore.Close` after its final sweep, never by a process that applied a replicated commit, deleted by `NewPebbleStore` at open. Absent or mismatched means recount. Lives with the other `0xFF` ASCII-named singletons (`mig_ver` in `storage/migrate`, `last_mol_seq` in `wal`), which no prefix scan of any binary reaches, so older binaries ignore it |
 | 0x40 | hash16 | Capability (JSON) | cap_ tokens (#612), relocated off 0x15/0x16 |
 | 0x41 | vault+0x00+capID(8) | storageHash16 | cap_ vault index |
 | 0x42 | username-bytes | AdminUser (JSON) | relocated from 0x11 by #618 |
@@ -92,10 +94,31 @@ Relocated off 0x19 by #726 (migration v5). Every key is built from
 |---|---|
 | 0x2F 0x01 \| seq_be64(8) | replication log entry (msgpack) |
 | 0x2F 0x02 \| "seq_counter" | head sequence number |
-| 0x2F 0x02 \| "last_applied" | applier watermark |
+| 0x2F 0x02 \| "last_applied" | applier cursor. **8 or 12 bytes**: `seq_be64(8)`, then, when the cursor got there by applying an entry, `crc32c_be32(4)` of that entry (`entrySum`, STO-27). One value so the two cannot disagree. Eight bytes after a snapshot rebase (`ResetTo`) and on any store last written by a build without the checksum. Such a build reads the first eight bytes and writes eight back, which drops the checksum rather than leaving a stale one beside a newer sequence number |
+| 0x2F 0x02 \| "repl_halt" | refusal record (msgpack `HaltRecord`, STO-27): this node was refused as a follower because it held an entry its leader did not. **The key existing is the refusal**, whatever the value decodes to, and so is a read of it that fails for any reason but absence. `position` names what the recorded position is (`apply_cursor` today). Written and removed only by `Applier` (`SetHalt`, `ClearHalt`, `ResetTo`). Local to the node: see the walker table below |
 | 0x2F 0x02 \| "schema_version" | on-disk schema version |
 | 0x2F 0x02 \| "cluster_epoch" / "node_role" | election epoch / last claimed role |
 | 0x2F 0x02 \| "snap_complete" | clean-snapshot sentinel |
+
+No metadata name is a byte prefix of another, and each is addressed by exact key
+(`TestReplicationKeys_NeverCollideWithIdempotency`).
+
+### What walks 0x2F, and what each walker does with `repl_halt`
+
+`repl_halt` is the one key under 0x2F that must stay on the node that wrote it and
+must not be removed by anything except the three `Applier` methods above. Every
+code path that iterates, range-deletes or copies this prefix (or the whole store):
+
+| Walker | Reach | `repl_halt` |
+|---|---|---|
+| `ReplicationLog.Prune` (`DeleteRange`) | `[0x2F 0x01 \| from, 0x2F 0x01 \| until+1)` | cannot reach it: metadata sorts after every entry key (`TestPrune_LeavesReplicationMetadataAlone`) |
+| `SnapshotSender` (`countKeys`, `streamChunks`) | whole store through `skipFromSnapshot` | **not shipped** (`TestSkipFromSnapshot_ShipsMetadataExceptTheRefusal`). The other metadata still ships, the leader's own `last_applied` included |
+| `SnapshotReceiver.WipeForResnapshot` | whole store, keeps the exact `cluster_epoch` key only | deleted with the state it was a verdict on |
+| `Applier.ResetTo` (after a snapshot) | `last_applied` and `repl_halt`, one synced batch | deleted, and the cursor is always rewritten so the leader's shipped `last_applied` cannot survive (`TestJoin_ASnapshotNeitherCarriesNorKeepsARefusal`) |
+| migration v5 (`RelocateReplicationPrefix`) | six named legacy keys under 0x19 and their six destinations under 0x2F 0x02 | untouched. The key has no legacy form and needs no migration: absent means not refused |
+| `ExportVaultData` / `ImportVaultData`, `CloneVaultData` / `MergeVaultData`, `ClearVault`, `ClearFTSKeys`, the embedding and HNSW clears | vault-scoped prefix lists (`prefix_lists_test.go`). 0x2F is global and is in none of them | never seen |
+| `PebbleStore.Checkpoint` (`muninn backup`, `POST /api/admin/backup`, the backup scheduler) and the checkpoint verify scan | a copy of the whole store, then a read of its first ten keys | **carried**. A copy of a refused node's store is a refused node: it starts at 503 with the recorded reason, and the record is removed on first contact if the leader holds its last entry. A node removes its record in the same step as it takes the leader role, and records none while it leads, so a leader holds one only if that removal failed on disk (logged). Restoring every node from a refused node's backup is the one case in which all of them start with a record: whichever is elected removes its own and logs one `HISTORY HAS CHANGED LINE` error that is not true of that cluster |
+| `muninn twin-replay` / `twin-audit` (read-only open) | one vault's keys | never seen |
 
 Pre-#726 addresses, for anyone reading an un-migrated store: `0x19|seq_be64(8)`,
 `0x19|0xFF*8` (seq counter — note that lived *inside* the entry range, at
@@ -104,13 +127,14 @@ sequence MaxUint64), `0x19 0x02 "last_app"`, `0x19 0x03 "schema_v" /
 
 ## Free bytes
 
-`0x31`–`0x3F` and `0x46`+ are free for new storage/auth keys (0x2B–0x30 are now
+`0x32` to `0x3F` and `0x46`+ are free for new storage/auth keys (0x2B to 0x31 are now
 allocated: 0x2B evolve-repair watermark (#681), 0x2C raw-tag-range index (S1), 0x2D
 armed-intention index (THE PUSH), 0x2E full-weight assoc-key repair watermark (#756),
-0x2F the replication keyspace (#726), 0x30 upsert forward-index (#556);
+0x2F the replication keyspace (#726), 0x30 upsert forward-index (#556), 0x31 archived
+supersedes restore watermark (2026-11-16).
 0x40–0x45 are allocated: 0x40/0x41 capability, 0x42–0x45 auth). (`0x29`/`0x40`/`0x41`
 also appear in `internal/transport/mbp/frame.go` as **wire opcodes**, a different
-keyspace; coincidental, safe, but confusing. Prefer `0x31+` for new storage prefixes.)
+keyspace, coincidental, safe, but confusing. Prefer `0x32+` for new storage prefixes.)
 
 ## Live hazards a reviewer must know
 
@@ -161,6 +185,10 @@ keyspace; coincidental, safe, but confusing. Prefer `0x31+` for new storage pref
    vault name cannot inherit a stranger's "already repaired" claim at the cost of one
    no-op scan; and a repair whose watermark is present is never revisited, so the
    watermark must only be written on a genuinely clean pass.
+   0x31 (the archived supersedes restore, 2026-11-16) is in this family and follows the
+   same rules. Two passes never share one watermark byte: a byte holds one version
+   sequence, so a second pass's values in it make a later bump of either pass's version
+   skip vaults or repeat the other pass.
 
 6. **The entity graph is still absent from `vaultScopedExportPrefixes` — deliberately, and
    it is a known gap.** `muninn vault export` transports memories, associations, FTS, HNSW

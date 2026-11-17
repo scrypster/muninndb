@@ -655,7 +655,8 @@ func TestServer_DispatchAllHandlers(t *testing.T) {
 		{"write", TypeWrite, TypeWriteOK, &WriteRequest{Concept: "c"}},
 		{"read", TypeRead, TypeReadResp, &ReadRequest{ID: "e-1"}},
 		{"activate", TypeActivate, TypeActivateResp, &ActivateRequest{Context: []string{"q"}}},
-		{"subscribe", TypeSubscribe, TypeSubOK, &SubscribeRequest{Context: []string{"q"}}},
+		// SUBSCRIBE is refused: nothing is delivered over this protocol.
+		{"subscribe", TypeSubscribe, TypeError, &SubscribeRequest{Context: []string{"q"}}},
 		{"unsub", TypeUnsub, TypeUnsubOK, &UnsubscribeRequest{SubID: "s-1"}},
 		{"link", TypeLink, TypeLinkOK, &LinkRequest{SourceID: "a", TargetID: "b"}},
 		{"forget", TypeForget, TypeForgetOK, &ForgetRequest{ID: "e-1"}},

@@ -83,6 +83,7 @@ func TestReplicationLog_AdvanceTo(t *testing.T) {
 		// one thing that branch leaves behind — the floor — and checks every
 		// way the counter is then first read.
 		for name, read := range map[string]func(*ReplicationLog) uint64{
+			"Head":       func(l *ReplicationLog) uint64 { h, _ := l.Head(); return h },
 			"CurrentSeq": func(l *ReplicationLog) uint64 { return l.CurrentSeq() },
 			"Append": func(l *ReplicationLog) uint64 {
 				seq, _ := l.Append(OpSet, []byte("probe/k"), []byte("invented"))

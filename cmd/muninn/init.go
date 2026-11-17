@@ -1221,6 +1221,20 @@ func alignLocalAdminBasesToDaemon() {
 //
 // The PUT is idempotent: calling with the same mode twice is safe.
 func applyBehaviorToVault(mode, customInstructions string) {
+	// The step signs in with the default credentials, which a fresh install
+	// has. They are sent to this machine only, like every default-credential
+	// attempt the CLI makes (defaultCredentialsAllowed). Pointed at another
+	// machine, the step is not attempted and the manual command is printed.
+	if !defaultCredentialsAllowed(vaultUIBase) {
+		fmt.Println("  ⚠  Vault behavior was not applied: the server is on another machine, and the default")
+		fmt.Println("     admin credentials are not sent there. Apply it with your own credentials:")
+		fmt.Printf("    muninn vault behavior default --mode %s -u <admin user> -p\n", mode)
+		if customInstructions != "" {
+			fmt.Printf("    muninn vault behavior default --instructions %q -u <admin user> -p\n", customInstructions)
+		}
+		return
+	}
+
 	doApply := func() error {
 		// Attempt default-credential auto-login (root/password) — works on fresh installs.
 		// Do not prompt interactively; this is a background step inside init.
