@@ -2377,3 +2377,41 @@ restore then made a permanent fork. The floor collision also erases a non-supers
   supersedes edges at their floor, and 1,894 supersedes pairs that also carry another relation,
   so the floor collision was the live exposure there and the restore is insurance for other
   stores.
+
+**Second review (2026-11-16).** An adversarial review found one regression, two defects in the
+new restore code, and eight guards no test pinned. What changed, and why:
+- *The weight move checks its destination, and holds the pairs' guard locks through the commit.*
+  The regression: a supersedes edge declared at 1.0 from an older memory onto a newer one, with
+  a relates_to edge on the same directed pair, was erased by ordinary history-view recalls,
+  because the Hebbian worker moved relates_to up to 1.0 with a plain `Set`. On develop decay had
+  moved the supersedes edge off 1.0 first, so this branch's exemption made it permanent.
+  Skipping supersedes inside the Hebbian update would not close it: the edge that moves is the
+  other one. The review proposed the check alone. A check without the lock lets a Link pass its
+  own check at the same destination before the move commits (the race the STO-15 lock closed
+  for `WriteAssociation`), and lets a decay chunk commit inside the move's read-to-commit window,
+  which leaves two keys for one edge. Holding the lock closes both, and the Hebbian worker runs
+  in the background, so waiting behind a decay chunk costs recall nothing.
+- *A move refused for that reason is not a fault.* The edge keeps its weight, the worker logs it
+  at DEBUG, leaves it out of `Stats().Errors`, and suppresses its callback. Counted as a fault it
+  would have logged an ERROR every flush window for as long as the two relations share the pair.
+  The cost is named: that relation stops learning on that pair while the other holds the key.
+- *The restore's watermark is its own key (0x31), not value 2 of 0x2E.* One byte holds one
+  version sequence. With both passes in 0x2E, a later bump of `assocWeightRepairVersion` would
+  have made the startup repair skip vaults the restore had marked, or re-run on every boot. A
+  new prefix byte is what the registry asks of a new watermark, and costs one entry in
+  `prefix.All()` and in `ClearVault`'s list.
+- *A row whose source is live on the target again is dropped, not restored.* Restoring it wrote
+  a second live key for one declaration.
+- *The lazy restore removes a symmetric edge's mirrored row only when it holds the same
+  relation.* The (dst, src) key can hold another edge's row, and an older binary's decay
+  archived across relations. This one was open on develop since the mirror was added (#806).
+- *Rows the restore leaves because another relation holds their key are now named in a WARN,*
+  not only counted.
+- *Clone, merge and export still drop the 0x25 archive.* It is in none of their prefix lists,
+  so they drop archived supersedes declarations too. Carrying 0x25 changes what those operations
+  transport, which is its own decision. The step 1 text claimed a merged vault keeps its
+  archived rows, and that was wrong.
+- A second census of the same copy of production data counted how a supersedes edge is stored:
+  all 2,581 newer to older (the direction `evolve` and inline supersedes write), none older to
+  newer. Hebbian moves only older to newer pairs, so the regression above had no live instance
+  there. 1,894 of the 2,581 share their directed pair with another relation.
