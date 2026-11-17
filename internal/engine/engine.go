@@ -6015,6 +6015,9 @@ func (e *Engine) decayAllVaults(ctx context.Context, vaults []string) {
 		return
 	}
 	for _, vaultName := range vaults {
+		// Before the vault's own decay gate: rows an older binary archived
+		// are restored even in a vault whose decay is now switched off.
+		e.restoreArchivedSupersedesOnce(ctx, vaultName, e.store.ResolveVaultPrefix(vaultName))
 		resolved := e.ResolveVaultPlasticity(vaultName)
 		// COG-16 unchanged: AssocDecayFactor is still the gate. It is now only
 		// a switch — the rate lives in AssocHalfLifeDays (#762).
