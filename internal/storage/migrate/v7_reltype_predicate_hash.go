@@ -81,7 +81,14 @@ import (
 // followers promptly. If a replica-first upgrade already happened, run
 // `muninn start --force-migration-rerun` on the upgraded nodes and restart —
 // v7's length discriminator re-keys the replicated strays on the forced pass
-// (pinned by TestMigrationV7_ForceRerunRekeysReplicatedStrays).
+// (pinned by TestMigrationV7_ForceRerunRekeysReplicatedStrays). That rerun
+// repairs the KEY LAYOUT ONLY. It does NOT re-run a relink that
+// RelinkRelationshipEntity already skipped while the stray was 42 bytes, and
+// it does NOT reap a hard-delete's orphaned 0x26 index keys — both are
+// permanent: the merged-away entity name stays in the row's value and the
+// index, and MergeEntity refuses a second attempt ("already merged"), so no
+// supported operation recovers that edge. Do not read --force-migration-rerun
+// as curing a missed merge or index cleanup.
 func RekeyRelationshipPredicateHash(db *pebble.DB) error {
 	iter, err := db.NewIter(&pebble.IterOptions{
 		LowerBound: []byte{prefix.Relationship},

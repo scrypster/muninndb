@@ -121,7 +121,11 @@ replacement links an older version's decay archived, as described in their entri
   yields two rows, entity-merge leaves the stale-name row behind, hard-delete
   orphans its 0x26 index entries). If a replica-first upgrade has already
   happened, run `muninn start --force-migration-rerun` on the upgraded nodes
-  and restart: v7's length discriminator re-keys the replicated strays. **Where
+  and restart: v7's length discriminator re-keys the replicated strays — a
+  KEY-LAYOUT repair only. It does not re-run a relink skipped while the stray
+  was 42 bytes, nor reap orphaned 0x26 index keys; a merged-away entity name
+  stays in the row and is unrecoverable (MergeEntity refuses a second merge).
+  **Where
   that rerun finds its destination already occupied** — the stray and this node's
   own re-assert of the same triple are both on disk — it keeps whichever value is
   newer (by the record's `updated_at`) and deletes the legacy key either way, so
