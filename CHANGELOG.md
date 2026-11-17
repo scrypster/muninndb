@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+---
+
+## [0.12.0] - 2026-11-17
+
+The correctness release. Recall now orders results by how well each memory matches the
+query, weighted by how confident MuninnDB is in it. Several ways memory could be silently
+lost or misreported are closed: evolve dropping a memory's trust level, association decay
+erasing the link that retires a replaced memory, and a vault memory count that let
+`max_engrams` prune real memories. It also fixes security weaknesses present in every
+release up to 0.11.0, most of them in the MBP listener. The main fixes were checked end to
+end on real binaries against the build before them.
+
+**Upgrade notes.** This release runs no schema migration. On its first start a server
+recounts its vault memory counts, and a single server or cluster leader restores any
+replacement links an older version's decay archived, as described in their entries below.
+
+- Read the Security section before upgrading a server that other machines can reach. The
+  MBP listener now holds at most 16 connections at the default memory limit, so set
+  `MUNINN_MBP_MAX_CONNECTIONS` first if you run more MBP clients at once. `observe` and
+  `write` API keys are held to their modes over MBP, statistics and the vault list cover
+  only the caller's own vault unless the caller is signed in as admin, and SUBSCRIBE over
+  MBP is refused.
+- The first start recounts every vault's memory count and logs each correction as
+  `vault memory count corrected at start`. A vault with `max_engrams` whose count read
+  high may have lost memories before this release. Restore them from a backup if you
+  need them.
+- A link of another relation in the same direction at the weight an existing link
+  already holds is refused, with a message naming both relations. REST answers 409 and
+  gRPC answers `FailedPrecondition`. Write the link at a different weight.
+- Cluster operators: traffic between cluster nodes is not encrypted, so keep the nodes on
+  a private network. A replica that has diverged from its leader is now refused, and stays
+  refused until it is re-seeded.
+
 ### Added
 
 - An opt-in write-time twin check. With `MUNINN_WRITE_RELATED=shadow` the server notices
@@ -2482,7 +2517,8 @@ fix ships with a regression test.
 
 ## Comparison Links
 
-[Unreleased]: https://github.com/scrypster/muninndb/compare/v0.4.10...HEAD
+[Unreleased]: https://github.com/scrypster/muninndb/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/scrypster/muninndb/compare/v0.11.0...v0.12.0
 [0.4.10]: https://github.com/scrypster/muninndb/compare/v0.4.9-alpha...v0.4.10
 [0.2.6]: https://github.com/scrypster/muninndb/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/scrypster/muninndb/compare/v0.2.4...v0.2.5
