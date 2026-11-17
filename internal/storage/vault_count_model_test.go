@@ -528,3 +528,56 @@ func TestVaultCountModel_ReadOnlyOpenScansAndWritesNothing(t *testing.T) {
 		t.Fatalf("read-only count %d, the vault holds 3", got)
 	}
 }
+
+// A store that has had a batch committed past its write path (a cluster
+// follower's applier, which reports each batch through the commit hooks) never
+// moved its counts for those records. Its clean Close must not certify them:
+// a former follower restarted standalone would trust 8 for a vault holding 5,
+// and prune real memories under max_engrams.
+func TestVaultCountModel_ForeignCommitLeavesNoMarker(t *testing.T) {
+	for _, hook := range []string{"InvalidateCommittedRepr", "NoteCommittedRepr", "InvalidateAllCaches"} {
+		t.Run(hook, func(t *testing.T) {
+			dir := vmDir(t)
+			ctx := context.Background()
+			ps := vmOpen(t, dir)
+			ws := vcWS("vm-foreign")
+			var ids []ULID
+			for i := 0; i < 8; i++ {
+				ids = append(ids, vmWrite(t, ps, ws, "seed", i))
+			}
+			ps.FlushCounters() // saved counts, as after the follower's own recount at open
+			// The leader forgets 3: the applier commits its batch straight to
+			// Pebble, then hands it to the store's hooks.
+			b := ps.db.NewBatch()
+			for _, id := range ids[:3] {
+				if err := b.Delete(keys.EngramKey(ws, [16]byte(id)), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := b.Commit(pebble.Sync); err != nil {
+				t.Fatal(err)
+			}
+			switch hook {
+			case "InvalidateCommittedRepr":
+				ps.InvalidateCommittedRepr(b.Repr())
+			case "NoteCommittedRepr":
+				ps.NoteCommittedRepr(b.Repr())
+			case "InvalidateAllCaches":
+				ps.InvalidateAllCaches()
+			}
+			b.Close()
+			if err := ps.Close(); err != nil {
+				t.Fatal(err)
+			}
+			ps2 := vmOpen(t, dir) // standalone: no promotion resets anything
+			defer ps2.Close()
+			if got, want := ps2.GetVaultCount(ctx, ws), vmStored(t, ps2, ws); got != want || want != 5 {
+				t.Fatalf("after a clean restart the count is %d, the vault holds %d (want 5): "+
+					"Close certified counts that applied records never moved", got, want)
+			}
+			if !ps2.recountedAtOpen {
+				t.Fatal("no recount after a process that applied foreign commits")
+			}
+		})
+	}
+}

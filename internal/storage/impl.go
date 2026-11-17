@@ -60,8 +60,15 @@ type PebbleStore struct {
 	// readOnly is set at open when the database refuses writes (a read-only
 	// open of a backup). No marker is read or written, and when the saved
 	// counts are not known to be clean every count is seeded by a scan.
-	readOnly                      bool
-	countKeysUntrusted            bool
+	readOnly           bool
+	countKeysUntrusted bool
+	// foreignCommits is set, for the rest of the process, the first time a
+	// batch committed to this DB past the store's write path is reported to
+	// the store (InvalidateCommittedRepr, NoteCommittedRepr,
+	// InvalidateAllCaches: a cluster follower's applier). Those records moved
+	// without moving any count, so Close writes no clean-shutdown marker and
+	// the next start recounts (STO-30).
+	foreignCommits                atomic.Bool
 	clearBeforeRangeDeleteForTest func()
 	clearAfterRangeDeleteForTest  func()
 	// contradictsGen counts RelContradicts association writes per vault, so the
@@ -1093,8 +1100,10 @@ func (ps *PebbleStore) Close() error {
 			}
 			// Only when the final sweep saved every change: a count that moved
 			// after it (a write still running at shutdown) leaves no marker,
-			// and the next start recounts.
-			if !ps.readOnly && ps.counterFlush.clean() {
+			// and the next start recounts. Never after a foreign commit: the
+			// saved counts are this process's counts, and records it applied
+			// from elsewhere never moved them.
+			if !ps.readOnly && !ps.foreignCommits.Load() && ps.counterFlush.clean() {
 				ps.writeCleanShutdownMarker()
 			}
 		}

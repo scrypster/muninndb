@@ -309,8 +309,11 @@ func (ps *PebbleStore) noteCommittedBatch(b *pebble.Batch) {
 
 // NoteCommittedRepr is noteCommittedBatch for a batch repr applied OUTSIDE
 // this store — the replication applier on a follower, which writes the
-// leader's batches straight to Pebble. Wired by cmd/muninn.
+// leader's batches straight to Pebble. Wired by cmd/muninn. Like
+// InvalidateCommittedRepr, it marks this process's vault counts as not
+// certifiable (STO-30).
 func (ps *PebbleStore) NoteCommittedRepr(repr []byte) {
+	ps.foreignCommits.Store(true)
 	if len(repr) == 0 || !ps.anyRetiredSet() {
 		return
 	}
