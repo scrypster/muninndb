@@ -24,6 +24,7 @@ type ReplicationLog struct {
 	mu         sync.Mutex
 	seq        uint64 // current sequence number
 	init       bool   // whether seq has been initialized from Pebble
+	floor      uint64 // lowest value seq may be initialized to. Set only by an AdvanceTo that could not read the counter.
 	lastPruned uint64 // highest seq already deleted by Prune, this process lifetime
 	subs       []chan struct{}
 	subsMu     sync.Mutex
@@ -56,6 +57,11 @@ func (l *ReplicationLog) ensureSeqInit() error {
 		if len(val) >= 8 {
 			l.seq = binary.BigEndian.Uint64(val)
 		}
+	}
+	// An AdvanceTo that ran while the counter was unreadable left its target
+	// here. The stored value is the one from before that promotion.
+	if l.seq < l.floor {
+		l.seq = l.floor
 	}
 
 	l.init = true
@@ -208,19 +214,29 @@ func (l *ReplicationLog) ReadSince(afterSeq uint64, limit int) ([]ReplicationEnt
 // Lobe has not yet applied will cause a permanent replication gap — the Lobe
 // must rejoin via snapshot if it falls behind a pruned point.
 func (l *ReplicationLog) Prune(untilSeq uint64) error {
+	_, err := l.prune(untilSeq)
+	return err
+}
+
+// prune is Prune, and also reports whether this call issued a delete. It is
+// false for both early returns: a watermark at or past the head (the head
+// entry is never pruned, so a cluster whose replicas have all acknowledged the
+// head prunes nothing until the next write), and a watermark this process has
+// already pruned to. The caller logs a prune only when one happened.
+func (l *ReplicationLog) prune(untilSeq uint64) (deleted bool, err error) {
 	l.mu.Lock()
 	if err := l.ensureSeqInit(); err != nil {
 		l.mu.Unlock()
-		return err
+		return false, err
 	}
 	seq := l.seq
 	if untilSeq >= seq {
 		l.mu.Unlock()
-		return nil // nothing to prune
+		return false, nil // nothing to prune
 	}
 	if untilSeq <= l.lastPruned {
 		l.mu.Unlock()
-		return nil // already pruned past this watermark
+		return false, nil // already pruned past this watermark
 	}
 	from := l.lastPruned + 1
 	l.lastPruned = untilSeq
@@ -239,10 +255,10 @@ func (l *ReplicationLog) Prune(untilSeq uint64) error {
 	batch := l.db.NewBatch()
 	defer batch.Close()
 	if err := batch.DeleteRange(startKey, endKey, nil); err != nil {
-		return fmt.Errorf("replication log prune: delete range: %w", err)
+		return false, fmt.Errorf("replication log prune: delete range: %w", err)
 	}
 	if err := batch.Commit(nil); err != nil {
-		return fmt.Errorf("replication log prune: commit: %w", err)
+		return false, fmt.Errorf("replication log prune: commit: %w", err)
 	}
 
 	// Reclaim the space now. Pebble deletes are tombstones — the bytes come
@@ -270,20 +286,97 @@ func (l *ReplicationLog) Prune(untilSeq uint64) error {
 			" reclaimed by a later compaction", "err", err, "from_seq", from, "until_seq", untilSeq)
 	}
 
-	return nil
+	return true, nil
 }
 
 // CurrentSeq returns the latest committed sequence number.
 // Thread-safe.
+//
+// It returns 0 when the counter cannot be read, which is indistinguishable
+// from an empty log. A caller that would act on a low value — refusing a
+// follower, for one — must use Head instead.
 func (l *ReplicationLog) CurrentSeq() uint64 {
+	seq, _ := l.Head()
+	return seq
+}
+
+// Head returns the latest committed sequence number, or an error when the
+// counter cannot be read from the store. Thread-safe.
+func (l *ReplicationLog) Head() (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	if err := l.ensureSeqInit(); err != nil {
-		return 0
+		return 0, err
 	}
+	return l.seq, nil
+}
 
-	return l.seq
+// sumAt returns the checksum (entrySum) of the entry this log holds at seq,
+// and whether it holds one. A pruned or never-written sequence is not an
+// error. Thread-safe: it reads the store directly.
+func (l *ReplicationLog) sumAt(seq uint64) (sum uint32, found bool, err error) {
+	val, closer, err := l.db.Get(replicationEntryKey(seq))
+	if err == pebble.ErrNotFound {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	defer closer.Close()
+	var e ReplicationEntry
+	if err := msgpack.Unmarshal(val, &e); err != nil {
+		return 0, false, fmt.Errorf("malformed log entry at seq %d: %w", seq, err)
+	}
+	return entrySum(e), true, nil
+}
+
+// AdvanceTo raises the sequence counter to seq when it is below it, so the next
+// Append is numbered seq+1. It never lowers the counter and it writes no entry.
+// It returns the counter's value before the call.
+//
+// Its one caller is a promotion (ClusterCoordinator.handlePromotion). A
+// follower applies the leader's entries without appending any of its own, so
+// its counter stays where its last term as leader left it, which is 0 for a
+// node that has never led. If such a node numbered its first entry from there, every
+// follower that had applied further than that would discard the entry as
+// already applied (Applier.Apply). AdvanceTo is how the node's numbering
+// catches up with what it has applied before it starts appending.
+//
+// The sequences between the old counter and seq have no entry in this node's
+// log and never will: it received them as a follower and did not log them. A
+// ReadSince across that range returns the entries on either side of it.
+//
+// A failure does not undo the advance, and the caller is expected to carry on
+// (a promotion cannot be taken back once the claim is broadcast). If the write
+// fails, the counter stays advanced in memory: this process numbers correctly,
+// the next Append persists the counter in its own batch, and a restart before
+// any Append recomputes the same value at the next promotion. If the counter
+// cannot be read at all, the target is kept as a floor that the first
+// successful read is raised to, so the stored value from before the promotion
+// is never used as it stands. The error is returned so the caller can report it.
+func (l *ReplicationLog) AdvanceTo(seq uint64) (previous uint64, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if err := l.ensureSeqInit(); err != nil {
+		if seq > l.floor {
+			l.floor = seq
+		}
+		return 0, fmt.Errorf("replication log: read sequence counter before advancing to %d: %w", seq, err)
+	}
+	previous = l.seq
+	if seq <= l.seq {
+		return previous, nil
+	}
+	l.seq = seq
+
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, l.seq)
+	if err := l.db.Set(seqCounterKey(), buf, pebble.Sync); err != nil {
+		return previous, fmt.Errorf("replication log: persist advanced sequence counter %d: %w", seq, err)
+	}
+	return previous, nil
 }
 
 // Subscribe registers a notification channel that receives a signal whenever a

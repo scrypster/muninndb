@@ -13,7 +13,7 @@ import (
 
 // TestStreamFromCortex_SendsReplAck is the #516 part 3 regression: after a Lobe
 // applies a streamed ReplEntry it must send a ReplAck back over the same
-// connection (which the Cortex's handleClusterConn reads) so the Cortex can
+// connection (which the Cortex's ServeConn loop reads) so the Cortex can
 // track per-replica progress / lag. Before this, no ReplAck was ever produced
 // and last_seq stayed 0.
 func TestStreamFromCortex_SendsReplAck(t *testing.T) {

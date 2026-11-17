@@ -633,6 +633,41 @@ type enrichInitFailure struct {
 	err  error  // the init/parse error
 }
 
+// maxUnconfiguredVaultsShown bounds the names in the startup notice so one
+// line stays one line on a server with hundreds of vaults.
+const maxUnconfiguredVaultsShown = 20
+
+// logUnconfiguredVaults reports, in ONE line at INFO, which vaults have no
+// explicit access policy. Those vaults take the fail-closed default (an API key
+// is required). That is the secure state and not a fault, so it is stated once
+// with the count and the names instead of one WARN per vault on every start.
+// It is WARN only when the list could not be built, because then the operator
+// has been told nothing.
+func logUnconfiguredVaults(listVaults func() ([]string, error), unconfigured func([]string) ([]string, error)) {
+	const hint = "use muninn api-key create to grant access"
+	names, err := listVaults()
+	if err != nil {
+		slog.Warn("vault fail-closed: could not list vaults to report which have no explicit access policy; unconfigured vaults require an API key", "err", err)
+		return
+	}
+	locked, err := unconfigured(names)
+	if err != nil {
+		slog.Warn("vault fail-closed: could not read vault configs to report which vaults have no explicit access policy; unconfigured vaults require an API key", "err", err)
+		return
+	}
+	if len(locked) == 0 {
+		slog.Info("vault fail-closed: unconfigured vaults require an API key; every vault on this server has an explicit access policy", "vaults", len(names))
+		return
+	}
+	shown := locked
+	if len(shown) > maxUnconfiguredVaultsShown {
+		shown = shown[:maxUnconfiguredVaultsShown]
+	}
+	slog.Info("vault fail-closed: unconfigured vaults require an API key; "+hint,
+		"unconfigured", len(locked), "of", len(names),
+		"names", strings.Join(shown, ", "), "names_not_shown", len(locked)-len(shown))
+}
+
 // buildEnricher constructs an EnrichService. Priority:
 //  1. MUNINN_ENRICH_URL env var
 //  2. Saved plugin_config.json (cfg parameter)
@@ -789,81 +824,6 @@ func warnVaultDimMismatches(store *storage.PebbleStore, embedderDim int) {
 	}
 }
 
-// handleClusterConn reads MBP frames from an incoming cluster TCP connection
-// and dispatches them to the coordinator. Exits when the connection is closed.
-//
-// Protocol: the first frame MUST be TypeJoinRequest. On success, ownership of
-// conn transfers to the PeerConn inside ConnManager (HandleIncomingJoin →
-// RegisterConn). After that, this goroutine no longer closes conn on exit —
-// the coordinator's cleanup owns it. If the join fails or a protocol violation
-// occurs, this goroutine closes conn via the deferred call.
-func handleClusterConn(conn net.Conn, coord *replication.ClusterCoordinator) {
-	// connOwned flips to false once HandleIncomingJoin succeeds and the
-	// PeerConn takes ownership, preventing a double-close on goroutine exit.
-	connOwned := true
-	defer func() {
-		if connOwned {
-			conn.Close()
-		}
-	}()
-
-	fromNodeID := conn.RemoteAddr().String() // ephemeral until join completes
-	joined := false
-
-	for {
-		frame, err := mbp.ReadFrame(conn)
-		if err != nil {
-			// The inbound conn died. If it had been adopted as a peer's registered
-			// conn, evict it (unless already replaced) so the peer's restart isn't
-			// blocked by a stale live-looking PeerConn (#534).
-			if joined {
-				coord.EvictConn(fromNodeID, conn)
-			}
-			return // connection closed or error
-		}
-		if frame.Type == mbp.TypeJoinRequest {
-			nodeID, adopted, err := coord.HandleIncomingJoin(conn, frame.Payload)
-			if err != nil {
-				log.Printf("[cluster] join error from %s: %v", fromNodeID, err)
-				return
-			}
-			if !adopted {
-				// Non-leader rejected the join with a redirect (already written to
-				// the raw conn). The conn was NOT registered, so close it here.
-				return
-			}
-			fromNodeID = nodeID
-			joined = true
-			connOwned = false // PeerConn now owns conn
-			continue
-		}
-		// PeerHello discovery handshake (#522 Step 4) — an alternative first frame
-		// for peers that don't join (two primaries, sentinels, lobe↔lobe).
-		if frame.Type == mbp.TypePeerHello {
-			nodeID, adopted, err := coord.HandleIncomingHello(conn, frame.Payload)
-			if err != nil {
-				log.Printf("[cluster] hello error from %s: %v", fromNodeID, err)
-				return
-			}
-			if !adopted {
-				return // tie-break loser: conn deliberately closed in adoptHelloPeer
-			}
-			fromNodeID = nodeID
-			joined = true
-			connOwned = false // PeerConn now owns conn
-			continue
-		}
-		// Reject any frame that arrives before a join/hello handshake completes.
-		if !joined {
-			log.Printf("[cluster] unexpected frame type 0x%02x from %s before join; closing", frame.Type, fromNodeID)
-			return
-		}
-		if err := coord.HandleIncomingFrame(fromNodeID, frame.Type, frame.Payload); err != nil {
-			log.Printf("[cluster] frame error from %s: %v", fromNodeID, err)
-		}
-	}
-}
-
 // validateServerFlags checks that each addr is a valid host:port pair with a
 // port number in the range 1-65535. Returns the first validation error found.
 func validateServerFlags(addrs ...string) error {
@@ -993,6 +953,7 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_GC_PERCENT            Go GC target percentage (default: 200)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_GLOBAL_RPS Global rate limit requests/sec (default: 1000)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_PER_IP_RPS Per-IP rate limit requests/sec (default: 100)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_MBP_MAX_CONNECTIONS   Most MBP connections held at once (default: derived from MUNINN_MEM_LIMIT_GB, 16 at 4 GB)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_INTERVAL        Automated backup interval (e.g. 6h, 30m); empty = disabled\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_DIR             Directory to write automated backups into\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_RETAIN          Number of automated backups to keep (default: 5)\n")
@@ -1694,7 +1655,7 @@ func runServer() {
 						continue
 					}
 				}
-				go handleClusterConn(conn, coord)
+				go coord.ServeConn(conn)
 			}
 		}()
 		go func() {
@@ -1891,7 +1852,7 @@ func runServer() {
 	}
 	slog.Info("UI server listening", "addr", *uiAddr)
 
-	slog.Info("vault fail-closed: unconfigured vaults require an API key; use muninn api-key create to grant access")
+	logUnconfiguredVaults(store.ListVaultNames, authStore.UnconfiguredVaults)
 
 	// Upgrade notice: warn operators if data exists but no vault configs are set.
 	// This detects the scenario where an operator upgraded from a version that

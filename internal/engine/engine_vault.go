@@ -82,6 +82,11 @@ var ErrAppendForbidden = errors.New("append-mode credential cannot modify or del
 // auth.ModeAppend. (If future work needs append reads to leave existing state
 // byte-identical, force resolveReadOnly for append too; today it does not.)
 //
+// One conditional caller: Write and WriteBatch are additive and do not call
+// this at their top, but a write that declares an inline `supersedes` retires
+// the memory it names, so that write calls it (refuseInlineSupersedesForAppend,
+// COG-38) before anything else it does.
+//
 // Scope note on the census: TestAppendMode_MethodCensus forces every exported
 // method into a bucket (real anti-rot — it caught Restore/PruneVault), but it does
 // not behaviorally prove the read-only/infra members are non-destructive; that
@@ -95,7 +100,7 @@ func (e *Engine) refuseAppend(ctx context.Context) error {
 }
 
 // ClearVault removes all memories from a vault. The vault name remains registered.
-// It evicts all in-memory state (HNSW, FTS IDF cache, novelty fingerprints, coherence
+// It evicts all in-memory state (HNSW, novelty fingerprints, coherence
 // counters, activity tracking) and adjusts the global engramCount.
 func (e *Engine) ClearVault(ctx context.Context, vaultName string) error {
 	if err := e.refuseWrite(ctx); err != nil {
@@ -212,9 +217,6 @@ func (e *Engine) clearVault(ctx context.Context, vaultName string) error {
 	// Runs inside the processors' clear boundary, so no embed hook can
 	// re-insert a pre-clear vector after this.
 	e.resetTwinVault(ws)
-	if e.fts != nil {
-		e.fts.InvalidateIDFCache()
-	}
 	if e.noveltyDet != nil {
 		e.noveltyDet.PurgeVault(binary.BigEndian.Uint32(ws[:4]))
 	}

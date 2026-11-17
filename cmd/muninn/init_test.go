@@ -379,11 +379,10 @@ func TestConfigureNamedToolsReturnsErrorsSlice(t *testing.T) {
 // the daemon hasn't started yet), applyBehaviorToVault must NOT abort — it
 // should print the manual command so the user can apply it themselves.
 func TestApplyBehaviorToVault_FallbackOnAPIFailure(t *testing.T) {
-	oldBase := vaultAdminBase
-	defer func() { vaultAdminBase = oldBase }()
-
-	// Point at a port that is definitely not listening.
-	vaultAdminBase = "http://127.0.0.1:19998"
+	// Both the login (UI base) and the plasticity call (admin base) must point
+	// at an address that refuses. Overriding only the admin base left the
+	// default-credential login aimed at the real UI port.
+	withNoServer(t)
 
 	out := captureStdout(func() {
 		applyBehaviorToVault("selective", "")
@@ -402,10 +401,7 @@ func TestApplyBehaviorToVault_FallbackOnAPIFailure(t *testing.T) {
 // instructions are provided and the API is unreachable, the fallback message
 // includes the instructions command as well.
 func TestApplyBehaviorToVault_FallbackIncludesInstructions(t *testing.T) {
-	oldBase := vaultAdminBase
-	defer func() { vaultAdminBase = oldBase }()
-
-	vaultAdminBase = "http://127.0.0.1:19998"
+	withNoServer(t)
 
 	out := captureStdout(func() {
 		applyBehaviorToVault("custom", "remember everything")

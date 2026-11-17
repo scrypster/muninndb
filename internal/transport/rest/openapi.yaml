@@ -146,8 +146,14 @@ components:
             $ref: "#/components/schemas/InlineEntity"
         relationships:
           type: array
+          description: "Inline edges from this engram to existing engrams, by relation name. On a write that creates an engram, a `supersedes` relationship is a declaration with the same meaning and effect as POST /api/link with the supersedes relation: the target is retired (its valid_until is stamped if it was open; it stays readable as history) in the same atomic commit as the write. The write is refused and nothing is stored when the target cannot be superseded — 400 if it does not exist in this vault, 409 if it is forgotten or already has a successor (the message names the current version), 403 for an append-mode credential, 422 if the vault's inline_enrichment is background_only (which ignores caller relationships) or the request also declares another relation to the same target at the same weight. Not applied when the write resolves to an engram that already exists: identical content (the response carries hint duplicate_content) or upsert_mode. Other relations are stored as plain edges."
           items:
             $ref: "#/components/schemas/InlineRelationship"
+        associations:
+          type: array
+          description: "Inline edges from this engram to existing engrams, by numeric rel_type (the form gRPC and MBP also carry). An edge whose rel_type is supersedes (4) follows the same rule as a `supersedes` entry in `relationships`: on a write that creates an engram it retires its target atomically with the write, or the write is refused."
+          items:
+            $ref: "#/components/schemas/InlineAssociation"
 
     InlineEntity:
       type: object
@@ -165,6 +171,22 @@ components:
         relation:
           type: string
         weight:
+          type: number
+          format: float
+
+    InlineAssociation:
+      type: object
+      properties:
+        target_id:
+          type: string
+        rel_type:
+          type: integer
+          description: "Numeric relation type (1 supports, 2 contradicts, 3 depends_on, 4 supersedes, 5 relates_to, ...)."
+        weight:
+          type: number
+          format: float
+          description: "0 to 1. Values at or above 1 are stored as 1 and values at or below 0 as 0."
+        confidence:
           type: number
           format: float
 
@@ -186,16 +208,32 @@ components:
 
     BatchWriteResponse:
       type: object
+      required: [results]
       properties:
         results:
           type: array
+          description: >-
+            One entry per item sent, in the same order. A refused item does not
+            stop the others from being stored.
           items:
-            $ref: "#/components/schemas/WriteResponse"
-        errors:
-          type: array
-          items:
-            type: string
-            nullable: true
+            $ref: "#/components/schemas/BatchWriteItemResult"
+
+    BatchWriteItemResult:
+      type: object
+      required: [index, status]
+      properties:
+        index:
+          type: integer
+          description: Position of the item in the request.
+        id:
+          type: string
+          description: Id of the stored memory. Present when status is ok.
+        status:
+          type: string
+          enum: [ok, error]
+        error:
+          type: string
+          description: Why the item was refused. Present when status is error.
 
     ReadResponse:
       type: object
@@ -613,6 +651,13 @@ components:
             vault scores with weighted_sum or rrf.
         source_type:
           type: string
+          description: >-
+            Where the memory came from, read from the provenance entry that
+            created it (human, llm, document, inferred, external,
+            working_memory, synthetic). It does not change when the memory is
+            later read or updated. Every ordinary write is currently recorded
+            as "human" whoever made it, so the field does not yet tell a person
+            from an agent; use trust for that.
         state:
           type: integer
           format: uint8
@@ -991,20 +1036,42 @@ components:
 
     StatResponse:
       type: object
+      description: >-
+        Statistics for the scope named in `scope`. A vault API key, or no
+        credential on a public vault, entitles the caller to one vault and the
+        answer covers that vault only. Only an admin session gets the
+        server-wide answer.
       properties:
-        engramCount:
+        scope:
+          type: string
+          enum: [vault, server]
+          description: >-
+            What the figures cover. `vault`: the caller's one vault. `server`:
+            every vault on the server (admin session only).
+        engram_count:
           type: integer
           format: int64
-        vaultCount:
+          description: "Engrams in the request's vault."
+        vault_count:
           type: integer
-        indexSize:
+          description: >-
+            At `vault` scope, always 1 (the vault in scope). At `server` scope,
+            the number of vaults on the server.
+        index_size:
           type: integer
           format: int64
-        storageBytes:
+          description: "Vector index bytes for the request's vault."
+        storage_bytes:
           type: integer
           format: int64
+          description: >-
+            At `server` scope, the store's on-disk size. At `vault` scope,
+            always 0: the on-disk size is one figure for every vault.
         coherence:
           type: object
+          description: >-
+            Coherence metrics keyed by vault name. At `vault` scope, at most
+            the caller's own vault. At `server` scope, every vault.
           additionalProperties:
             $ref: "#/components/schemas/CoherenceResult"
 
@@ -1950,6 +2017,13 @@ components:
         replication_lag:
           type: integer
           format: int64
+        reason:
+          type: string
+          description: >-
+            Why the status is not ok when the lag does not explain it. Set on a
+            replica that has stopped replicating because its leader refused it:
+            it holds an entry the leader does not. The status is then `down`
+            and the response is a 503.
 
     ClusterNodesResponse:
       type: object
@@ -2186,8 +2260,15 @@ paths:
   /api/hello:
     post:
       tags: [health]
-      summary: "Protocol handshake — returns session metadata."
-      security: []
+      summary: "Protocol handshake — returns session metadata and registers the vault's name."
+      description: >-
+        Registers the name of the vault the request is authorised for, so the
+        vault is listed before anything is written to it. With an API key that
+        is the key's vault, and naming any other is refused. With no key the
+        vault named must be public. Under an admin session it is the vault
+        named in the body.
+      security:
+        - BearerAuth: []
       requestBody:
         required: false
         content:
@@ -2221,6 +2302,10 @@ paths:
                     type: array
                     items:
                       type: string
+        "400":
+          description: "The body names a vault other than the one the request is authorised for, or something that is not a vault name."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /api/workers:
     get:
@@ -2238,7 +2323,12 @@ paths:
   /api/stats:
     get:
       tags: [health]
-      summary: "Return database statistics."
+      summary: "Return statistics for the caller's vault."
+      description: >-
+        Answers about the one vault the caller is entitled to: the key's vault,
+        or the public vault named in `vault`. Nothing about any other vault is
+        returned. With an admin session the answer is server-wide
+        (`scope: server`).
       security:
         - BearerAuth: []
       parameters:
@@ -2287,7 +2377,13 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: "Idempotency key collision."
+          description: "Idempotency key collision; or the write declares an inline supersedes whose target is forgotten or already has a successor (the message says what was and was not stored and names the current version)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: "The request is well-formed but cannot be honoured as written (for example an out-of-range created_at, or an inline supersedes the vault's settings would drop). Nothing is stored."
           content:
             application/json:
               schema:
@@ -2731,7 +2827,14 @@ paths:
             default: 10
       responses:
         "200":
-          description: "SSE event stream (text/event-stream)."
+          description: >-
+            SSE event stream (text/event-stream). Events: `subscribed` once,
+            `push` for each delivery, `ping` every 30 seconds, and `error` when
+            the server ends the stream. The stream is authorised for as long as
+            what authorised it holds: before every push and on every ping the
+            server checks the API key again (or, with no key, that the vault is
+            still public) and ends the stream with an `error` event when the
+            key has been revoked or has expired.
           content:
             text/event-stream:
               schema:
@@ -2828,21 +2931,24 @@ paths:
   /api/vaults:
     get:
       tags: [vault]
-      summary: "List all vault names."
+      summary: "List the vaults the caller may be told about."
+      description: >-
+        With a vault API key, or no credential on a public vault, the list is
+        the caller's one vault. Only an admin session is told every vault on
+        the server.
       security:
         - BearerAuth: []
       responses:
         "200":
-          description: "Vault names."
+          description: >-
+            Vault names, as a JSON array. One name for a key or a public-vault
+            caller; every vault for an admin session.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  vaults:
-                    type: array
-                    items:
-                      type: string
+                type: array
+                items:
+                  type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -4284,7 +4390,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ClusterHealthResponse"
         "503":
-          description: "Cluster down."
+          description: "This node is down for cluster purposes: no role yet, too far behind, or a replica that has stopped replicating (see `reason`)."
           content:
             application/json:
               schema:

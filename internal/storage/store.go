@@ -65,6 +65,14 @@ type StoreBatch interface {
 	// true). An already-closed ValidUntil is preserved (evolving an
 	// already-expired fact must not destroy the earlier window end).
 	SupersedeEngram(ctx context.Context, ws [8]byte, id ULID, validUntil time.Time) error
+	// StampValidUntil queues a ValidUntil stamp — and ONLY that — for an
+	// existing engram: the batch form of PebbleStore.StampValidUntil, which is
+	// how a supersedes link retires its target (state stays active, UpdatedAt
+	// is not moved). With onlyIfOpen an already-closed window is left as it is.
+	// It lets a writer commit an engram, its supersedes edge and the target's
+	// retirement as one atomic batch — the inline-supersedes write path
+	// (COG-38).
+	StampValidUntil(ctx context.Context, ws [8]byte, id ULID, until time.Time, onlyIfOpen bool) error
 	// WriteEntityEngramLink queues the 0x20 forward and 0x23 reverse entity-link
 	// keys into the batch. Like PebbleStore.WriteEntityEngramLink, it does not
 	// touch the 0x1F entity record — callers that need the record created must

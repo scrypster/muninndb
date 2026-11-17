@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,11 +15,12 @@ import (
 )
 
 type replState struct {
-	vault         string // current vault context (empty = no vault selected)
-	mcpURL        string // e.g. "http://127.0.0.1:8750"
-	cmdCount      int    // total commands run this session (for tip rotation)
-	firstRun      bool   // true if no config file existed at shell start
-	sessionCookie string // for REST API calls requiring admin auth
+	vault         string   // current vault context (empty = no vault selected)
+	mcpURL        string   // e.g. "http://127.0.0.1:8750"
+	cmdCount      int      // total commands run this session (for tip rotation)
+	firstRun      bool     // true if no config file existed at shell start
+	sessionCookie string   // for REST API calls requiring admin auth
+	sessionHosts  []string // the hosts sessionCookie may be sent to: its issuer, and an API host paired with it
 }
 
 func (r *replState) prompt() string {
@@ -65,10 +67,9 @@ func runShell() {
 	if mcpURL == "" {
 		mcpURL = "http://127.0.0.1:8750"
 	}
-	uiBase := os.Getenv("MUNINNDB_UI_URL")
-	if uiBase == "" {
-		uiBase = "http://127.0.0.1:8476"
-	}
+	// Where to sign in: MUNINNDB_UI_URL, or else derived from MUNINNDB_ADMIN_URL
+	// so that the shell signs in to the server it is going to talk to.
+	_, uiBase, pairedHost := cliBases(os.Getenv("MUNINNDB_ADMIN_URL"), os.Getenv("MUNINNDB_UI_URL"))
 
 	// Detect first run (no config file = user hasn't used 'use <vault>' before)
 	_, configErr := os.Stat(configPath())
@@ -88,9 +89,7 @@ func runShell() {
 	}
 
 	// Auto-authenticate with default credentials; prompt only if that fails
-	sessionCookie, authErr := autoAuth(uiBase)
-	if authErr != nil {
-		// Default creds failed — prompt once
+	sessionCookie, authErr := replSignIn(uiBase, func() (string, string, error) {
 		fmt.Print("Username: ")
 		scanner := bufio.NewScanner(os.Stdin)
 		scanner.Scan()
@@ -100,19 +99,17 @@ func runShell() {
 		passBytes, pwErr := term.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Println()
 		if pwErr != nil {
-			fmt.Fprintln(os.Stderr, "failed to read password:", pwErr)
-			os.Exit(1)
+			return "", "", fmt.Errorf("failed to read password: %w", pwErr)
 		}
-
-		if err := shellValidateAdmin(uiBase, username, string(passBytes)); err != nil {
-			fmt.Fprintln(os.Stderr, "Authentication failed.")
-			os.Exit(1)
-		}
-		// Refresh cookie after explicit login
-		sessionCookie, _ = autoAuth(uiBase)
+		return username, string(passBytes), nil
+	})
+	if authErr != nil {
+		fmt.Fprintln(os.Stderr, authErr)
+		os.Exit(1)
 	}
 
 	r.sessionCookie = sessionCookie
+	r.sessionHosts = []string{hostOf(uiBase), pairedHost}
 
 	scanner := bufio.NewScanner(os.Stdin)
 
@@ -293,10 +290,67 @@ func (r *replState) printRotatingTip() {
 	fmt.Println(" ", tips[idx])
 }
 
+// replSignIn gets the shell its admin session: with the default credentials if
+// the server still has them, and otherwise with the credentials ask returns.
+// It returns the session cookie of the login that succeeded.
+//
+// The session matters beyond the prompt: the vault list is scoped to the
+// caller (SEC-25), so a shell with no admin session is shown one vault.
+func replSignIn(uiBase string, ask func() (username, password string, err error)) (string, error) {
+	// The default credentials are tried on this machine only. Another machine
+	// is sent no credential the operator did not type.
+	if defaultCredentialsAllowed(uiBase) {
+		if sessionCookie, err := autoAuth(uiBase); err == nil {
+			return sessionCookie, nil
+		}
+	}
+	// No default credentials, or they failed — prompt once
+	username, password, err := ask()
+	if err != nil {
+		return "", err
+	}
+	sessionCookie, err := shellValidateAdmin(uiBase, username, password)
+	if err != nil {
+		return "", errors.New("Authentication failed.")
+	}
+	return sessionCookie, nil
+}
+
 // shellValidateAdmin validates admin credentials against the running UI server's
-// login endpoint (POST <uiBase>/api/auth/login).
-// Returns nil on success, non-nil on auth failure or network error.
-func shellValidateAdmin(uiBase, username, password string) error {
+// login endpoint (POST <uiBase>/api/auth/login) and returns the session cookie
+// that login set. The error is non-nil on auth failure or network error.
+//
+// The cookie is returned, not discarded: the caller's next step is to act as
+// the admin who just signed in, and the only other way to get a session is to
+// log in again.
+func shellValidateAdmin(uiBase, username, password string) (string, error) {
+	cookie, status, err := adminLoginCookie(uiBase, username, password)
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("invalid credentials (status %d)", status)
+	}
+	return cookie, nil
+}
+
+// autoAuth attempts to log in with default credentials.
+// Returns the session cookie value on success.
+func autoAuth(uiBase string) (string, error) {
+	cookie, status, err := adminLoginCookie(uiBase, "root", "password")
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("auth failed (status %d)", status)
+	}
+	return cookie, nil
+}
+
+// adminLoginCookie posts one login and returns the session cookie it set, with
+// the HTTP status. The cookie is "" when the login was refused, and also when
+// it was accepted by a server that set no session cookie.
+func adminLoginCookie(uiBase, username, password string) (cookie string, status int, err error) {
 	body, _ := json.Marshal(map[string]string{
 		"username": username,
 		"password": password,
@@ -305,39 +359,19 @@ func shellValidateAdmin(uiBase, username, password string) error {
 	client := httpClientForURL(loginURL, 5*time.Second)
 	resp, err := client.Post(loginURL, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("connect to server: %w", err)
+		return "", 0, fmt.Errorf("connect to server: %w", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("invalid credentials (status %d)", resp.StatusCode)
-	}
-	return nil
-}
-
-// autoAuth attempts to log in with default credentials.
-// Returns the session cookie value on success.
-func autoAuth(uiBase string) (string, error) {
-	body, _ := json.Marshal(map[string]string{
-		"username": "root",
-		"password": "password",
-	})
-	loginURL := uiBase + "/api/auth/login"
-	client := httpClientForURL(loginURL, 5*time.Second)
-	resp, err := client.Post(loginURL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("connect to server: %w", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("auth failed (status %d)", resp.StatusCode)
+		return "", resp.StatusCode, nil
 	}
 	for _, c := range resp.Cookies() {
 		if c.Name == "session" || c.Name == "muninn_session" {
-			return c.Value, nil
+			return c.Value, resp.StatusCode, nil
 		}
 	}
 	// No cookie found but 200 — auth succeeded without session cookie
-	return "", nil
+	return "", resp.StatusCode, nil
 }
 
 // knownCommands lists all valid REPL commands for typo suggestion.

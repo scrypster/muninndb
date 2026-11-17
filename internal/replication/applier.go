@@ -22,6 +22,24 @@ type Applier struct {
 	appliedSince uint64 // entries since last explicit sync
 	mu           sync.Mutex
 
+	// lastSum is entrySum of the entry applied at lastApplied. hasSum is false
+	// when the cursor did not get there by applying an entry under this code:
+	// nothing applied yet, a cursor written by an older build, or a snapshot
+	// rebase. See LastAppliedMark.
+	lastSum uint32
+	hasSum  bool
+
+	// halt is the recorded refusal, nil when there is none. While it is set
+	// Apply applies nothing. See HaltRecord.
+	halt *HaltRecord
+	// leading is set while this node holds the leader role (takeLead,
+	// stepDown). No refusal is recorded while it is set. ledEpoch is the
+	// highest epoch this process has led: a refusal from that term or an
+	// earlier one is not recorded either (SetHalt), because it was answered
+	// before this node led.
+	leading  bool
+	ledEpoch uint64
+
 	// onCommitted / onReset let the local store keep its derived in-memory
 	// state (the retired set, storage/retired.go) in step with what this
 	// applier writes behind its back. onCommitted receives the repr of every
@@ -47,10 +65,14 @@ func NewApplier(db *pebble.DB) *Applier {
 	val, closer, err := db.Get(lastAppliedKey())
 	if err == nil && len(val) >= 8 {
 		a.lastApplied = binary.BigEndian.Uint64(val)
+		if len(val) >= 12 {
+			a.lastSum, a.hasSum = binary.BigEndian.Uint32(val[8:12]), true
+		}
 	}
 	if closer != nil {
 		closer.Close()
 	}
+	a.halt = loadHalt(db.Get)
 	return a
 }
 
@@ -76,10 +98,23 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// A refused node applies nothing, whoever sends it an entry. The join path
+	// already keeps a refused node off its leader's stream. This is the same
+	// rule where it cannot be bypassed.
+	if a.halt != nil {
+		return ErrApplierHalted
+	}
+
 	// Idempotent: skip already-applied entries
 	if entry.Seq <= a.lastApplied {
 		return nil
 	}
+
+	// The checksum is taken from the entry as it arrived, BEFORE anything is
+	// applied. Committing a batch repr rewrites the header of the very buffer
+	// entry.Value points at (Pebble stamps its own sequence number into it), so
+	// a checksum taken afterwards would be of bytes the leader never held.
+	sum := entrySum(entry)
 
 	batch := a.db.NewBatch()
 	defer batch.Close()
@@ -112,15 +147,13 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 		if err != nil {
 			return err
 		}
-		seqBuf := make([]byte, 8)
-		binary.BigEndian.PutUint64(seqBuf, entry.Seq)
 		markerBatch := a.db.NewBatch()
 		defer markerBatch.Close()
-		markerBatch.Set(lastAppliedKey(), seqBuf, nil)
+		markerBatch.Set(lastAppliedKey(), appliedMark(entry.Seq, sum), nil)
 		if err := markerBatch.Commit(pebble.NoSync); err != nil {
 			return err
 		}
-		a.lastApplied = entry.Seq
+		a.lastApplied, a.lastSum, a.hasSum = entry.Seq, sum, true
 		a.appliedSince++
 		if a.appliedSince >= applierSyncInterval {
 			if err := a.db.LogData(nil, pebble.Sync); err != nil {
@@ -138,9 +171,7 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 	}
 
 	// Persist lastApplied atomically with the data write.
-	seqBuf := make([]byte, 8)
-	binary.BigEndian.PutUint64(seqBuf, entry.Seq)
-	batch.Set(lastAppliedKey(), seqBuf, nil)
+	batch.Set(lastAppliedKey(), appliedMark(entry.Seq, sum), nil)
 
 	// Use NoSync per entry — Pebble's WAL provides crash-safety without an fsync
 	// on every write. Syncing every entry would serialize on disk I/O, making
@@ -154,7 +185,7 @@ func (a *Applier) Apply(entry ReplicationEntry) (returnErr error) {
 		return err
 	}
 
-	a.lastApplied = entry.Seq
+	a.lastApplied, a.lastSum, a.hasSum = entry.Seq, sum, true
 	a.appliedSince++
 
 	// Periodic batch-level sync: issue one fsync every applierSyncInterval entries.
@@ -178,12 +209,46 @@ func (a *Applier) LastApplied() uint64 {
 	return a.lastApplied
 }
 
+// appliedMark is the stored value of the apply cursor: the sequence number,
+// then the checksum of the entry applied at it. One value under one key, so
+// the two cannot disagree. A build from before the checksum reads the first
+// eight bytes and writes eight back, which drops the checksum rather than
+// leaving a stale one beside a newer sequence number.
+func appliedMark(seq uint64, sum uint32) []byte {
+	buf := make([]byte, 12)
+	binary.BigEndian.PutUint64(buf[0:8], seq)
+	binary.BigEndian.PutUint32(buf[8:12], sum)
+	return buf
+}
+
+// LastAppliedMark returns the apply cursor together with the checksum of the
+// entry applied at it. ok is false when there is no such checksum (see hasSum)
+// and the cursor is then all that is known. Thread-safe.
+func (a *Applier) LastAppliedMark() (seq uint64, sum uint32, ok bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastApplied, a.lastSum, a.hasSum
+}
+
+// HoldCursor calls fn with the current apply cursor while no entry can be
+// applied: Apply waits until fn returns. A promotion uses it to read the cursor
+// and take the leader role as one step (ClusterCoordinator.handlePromotion), so
+// an entry still arriving from the previous leader is either counted in the
+// value fn sees or applied only after the role has changed, never in between.
+//
+// fn must not call back into the Applier.
+func (a *Applier) HoldCursor(fn func(lastApplied uint64)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	fn(a.lastApplied)
+}
+
 // ResetTo rebases the apply cursor onto seq, in memory and in Pebble, and is
 // the ONLY way the cursor moves other than applying an entry.
 //
 // It exists for exactly one caller: the join path, immediately after a full
 // snapshot has replaced this node's local state. The snapshot's SnapshotSeq is
-// the new authoritative baseline, and the cursor must follow it — including
+// the new authoritative baseline, and the cursor must follow it, including
 // DOWNWARDS, when the Cortex has been rebuilt or restored and its head is now
 // behind where this node had got to.
 //
@@ -193,6 +258,15 @@ func (a *Applier) LastApplied() uint64 {
 // (the idempotence check), and ReplicationLag() returns 0 because it clamps at
 // cortexSeq <= lastApplied. The node reports a healthy lag of 0 and applies
 // nothing, forever.
+//
+// The stored cursor is ALWAYS rewritten, also when the in-memory value already
+// equals seq. A snapshot ships the Cortex's replication metadata, and that
+// includes the Cortex's own last_applied: its own cursor, twelve bytes, with a
+// checksum of an entry this node never applied. Leaving that in place would
+// hand this node the Cortex's cursor at its next restart.
+//
+// A recorded refusal (HaltRecord) goes in the same batch. It was a verdict on
+// the state the snapshot has just replaced.
 func (a *Applier) ResetTo(seq uint64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -202,17 +276,28 @@ func (a *Applier) ResetTo(seq uint64) error {
 	if a.onReset != nil {
 		a.onReset()
 	}
-	if a.lastApplied == seq {
-		return nil
-	}
+	// No entry was applied at the baseline, so there is no checksum for it:
+	// the cursor is written back as the bare sequence number.
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, seq)
-	if err := a.db.Set(lastAppliedKey(), buf, pebble.Sync); err != nil {
+	batch := a.db.NewBatch()
+	defer batch.Close()
+	if err := batch.Set(lastAppliedKey(), buf, nil); err != nil {
+		return fmt.Errorf("applier: reset cursor %d: %w", seq, err)
+	}
+	if err := batch.Delete(replHaltKey(), nil); err != nil {
+		return fmt.Errorf("applier: reset cursor %d: %w", seq, err)
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
 		return fmt.Errorf("applier: persist reset cursor %d: %w", seq, err)
 	}
-	slog.Info("applier: apply cursor rebased onto snapshot baseline",
-		"previous", a.lastApplied, "baseline", seq)
+	if a.lastApplied != seq || a.halt != nil {
+		slog.Info("applier: apply cursor rebased onto snapshot baseline",
+			"previous", a.lastApplied, "baseline", seq, "refusal_lifted", a.halt != nil)
+	}
 	a.lastApplied = seq
+	a.hasSum = false
+	a.halt = nil
 	a.appliedSince = 0
 	return nil
 }

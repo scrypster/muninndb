@@ -366,10 +366,11 @@ func TestFetchJobStatus_ReturnsSnapOnOK(t *testing.T) {
 }
 
 func TestFetchJobStatus_ReturnsNilOnConnectionRefused(t *testing.T) {
-	// Port with nothing listening — fetchJobStatus should return nil.
-	snap := fetchJobStatus("some-job", "some-vault")
-	// It will try 127.0.0.1:8475 which is likely not running in CI; nil is fine.
-	_ = snap // either nil or a real snap — just must not panic
+	// Nothing listening at the admin base — fetchJobStatus must return nil.
+	withNoServer(t)
+	if snap := fetchJobStatus("some-job", "some-vault"); snap != nil {
+		t.Errorf("fetchJobStatus = %+v on a refused connection, want nil", snap)
+	}
 }
 
 // ---------------------------------------------------------------------------

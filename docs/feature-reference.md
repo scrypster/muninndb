@@ -22,8 +22,8 @@ A cognitive memory database for AI agents. Stores memories ("engrams"), retrieve
 ### SSE Push (Server-Sent Events)
 - `GET /api/subscribe` opens a long-lived SSE connection over REST
 - gRPC has bidirectional streaming `Subscribe` RPC
-- MBP has native push frames
-- All three protocols deliver real-time `ActivationPush` events
+- MBP does not deliver push events: a `SUBSCRIBE` over MBP is refused with an error that names the two above
+- REST and gRPC deliver real-time `ActivationPush` events
 
 ### Push Trigger Types
 - `new_write` — a new engram was written that matches your subscription context
@@ -404,7 +404,12 @@ The calling LLM already has full conversation context when it decides to remembe
 ### Optional fields on `muninn_remember` / `muninn_remember_batch`:
 - **summary** — one-line summary (skips background summarization)
 - **entities** — `[{"name": "PostgreSQL", "type": "database"}]` (skips entity extraction)
-- **relationships** — `[{"target_id": "01ABC...", "relation": "depends_on", "weight": 0.9}]`
+- **relationships** — `[{"target_id": "01ABC...", "relation": "depends_on", "weight": 0.9}]`.
+  On a write that creates a memory, a `supersedes` relationship is a declaration, not only an
+  edge: it does what `muninn_link(relation="supersedes")` does — the target is retired from
+  present-tense recall, atomically with the write — and the write is refused (nothing stored)
+  if the target is missing, forgotten, or already has a successor (the error names the current
+  version), or if the credential is append-mode.
 - **type** / **type_label** — memory classification
 
 ### Inline Enrichment Modes (per vault)

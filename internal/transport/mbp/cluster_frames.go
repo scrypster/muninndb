@@ -90,6 +90,19 @@ type JoinRequest struct {
 	Role            uint8    `msgpack:"role,omitempty"`  // joiner's NodeRole; 0 = legacy = replica (#529)
 	Probe           bool     `msgpack:"probe,omitempty"` // side-effect-free leader-discovery probe (#531 PR3)
 	ProtocolVersion uint16   `msgpack:"proto_ver,omitempty"`
+	// LastAppliedSum is the checksum of the entry the joiner applied at
+	// LastApplied (four bytes, big-endian), or empty when it has none: nothing
+	// applied yet, or its cursor was not written by a build that keeps one.
+	// The Cortex compares it with the entry it holds at that sequence number.
+	// Additive: a Cortex without the field ignores it.
+	LastAppliedSum []byte `msgpack:"last_applied_sum,omitempty"`
+	// Halted says the joiner was refused by a leader before and still holds
+	// the record. A Cortex then admits it only when it can confirm that the
+	// joiner's last entry is its own, and refuses it otherwise (Unverified),
+	// where a joiner without the record is admitted when nothing can be
+	// compared. Additive: a Cortex without the field ignores it, and the
+	// joiner then declines by itself (see JoinResponse.Matched).
+	Halted bool `msgpack:"halted,omitempty"`
 }
 
 // JoinResponse is the cluster's reply to a join request.
@@ -110,6 +123,37 @@ type JoinResponse struct {
 	SnapshotSeq            uint64 `msgpack:"snapshot_seq,omitempty"`
 	MinProtocolVersion     uint16 `msgpack:"min_proto_ver,omitempty"`
 	CurrentProtocolVersion uint16 `msgpack:"current_proto_ver,omitempty"`
+	// LeaderHeadSeq is the head of the Cortex's replication log when it
+	// answered: the highest sequence it has numbered. Only the Cortex sets it,
+	// on an accepted join and on the refusal of a joiner that is ahead of it.
+	//
+	// It is a pointer because absent and zero mean different things. A Cortex
+	// with an empty log reports 0, and a joiner that has applied anything is
+	// ahead of that. A Cortex built before this field existed reports nothing,
+	// and nothing can be concluded from that. A plain uint64 would decode both
+	// as 0.
+	//
+	// Additive: no protocol-version bump. A binary without the field ignores
+	// it on decode and omits it on encode.
+	LeaderHeadSeq *uint64 `msgpack:"leader_head_seq,omitempty"`
+	// Diverged is set on a refusal the Cortex gives because the joiner holds
+	// an entry the Cortex does not: its position is past the Cortex's log
+	// head, or its entry at that position is not the Cortex's. The joiner
+	// treats it as a condition only an operator can clear, not as a join to
+	// retry. Additive: a joiner without the field sees an ordinary rejection.
+	Diverged bool `msgpack:"diverged,omitempty"`
+	// Matched is set on an accepted join when the Cortex compared the
+	// joiner's last entry with its own and they are the same entry. Absent
+	// means nothing was confirmed: the Cortex could not compare, or it is a
+	// build that does not. A joiner that holds a refusal record follows only
+	// on Matched or a snapshot. Additive.
+	Matched bool `msgpack:"matched,omitempty"`
+	// Unverified is set on the refusal of a joiner that said it had been
+	// refused before (JoinRequest.Halted), when the Cortex cannot confirm that
+	// the joiner's last entry is its own. It is not a new proof that the two
+	// differ. The earlier refusal stands. Additive: a joiner without the field
+	// sees an ordinary rejection.
+	Unverified bool `msgpack:"unverified,omitempty"`
 }
 
 // SDownNotification is sent when a node marks another as subjectively down.

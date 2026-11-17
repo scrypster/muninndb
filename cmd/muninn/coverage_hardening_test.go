@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	plugincfg "github.com/scrypster/muninndb/internal/config"
@@ -640,15 +641,14 @@ func TestOverallState_Mixed(t *testing.T) {
 }
 
 func TestPrintStatusDisplay_Stopped(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer ts.Close()
-
+	withNoServer(t)
+	var state runState
 	out := captureStdout(func() {
-		printStatusDisplay(true)
+		state = printStatusDisplay(true)
 	})
-	_ = out
+	if state != stateStopped || !strings.Contains(out, "stopped") {
+		t.Errorf("no server answering: want stateStopped and 'stopped', got state %d, output: %s", state, out)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -813,10 +813,17 @@ func TestConfigureTools_Empty(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCheckVersionHint(t *testing.T) {
+	oldVersion, oldFn := version, latestReleaseFn
+	t.Cleanup(func() { version, latestReleaseFn = oldVersion, oldFn })
+	version = "v1.0.0"
+	latestReleaseFn = func() (releaseInfo, error) { return releaseInfo{TagName: "v1.1.0"}, nil }
+
 	out := captureStdout(func() {
 		checkVersionHint()
 	})
-	_ = out
+	if !strings.Contains(out, "Update available: v1.1.0") {
+		t.Errorf("expected the update hint for a newer release, got: %q", out)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -860,10 +867,23 @@ func TestPrintHTTPError_NoMessage(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRunShowVaults_NoServer(t *testing.T) {
-	out := captureStdout(func() {
-		runShowVaults()
-	})
-	_ = out
+	// Nothing may answer. Left at its defaults the command asks whatever is on
+	// ports 8475 and 8476, which on a developer's machine is their own daemon:
+	// a vault-list request and, now that the command signs in, a login with the
+	// default credentials. Port 0 is never a listener.
+	t.Setenv("MUNINNDB_ADMIN_URL", "http://127.0.0.1:0")
+	oldUI, oldCookie := vaultUIBase, vaultCookie
+	vaultUIBase, vaultCookie = "http://127.0.0.1:0", ""
+	defer func() { vaultUIBase, vaultCookie = oldUI, oldCookie }()
+
+	t.Setenv("MUNINNDB_DATA", t.TempDir()) // not this machine's own data directory
+	code, out := exitStatus(t, runShowVaults)
+	if code == 0 {
+		t.Errorf("exit status 0 although the server was not reached")
+	}
+	if strings.Contains(out, "Not signed in") || strings.Contains(out, "muninn vault list -u") {
+		t.Errorf("the server was never reached and nothing was listed, yet the output talks about the list:\n%s", out)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,9 +1157,12 @@ func TestRunUpgrade_UpToDate(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestProbeServices_AllDown(t *testing.T) {
+	withNoServer(t)
 	svcs := probeServices()
 	for _, s := range svcs {
-		_ = s.up
+		if s.up {
+			t.Errorf("service %q reported up with no server answering", s.name)
+		}
 	}
 	if len(svcs) != 3 {
 		t.Errorf("expected 3 services, got %d", len(svcs))
@@ -1147,6 +1170,7 @@ func TestProbeServices_AllDown(t *testing.T) {
 }
 
 func TestPrintStatusDisplay_Compact(t *testing.T) {
+	withNoServer(t)
 	out := captureStdout(func() {
 		state := printStatusDisplay(true)
 		_ = state
@@ -1155,6 +1179,7 @@ func TestPrintStatusDisplay_Compact(t *testing.T) {
 }
 
 func TestPrintStatusDisplay_Full(t *testing.T) {
+	withNoServer(t)
 	out := captureStdout(func() {
 		state := printStatusDisplay(false)
 		_ = state
@@ -1558,20 +1583,61 @@ func TestBuildEnricher_OllamaURL(t *testing.T) {
 	}
 }
 
+// rejectingOpenAI stands in for the OpenAI API: it records the bearer token
+// the connectivity probe sent and rejects it, so buildEnricher takes its
+// init-failure path without the test reaching the real provider.
+func rejectingOpenAI(t *testing.T) (gotAuth func() string) {
+	t.Helper()
+	var mu sync.Mutex
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MUNINN_OPENAI_URL", srv.URL)
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return auth
+	}
+}
+
 func TestBuildEnricher_OpenAIURL(t *testing.T) {
 	t.Setenv("MUNINN_ENRICH_URL", "openai://gpt-4o-mini")
 	t.Setenv("MUNINN_ENRICH_API_KEY", "fake-key")
 	t.Setenv("MUNINN_ANTHROPIC_KEY", "")
+	gotAuth := rejectingOpenAI(t)
 	result, failure := buildEnricher(context.Background(), plugincfg.PluginConfig{})
-	_, _ = result, failure
+	if result != nil || failure == nil {
+		t.Fatalf("a rejected key must disable enrichment with a recorded failure, got result=%v failure=%v", result, failure)
+	}
+	if got := gotAuth(); got != "Bearer fake-key" {
+		t.Errorf("probe sent Authorization %q, want the MUNINN_ENRICH_API_KEY value", got)
+	}
 }
 
 func TestBuildEnricher_AnthropicURL(t *testing.T) {
 	t.Setenv("MUNINN_ENRICH_URL", "anthropic://claude-haiku-4-5-20251001")
 	t.Setenv("MUNINN_ENRICH_API_KEY", "")
 	t.Setenv("MUNINN_ANTHROPIC_KEY", "fake-anthropic-key")
-	result, failure := buildEnricher(context.Background(), plugincfg.PluginConfig{})
-	_, _ = result, failure
+	// The Anthropic provider has no base-URL override, so the connectivity
+	// probe cannot be pointed at a local server. A cancelled context makes the
+	// probe fail before it dials; the key alias is what this test covers.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, failure := buildEnricher(ctx, plugincfg.PluginConfig{})
+	if result != nil || failure == nil {
+		t.Fatalf("an unreachable provider must disable enrichment with a recorded failure, got result=%v failure=%v", result, failure)
+	}
+	if failure.name != "enrich-anthropic" {
+		t.Errorf("failure name = %q, want enrich-anthropic", failure.name)
+	}
+	if strings.Contains(failure.err.Error(), "requires API key") {
+		t.Errorf("MUNINN_ANTHROPIC_KEY was not used as the API key: %v", failure.err)
+	}
 }
 
 func TestBuildEnricher_SavedConfigFallback(t *testing.T) {
@@ -1590,12 +1656,18 @@ func TestBuildEnricher_SavedConfigAPIKey(t *testing.T) {
 	t.Setenv("MUNINN_ENRICH_URL", "")
 	t.Setenv("MUNINN_ENRICH_API_KEY", "")
 	t.Setenv("MUNINN_ANTHROPIC_KEY", "")
+	gotAuth := rejectingOpenAI(t)
 	cfg := plugincfg.PluginConfig{
 		EnrichURL:    "openai://gpt-4o-mini",
 		EnrichAPIKey: "saved-key",
 	}
 	result, failure := buildEnricher(context.Background(), cfg)
-	_, _ = result, failure
+	if result != nil || failure == nil {
+		t.Fatalf("a rejected key must disable enrichment with a recorded failure, got result=%v failure=%v", result, failure)
+	}
+	if got := gotAuth(); got != "Bearer saved-key" {
+		t.Errorf("probe sent Authorization %q, want the saved-config key", got)
+	}
 }
 
 // ---------------------------------------------------------------------------

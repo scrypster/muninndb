@@ -40,16 +40,12 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 
 // isValidVaultName returns true if name is a valid vault name: 1–64 characters,
 // containing only lowercase letters, digits, hyphens, and underscores.
+//
+// The rule itself lives in auth.IsValidVaultName, so that the admin routes
+// here, MCP, and the checks every transport makes on a vault named by a caller
+// with no key are one rule and cannot drift apart.
 func isValidVaultName(name string) bool {
-	if len(name) == 0 || len(name) > 64 {
-		return false
-	}
-	for _, r := range name {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
-			return false
-		}
-	}
-	return true
+	return auth.IsValidVaultName(name)
 }
 
 // canonicalize returns a lowercase alphanumeric-only string for collision detection.
@@ -622,7 +618,9 @@ type EmbedStatusResponse struct {
 func (s *Server) handleEmbedStatus(w http.ResponseWriter, r *http.Request) {
 	vault := r.URL.Query().Get("vault")
 
-	statResp, err := s.engine.Stat(r.Context(), &StatRequest{Vault: vault})
+	// Admin route. With no vault named the count is the instance's, which is
+	// the server-wide answer; with one named it is that vault's either way.
+	statResp, err := s.engine.Stat(r.Context(), &StatRequest{Vault: vault, ServerWide: true})
 	totalCount := int64(-1)
 	if err == nil {
 		totalCount = int64(statResp.EngramCount)

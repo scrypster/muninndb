@@ -102,6 +102,7 @@ func buildEnvFileContent(embedProvider, enrichURL string) string {
 	b.WriteString("# MUNINN_GC_PERCENT=200\n")
 	b.WriteString("# MUNINN_RATE_LIMIT_GLOBAL_RPS=1000\n")
 	b.WriteString("# MUNINN_RATE_LIMIT_PER_IP_RPS=100\n")
+	b.WriteString("# MUNINN_MBP_MAX_CONNECTIONS=16\n")
 
 	return b.String()
 }

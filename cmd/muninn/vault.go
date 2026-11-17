@@ -24,7 +24,7 @@ func printVaultUsage() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  create      <name> [--public]                    Create and register a new vault")
-	fmt.Println("  list        [--pattern <glob>]                   List all vaults")
+	fmt.Println("  list        [--pattern <glob>]                   List vaults (every vault when signed in as admin)")
 	fmt.Println("  delete      <name> [--yes] [--force]             Delete a vault and all its memories")
 	fmt.Println("  clear       <name> [--yes] [--force]             Remove all memories from a vault")
 	fmt.Println("  clone       <source> <new-name>                  Clone a vault into a new vault")
@@ -64,9 +64,23 @@ func runVault(args []string) {
 	sub := remaining[0]
 	subArgs := remaining[1:]
 
-	// "list" uses the public API — no admin auth needed.
+	// "list": every vault on the server is an admin's answer. Without an admin
+	// session the server lists only the vault open to the caller, so sign in
+	// when that is possible without getting in the way — with the credentials
+	// given, or the defaults — and say so plainly when the list is the short
+	// one. It never prompts unless -p asked it to.
 	if sub == "list" {
-		runVaultList(subArgs)
+		signIn := signInForVaultList(username, password, prompted)
+		// Signed in means signed in to the server the list comes from. A
+		// session issued by another host is not sent there (sessionCookieFor).
+		if signIn == signedIn && !signedInTo(vaultAdminBase) {
+			signIn = signInElsewhere
+		}
+		outcome := runVaultList(subArgs)
+		printVaultListNotice(signIn, outcome)
+		if code := vaultListExitCode(signIn, outcome); code != 0 {
+			osExit(code)
+		}
 		return
 	}
 
@@ -220,7 +234,69 @@ func runVaultClear(args []string) {
 // vault list
 // ---------------------------------------------------------------------------
 
-func runVaultList(args []string) {
+// vaultListOutcome is what happened when `vault list` asked the server.
+type vaultListOutcome int
+
+const (
+	vaultsListed         vaultListOutcome = iota // the server answered with a list, which was printed
+	vaultListRefused                             // 401: the server lists nothing to this caller
+	vaultListUnreachable                         // the server could not be reached
+	vaultListFailed                              // any other failure, already reported
+)
+
+// printVaultListNotice says what the list just printed is, when it is not
+// every vault. Each line is true of the case it is printed in:
+//
+//   - Signed in as admin to the server that answered, the list is complete and
+//     there is nothing to add.
+//   - Not signed in, the server answers a caller with no credential with the
+//     ONE vault that request is on, the default vault, and only when that vault
+//     is public (SEC-25). It is not "the public vaults": another public vault
+//     is not listed either.
+//   - Not signed in with the default vault locked, the server lists nothing.
+//   - When the server was not reached, or failed some other way, nothing was
+//     listed and the error already printed is the whole story.
+//
+// It also says why there is no session, because the reasons call for different
+// things: the default credentials were refused, none were tried because the
+// server is another machine, or the session held belongs to another host.
+func printVaultListNotice(signIn vaultSignIn, outcome vaultListOutcome) {
+	if signIn == signedIn || (outcome != vaultsListed && outcome != vaultListRefused) {
+		return
+	}
+	const howTo = "To list every vault: muninn vault list -u <admin user> -p"
+	if outcome == vaultsListed {
+		fmt.Println()
+		fmt.Println("Not signed in as admin, so this is not every vault. Without a sign-in the")
+		fmt.Println("server lists only the default vault, and only because it is public. No")
+		fmt.Println("other vault is listed, public ones included.")
+	} else {
+		fmt.Println("Not signed in as admin, and the default vault is not public, so the server")
+		fmt.Println("lists no vaults to this command.")
+	}
+	switch signIn {
+	case signInNotAttempted:
+		fmt.Println("No credentials were given, and the default ones are not sent to another machine.")
+	case signInElsewhere:
+		fmt.Println("The sign-in went to a different host from the one the list came from, and a")
+		fmt.Println("session is sent only to the host that issued it. Set MUNINNDB_UI_URL to the")
+		fmt.Println("sign-in address of the server you are listing, or use -h.")
+	}
+	fmt.Println(howTo)
+}
+
+// vaultListExitCode is the status `vault list` and `show vaults` exit with. It
+// is zero only when a list was printed and nothing the user asked for failed:
+// a script must be able to tell a list from no list, and a refused password
+// from a short list.
+func vaultListExitCode(signIn vaultSignIn, outcome vaultListOutcome) int {
+	if outcome != vaultsListed || signIn == signInRefused {
+		return 1
+	}
+	return 0
+}
+
+func runVaultList(args []string) vaultListOutcome {
 	var pattern string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -238,23 +314,29 @@ func runVaultList(args []string) {
 	}
 
 	apiURL := vaultAdminBase + "/api/vaults"
-	resp, err := httpClientForURL(apiURL, 0).Get(apiURL)
+	resp, err := getWithAdminSession(apiURL)
 	if err != nil {
 		fmt.Printf("Error connecting to MuninnDB: %v\n", err)
 		fmt.Println("Is muninn running? Try: muninn status")
-		return
+		return vaultListUnreachable
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		// Not an error to report by number: the server lists nothing to a caller
+		// it has no session for when the default vault is locked. The caller
+		// says so (printVaultListNotice).
+		return vaultListRefused
+	}
 	if resp.StatusCode != http.StatusOK {
 		fmt.Printf("Error: HTTP %d\n", resp.StatusCode)
-		return
+		return vaultListFailed
 	}
 
 	var raw json.RawMessage
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		fmt.Printf("Error parsing response: %v\n", err)
-		return
+		return vaultListFailed
 	}
 
 	var names []string
@@ -267,7 +349,7 @@ func runVaultList(args []string) {
 
 	if len(names) == 0 {
 		fmt.Println("No vaults found.")
-		return
+		return vaultsListed
 	}
 
 	var matched int
@@ -287,6 +369,7 @@ func runVaultList(args []string) {
 	} else {
 		fmt.Printf("\n  %d vault(s)\n", matched)
 	}
+	return vaultsListed
 }
 
 // parseVaultArgs parses: <name> [--yes|-y] [--force|-f]
@@ -1099,9 +1182,13 @@ func exportVaultMarkdownOne(vaultName, outputFile string) error {
 	return nil
 }
 
+// listVaultNamesAdmin lists every vault on the server. It needs the admin
+// session its callers have already signed in for: without one the server
+// answers with the caller's own vault only, and "all vaults" would quietly
+// mean one.
 func listVaultNamesAdmin() ([]string, error) {
 	apiURL := vaultAdminBase + "/api/vaults"
-	resp, err := httpClientForURL(apiURL, 0).Get(apiURL)
+	resp, err := getWithAdminSession(apiURL)
 	if err != nil {
 		return nil, err
 	}

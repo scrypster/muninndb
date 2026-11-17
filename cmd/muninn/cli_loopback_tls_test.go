@@ -52,10 +52,10 @@ func TestLoginAdmin_LoopbackTLS(t *testing.T) {
 func TestShellValidateAdmin_LoopbackTLS(t *testing.T) {
 	ts := newSelfSignedLoginServer(t, "root", "pw")
 	defer ts.Close()
-	if err := shellValidateAdmin(ts.URL, "root", "pw"); err != nil {
+	if _, err := shellValidateAdmin(ts.URL, "root", "pw"); err != nil {
 		t.Fatalf("shellValidateAdmin over loopback TLS: %v", err)
 	}
-	if err := shellValidateAdmin(ts.URL, "root", "nope"); err == nil {
+	if _, err := shellValidateAdmin(ts.URL, "root", "nope"); err == nil {
 		t.Error("bad password must still fail over loopback TLS")
 	}
 }

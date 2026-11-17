@@ -69,11 +69,6 @@ func (e *Engine) ReindexFTSVault(ctx context.Context, vaultName string) (int64, 
 		return 0, fmt.Errorf("reindex-fts: clear keys: %w", err)
 	}
 
-	// Invalidate in-memory IDF cache so stale scores are not carried forward.
-	if e.fts != nil {
-		e.fts.InvalidateIDFCache()
-	}
-
 	// Step 2: Re-index all engrams using the current stemmed tokenizer.
 	var indexed int64
 	scanErr := e.store.ScanEngrams(opCtx, ws, func(eng *storage.Engram) error {

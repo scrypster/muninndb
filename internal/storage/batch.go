@@ -48,6 +48,9 @@ type pebbleStoreBatch struct {
 	// APPLIED in Commit, under the engrams' stripe locks, to the records as
 	// committed at that moment — see mutateEngram.
 	mutations []pendingMutation
+	// stamps are the StampValidUntil calls queued in this batch; Commit writes
+	// the provenance entry of each one that applied.
+	stamps []*pendingStamp
 }
 
 // pendingMutation is one mutateEngram call awaiting Commit.
@@ -57,6 +60,22 @@ type pendingMutation struct {
 	op             string
 	refuseUndelete bool
 	mutate         func(*Engram)
+	// quiet marks a single-field patch (StampValidUntil), as opposed to an
+	// update of the record: it does not move UpdatedAt, and when changed
+	// reports false after mutate ran, it writes nothing for the engram at all.
+	// Both mirror PebbleStore.StampValidUntil, whose batch form it is.
+	quiet   bool
+	changed func() bool
+}
+
+// pendingStamp is one StampValidUntil call awaiting Commit. applied is set by
+// the queued mutation when it actually closes (or moves) the window, so Commit
+// records provenance only for a stamp that happened.
+type pendingStamp struct {
+	ws      [8]byte
+	id      ULID
+	until   time.Time
+	applied bool
 }
 
 // batchAssocEdge is one association-cache invalidation owed by a batch.
@@ -362,6 +381,46 @@ func (b *pebbleStoreBatch) SupersedeEngram(ctx context.Context, ws [8]byte, id U
 	})
 }
 
+// StampValidUntil queues PebbleStore.StampValidUntil into the batch: it sets
+// the engram's ValidUntil (the single invalidation primitive, COG-19) and
+// nothing else — the lifecycle state and UpdatedAt are left alone, which is
+// what distinguishes a supersedes-link retirement from evolve's
+// SupersedeEngram. With onlyIfOpen an already-closed window is preserved and
+// nothing is written for the engram.
+//
+// It exists so a writer can retire a target in the SAME atomic commit as the
+// engram and the supersedes edge that justify the retirement: the direct method
+// commits on its own, and a crash between two commits would leave either the
+// edge without the stamp or the stamp without the edge. Like every queued
+// mutation it is applied at Commit to the record as committed at that moment,
+// under the engram's stripe lock (STO-24). The provenance entry
+// ("stamp-valid-until") is the direct method's, written after the commit and
+// only when the stamp applied.
+//
+// Its caller is the inline-supersedes write path (COG-38,
+// Engine.commitNewEngramSuperseding).
+func (b *pebbleStoreBatch) StampValidUntil(ctx context.Context, ws [8]byte, id ULID, until time.Time, onlyIfOpen bool) error {
+	st := &pendingStamp{ws: ws, id: id, until: until}
+	if err := b.mutateEngram(ctx, ws, id, "stamp valid_until", func(eng *Engram) {
+		if onlyIfOpen && !eng.ValidUntil.IsZero() {
+			return
+		}
+		if eng.ValidUntil.Equal(until) {
+			return // already exactly this; nothing to record
+		}
+		eng.ValidUntil = until
+		st.applied = true
+	}); err != nil {
+		return err
+	}
+	// The mutation just queued is a patch of one field, not an update of the
+	// record: mark it so (see pendingMutation.quiet).
+	m := &b.mutations[len(b.mutations)-1]
+	m.quiet, m.changed = true, func() bool { return st.applied }
+	b.stamps = append(b.stamps, st)
+	return nil
+}
+
 // mutateEngram queues mutate to be applied to the engram's record at Commit,
 // with the matching 0x01/0x02 writes and the 0x0B state index transition.
 //
@@ -428,6 +487,10 @@ func (b *pebbleStoreBatch) applyMutationsLocked(ctx context.Context) (unlock fun
 		eng      *Engram
 		oldState LifecycleState
 		op       string
+		// dirty: some mutation changed the record, so it is rewritten.
+		// touched: some mutation was an UPDATE of the record (not a quiet
+		// patch), so UpdatedAt moves.
+		dirty, touched bool
 	}
 	work := make(map[wkey]*working, len(b.mutations))
 	var order []wkey
@@ -446,6 +509,12 @@ func (b *pebbleStoreBatch) applyMutationsLocked(ctx context.Context) (unlock fun
 		}
 		before := w.eng.State
 		m.mutate(w.eng)
+		switch {
+		case !m.quiet:
+			w.dirty, w.touched = true, true
+		case m.changed == nil || m.changed():
+			w.dirty = true
+		}
 		if m.refuseUndelete && before == StateSoftDeleted && w.eng.State != StateSoftDeleted {
 			unlock()
 			return nil, fmt.Errorf("%s %s: %w", m.op, m.id.String(), ErrRestoreRequired)
@@ -455,7 +524,12 @@ func (b *pebbleStoreBatch) applyMutationsLocked(ctx context.Context) (unlock fun
 	now := time.Now()
 	for _, k := range order {
 		w := work[k]
-		w.eng.UpdatedAt = now
+		if !w.dirty {
+			continue // only quiet patches, and none of them changed anything
+		}
+		if w.touched {
+			w.eng.UpdatedAt = now
+		}
 		erfBytes, eerr := erf.EncodeV2(toERFEngram(w.eng))
 		if eerr != nil {
 			unlock()
@@ -618,6 +692,28 @@ func (b *pebbleStoreBatch) Commit() error {
 	for _, su := range b.stateUpdatedIDs {
 		b.ps.cache.Delete(su.ws, su.id)
 		b.ps.metaCache.Remove([16]byte(su.id))
+	}
+
+	// Provenance for the validity stamps that applied — the entry
+	// PebbleStore.StampValidUntil writes, so a target retired through a batch
+	// carries the same audit trail as one retired by a direct stamp.
+	if b.ps.provWork != nil {
+		for _, st := range b.stamps {
+			if !st.applied {
+				continue
+			}
+			note := "cleared"
+			if !st.until.IsZero() {
+				note = st.until.UTC().Format(time.RFC3339Nano)
+			}
+			b.ps.provWork.Submit(st.ws, st.id, provenance.ProvenanceEntry{
+				Timestamp: time.Now(),
+				Source:    provenance.SourceHuman,
+				AgentID:   "system:valid-until",
+				Operation: "stamp-valid-until",
+				Note:      note,
+			})
+		}
 	}
 
 	// Association caches — #818. Same post-commit placement and the same

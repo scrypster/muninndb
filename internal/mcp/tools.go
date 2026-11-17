@@ -53,6 +53,23 @@ const entityTypeDescription = "Entity type — OPTIONAL. Omit it and the server 
 const contentMarkupTip = " TIP: wrap entity names in [[double brackets]] — \"Migrated [[Auth Service]] to [[PostgreSQL]] 16\" — " +
 	"and they are registered as entities at ~2 tokens each. The brackets are removed from the stored text."
 
+// inlineRelationshipsDescription documents the `relationships` parameter of
+// muninn_remember. The supersedes sentences are load-bearing (COG-38): on a
+// write that creates a memory, an inline supersedes is the same declaration as
+// muninn_link(relation="supersedes") and has the same effect, including a write
+// that is REFUSED where it cannot be honoured — a caller must be able to learn
+// that from the schema, not from its first refusal. Kept short: every session
+// pays for it.
+const inlineRelationshipsDescription = "Relationships to existing memories. Creates associations at write time. " +
+	"A `supersedes` relationship on a new memory does exactly what muninn_link(relation=\"supersedes\") does: it retires the target from present-tense recall, atomically with this write. " +
+	"If the target is missing, forgotten, or already has a successor, the write is REFUSED and nothing is stored (the error names the target's current version). Append-mode keys are refused. " +
+	"It is not applied when the write returns `duplicate_content` or uses upsert_mode — link those explicitly."
+
+// inlineSupersedesBatchNote is the same rule for one item of
+// muninn_remember_batch, where a refusal is per item.
+const inlineSupersedesBatchNote = "A `supersedes` relationship on a new memory retires its target as muninn_link(relation=\"supersedes\") does; " +
+	"an item whose target is missing, forgotten, or already superseded fails alone (the error names the current version) and the rest of the batch is stored."
+
 func allToolDefinitions() []ToolDefinition {
 	vaultProp := map[string]any{
 		"type":        "string",
@@ -117,7 +134,7 @@ func allToolDefinitions() []ToolDefinition {
 					},
 					"relationships": map[string]any{
 						"type":        "array",
-						"description": "Relationships to existing memories. Creates associations at write time.",
+						"description": inlineRelationshipsDescription,
 						"items": map[string]any{
 							"type": "object",
 							"properties": map[string]any{
@@ -201,7 +218,7 @@ func allToolDefinitions() []ToolDefinition {
 										},
 										"required": []string{"target_id", "relation"},
 									},
-									"description": "Relationships to existing memories.",
+									"description": "Relationships to existing memories. " + inlineSupersedesBatchNote,
 								},
 								"entity_relationships": map[string]any{
 									"type": "array",

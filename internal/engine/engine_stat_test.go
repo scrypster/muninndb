@@ -9,8 +9,8 @@ import (
 
 // TestStat_AfterWrites writes 3 engrams, calls Stat(), and verifies EngramCount > 0
 // and StorageBytes >= 0.
-// Note: the Vault field in StatRequest is completely ignored — Stat() always returns
-// global stats from atomic counters and store.DiskSize().
+// The request names a vault, so the answer is that vault's own (SEC-24): its
+// engram count, and no on-disk size, which is a server-wide figure.
 func TestStat_AfterWrites(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
@@ -51,9 +51,10 @@ func TestStat_AfterWrites(t *testing.T) {
 	}
 }
 
-// TestStat_EmptyVaultField verifies that Stat() with an empty Vault field also
-// returns global stats without error. Since the Vault field is ignored by Stat(),
-// both calls should succeed and return consistent results.
+// TestStat_EmptyVaultField verifies that the server-wide Stat() with an empty
+// Vault field returns the server's totals. Server-wide is asked for by name:
+// an empty Vault alone is the default vault (SEC-24,
+// TestStat_NoVaultNamedIsTheDefaultVaultNotTheServer).
 func TestStat_EmptyVaultField(t *testing.T) {
 	eng, cleanup := testEnv(t)
 	defer cleanup()
@@ -69,8 +70,8 @@ func TestStat_EmptyVaultField(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	// Stat with empty Vault field — must return global stats without error.
-	stat, err := eng.Stat(ctx, &mbp.StatRequest{Vault: ""})
+	// Server-wide Stat with empty Vault field — must return global stats without error.
+	stat, err := eng.Stat(ctx, &mbp.StatRequest{Vault: "", ServerWide: true})
 	if err != nil {
 		t.Fatalf("Stat(Vault=\"\"): %v", err)
 	}
