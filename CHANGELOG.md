@@ -17,9 +17,8 @@ Nothing yet.
 
 The same code as 0.12.0, released again because the 0.12.0 release workflow could not
 build its macOS binaries. The macOS runner it named is no longer offered, so no GitHub
-release, binaries or Homebrew formula were published for 0.12.0. Its npm package and
-Docker image were published and hold the same code as this release. Read the 0.12.0 entry
-for what changed.
+release, binaries or Homebrew formula were published for 0.12.0. Its Docker image was
+built and pushed with the same code as this release. Read the 0.12.0 entry for what changed.
 
 ### Fixed
 
