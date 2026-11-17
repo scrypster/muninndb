@@ -366,6 +366,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The cluster documentation said traffic between cluster nodes used mutual TLS with generated certificates. It does not, in this or any earlier release: the cluster `tls` setting is read but never applied, and the replication stream is plain TCP. The documentation now says so, explains what the cluster secret does and does not authenticate, and says how to run a cluster safely: on a private network or over an encrypted tunnel, with the cluster port reachable only by other cluster members. Single-node servers are not affected.
 - An append-mode key can no longer supersede another memory by writing. Append keys may
   create memories and read; they may not modify existing ones, and `muninn_link`, evolve and
   forget were already refused. But a `supersedes` link sent inline on `muninn_remember` (or
