@@ -77,7 +77,7 @@ prefix — see the vault-reuse note at the bottom).
 
 | Prefix | Key shape | Value | Notes |
 |---|---|---|---|
-| 0xFF "vcount_clean" | none (global singleton) | BE uint64 FNV-64 of every 0x15 count key and value | **clean-shutdown marker for the vault counts (STO-30).** Written by `PebbleStore.Close` after its final sweep, deleted by `NewPebbleStore` at open. Absent or mismatched means recount. Lives with the other `0xFF` ASCII-named singletons (`mig_ver` in `storage/migrate`, `last_mol_seq` in `wal`), which no prefix scan of any binary reaches, so older binaries ignore it |
+| 0xFF "vcount_clean" | none (global singleton) | BE uint64 FNV-64 of every 0x15 count key and value | **clean-shutdown marker for the vault counts (STO-30).** Written by `PebbleStore.Close` after its final sweep, never by a process that applied a replicated commit, deleted by `NewPebbleStore` at open. Absent or mismatched means recount. Lives with the other `0xFF` ASCII-named singletons (`mig_ver` in `storage/migrate`, `last_mol_seq` in `wal`), which no prefix scan of any binary reaches, so older binaries ignore it |
 | 0x40 | hash16 | Capability (JSON) | cap_ tokens (#612), relocated off 0x15/0x16 |
 | 0x41 | vault+0x00+capID(8) | storageHash16 | cap_ vault index |
 | 0x42 | username-bytes | AdminUser (JSON) | relocated from 0x11 by #618 |
