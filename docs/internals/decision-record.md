@@ -2336,3 +2336,44 @@ unrelated.
 text on byte-identical frozen recall responses, invented corpus) is pre-registered in the
 design and prepared but not run; its HARM branch (correct use of a moderate gold row falls
 10 points or more) would revert the tool and guide wording and leave the doc corrections.
+
+### Association decay spares supersedes edges and never writes over another relation (2026-11-16)
+
+**What was found.** A review of the inline-supersedes work reproduced, on develop and through
+the real decay pass, five ways decay removed or moved a supersedes edge: archived after a day
+when declared just above the floor, archived about 120 days idle once the Hebbian worker had
+co-activated the pair, deleted by the first pass when declared with a negative weight, and
+erased by a floor collision with another relation on the same pair, in either order. Each left
+the target stamped with no successor, so the fork guard admitted a rival, and a recall's lazy
+restore then made a permanent fork. The floor collision also erases a non-supersedes relation.
+
+**What was decided, and why.**
+- *Decay skips supersedes edges entirely.* A supersedes edge is a declaration that something is
+  retired, not a measure of co-activation, so nothing about its weight should change what it
+  declares. Recall reads a declared chain through the relation, not the weight.
+- *A move onto a key held by another relation is not made: the edge keeps its weight.* The
+  alternatives were nudging it to the next free key (new weights that no one chose, and a
+  search loop) or archiving it (which loses the edge from live reads). With decay running every
+  minute or so against a 30-day half-life, an edge reaches the floor in small steps, so where it
+  is kept off the floor key it sits just above `minWeight`, about 0.05, which is close to the
+  floor it was headed for. An archive that would replace another relation's 0x25 row clamps to
+  the floor instead, for the same reason.
+- *The check holds the pairs' STO-15 locks through the commit,* because a check without them
+  reopens the race #925 closed for `WriteAssociation`.
+- *Negative weights are not clamped on REST, gRPC or MBP in this change.* With supersedes edges
+  exempt, a negative weight can no longer remove a declaration. On any other relation the key
+  already saturates to 0, every reader sees weight 0, and decay removing such an edge is the
+  documented fate of an edge with no positive peak. Clamping or refusing out-of-range weights
+  on those transports changes what a public API accepts, and is its own decision.
+- *Archived supersedes rows are restored once per vault, by the leader, under the target's lock.*
+  The lazy restore runs on recall and cannot hold the target's evolve lock, so it now leaves
+  supersedes rows alone. Without a one-off restore those rows would then never come back and
+  their targets would look free forever. The restore runs from the leader's decay pass, not the
+  per-node startup pass, because its decision depends on a target's current successors: a
+  lagging follower deciding alone could fork a target the leader does not. When a target already
+  has another successor, the restore changes nothing and logs the three memories, because either
+  answer (restore into a fork, or delete the archived claim) would be the server choosing.
+- A census of a copy of production data (15 vaults) found no archived supersedes row, 122
+  supersedes edges at their floor, and 1,894 supersedes pairs that also carry another relation,
+  so the floor collision was the live exposure there and the restore is insurance for other
+  stores.

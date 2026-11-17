@@ -42,6 +42,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Association decay no longer touches a `supersedes` link, and no longer erases one link with
+  another. A `supersedes` link is what marks a memory as replaced, and decay treated it like any
+  other link. It could archive it (one declared at a very low weight, after a day, or one that
+  recall had often returned beside the memory it replaced, after about four months unused),
+  delete it (one sent with a negative weight over REST, gRPC or MBP), or overwrite it when
+  another link between the same two memories decayed to the same weight. The replaced memory
+  still stayed out of ordinary recall. But in the history view (`include_invalid`, `as_of`) it
+  lost its `superseded_by` and `current_version`, a later link or evolve naming it was accepted
+  where it should have been refused, and once recall touched the original link again the memory
+  had two successors for good. From then on its history names no current version, and every
+  later supersede or evolve of it is refused as forked. To tell whether a store was affected,
+  look for a memory you replaced whose history view shows no `superseded_by`, or a refusal that
+  calls one of your memories forked. After the upgrade, the leader's first decay pass puts back
+  every archived `supersedes` link whose memory nothing else has replaced since, and logs how
+  many it restored. Where something has, the memory has two declared replacements. The server
+  changes neither: the live replacement stays in effect, the archived one stays archived, and a
+  WARN names the memory and both replacements. To keep the archived one instead, permanently
+  delete the live one and declare the archived one again with `muninn_link`. Decay
+  and the archive restore also no longer overwrite a link of one relation with a link of
+  another between the same two memories, which used to happen when both reached the same
+  weight.
 - Swift SDK: `writeBatch` no longer fails on every successful batch. The SDK expected each
   item of the response to carry `created_at`, which the server has never sent, so decoding
   threw `keyNotFound` after the memories had already been stored. `BatchWriteResult` now has
