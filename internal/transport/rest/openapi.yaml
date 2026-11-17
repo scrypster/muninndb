@@ -1035,20 +1035,42 @@ components:
 
     StatResponse:
       type: object
+      description: >-
+        Statistics for the scope named in `scope`. A vault API key, or no
+        credential on a public vault, entitles the caller to one vault and the
+        answer covers that vault only. Only an admin session gets the
+        server-wide answer.
       properties:
-        engramCount:
+        scope:
+          type: string
+          enum: [vault, server]
+          description: >-
+            What the figures cover. `vault`: the caller's one vault. `server`:
+            every vault on the server (admin session only).
+        engram_count:
           type: integer
           format: int64
-        vaultCount:
+          description: "Engrams in the request's vault."
+        vault_count:
           type: integer
-        indexSize:
+          description: >-
+            At `vault` scope, always 1 (the vault in scope). At `server` scope,
+            the number of vaults on the server.
+        index_size:
           type: integer
           format: int64
-        storageBytes:
+          description: "Vector index bytes for the request's vault."
+        storage_bytes:
           type: integer
           format: int64
+          description: >-
+            At `server` scope, the store's on-disk size. At `vault` scope,
+            always 0: the on-disk size is one figure for every vault.
         coherence:
           type: object
+          description: >-
+            Coherence metrics keyed by vault name. At `vault` scope, at most
+            the caller's own vault. At `server` scope, every vault.
           additionalProperties:
             $ref: "#/components/schemas/CoherenceResult"
 
@@ -2237,8 +2259,15 @@ paths:
   /api/hello:
     post:
       tags: [health]
-      summary: "Protocol handshake — returns session metadata."
-      security: []
+      summary: "Protocol handshake — returns session metadata and registers the vault's name."
+      description: >-
+        Registers the name of the vault the request is authorised for, so the
+        vault is listed before anything is written to it. With an API key that
+        is the key's vault, and naming any other is refused. With no key the
+        vault named must be public. Under an admin session it is the vault
+        named in the body.
+      security:
+        - BearerAuth: []
       requestBody:
         required: false
         content:
@@ -2272,6 +2301,10 @@ paths:
                     type: array
                     items:
                       type: string
+        "400":
+          description: "The body names a vault other than the one the request is authorised for, or something that is not a vault name."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /api/workers:
     get:
@@ -2289,7 +2322,12 @@ paths:
   /api/stats:
     get:
       tags: [health]
-      summary: "Return database statistics."
+      summary: "Return statistics for the caller's vault."
+      description: >-
+        Answers about the one vault the caller is entitled to: the key's vault,
+        or the public vault named in `vault`. Nothing about any other vault is
+        returned. With an admin session the answer is server-wide
+        (`scope: server`).
       security:
         - BearerAuth: []
       parameters:
@@ -2781,7 +2819,14 @@ paths:
             default: 10
       responses:
         "200":
-          description: "SSE event stream (text/event-stream)."
+          description: >-
+            SSE event stream (text/event-stream). Events: `subscribed` once,
+            `push` for each delivery, `ping` every 30 seconds, and `error` when
+            the server ends the stream. The stream is authorised for as long as
+            what authorised it holds: before every push and on every ping the
+            server checks the API key again (or, with no key, that the vault is
+            still public) and ends the stream with an `error` event when the
+            key has been revoked or has expired.
           content:
             text/event-stream:
               schema:
@@ -2878,21 +2923,24 @@ paths:
   /api/vaults:
     get:
       tags: [vault]
-      summary: "List all vault names."
+      summary: "List the vaults the caller may be told about."
+      description: >-
+        With a vault API key, or no credential on a public vault, the list is
+        the caller's one vault. Only an admin session is told every vault on
+        the server.
       security:
         - BearerAuth: []
       responses:
         "200":
-          description: "Vault names."
+          description: >-
+            Vault names, as a JSON array. One name for a key or a public-vault
+            caller; every vault for an admin session.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  vaults:
-                    type: array
-                    items:
-                      type: string
+                type: array
+                items:
+                  type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
 

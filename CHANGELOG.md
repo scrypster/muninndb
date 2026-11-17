@@ -451,6 +451,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup error instead of being overwritten. To check yours, run
   `LC_ALL=C tr -d ' \t\r\n\v\f\000' < <data-dir>/auth_secret | wc -c`: if it prints 0, the file was
   blank and the server was affected. A file size above zero is not enough to rule it out.
+  **Who is affected:** a server whose `auth_secret` file was blank, in every release from
+  v0.1.0 to v0.11.0. Every one of them reads the file as it is and treats an empty
+  secret as "no admin sign-in needed". A server whose file holds a real secret, which is
+  what a normal first run writes, was never affected.
 
 - gRPC now refuses read calls from an ingest-only key. A `write`-mode API key is meant to
   store memories and read nothing; REST and MCP enforced that, the gRPC handlers for Read,
@@ -459,6 +463,476 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PermissionDenied` ("write-only key cannot read") before the engine is called. Every RPC
   is classified as a handshake, a read, a mutation or both, and a test checks every
   credential mode against every RPC, so a new RPC cannot be added without that decision.
+  **Who is affected:** anyone who has issued a `write`-mode key to a holder who can reach
+  the gRPC port (8477), in releases v0.3.15-alpha to v0.11.0. `write`-mode keys exist
+  from v0.3.15-alpha, and no release checks for them on gRPC. `ListVaults` is in gRPC
+  from v0.8.0. What such a key could read was its own vault.
+
+- MBP now enforces API-key modes. The native binary protocol (port 8474) authenticated a key
+  and recorded its mode, but nothing checked the mode before acting on a request. Over MBP an
+  `observe` (read-only) key could store memories, rewrite an existing one (an upsert under a
+  key that already had a memory), link two memories (including marking them as
+  contradicting each other) and soft- or hard-delete them. A `write` (ingest-only) key could
+  read a memory by id, run recall across the vault and read statistics. In both cases the
+  memories the key could reach were those of its own vault. REST and MCP were not
+  affected. gRPC had the ingest-only half of this, which the entry above covers. And
+  `append` keys were already kept from changing or deleting existing memories
+  by the engine, on every transport.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by the holder of an
+  `observe` or `write` key, in every release up to v0.11.0. The MBP transport has never
+  checked a key's mode. If the only keys you have issued are `full` or `append`, nothing
+  changes for you. Whether your MBP port can be reached at all is covered in "Which
+  deployments expose the MBP port" below. Before v0.6.2 the exposure was wider than key
+  modes. The MBP transport did not confine a session to its key's vault and accepted a
+  session with no key at all (fixed in v0.6.2, #484), so on those releases every vault was
+  reachable over MBP by anyone who could reach the port.
+  **What to do:** upgrade. Until you have, do not let holders of `observe` or `write` keys
+  reach the MBP port. REST, gRPC and MCP enforce the modes and can stay open to those keys.
+  If an `observe` key was exposed that way, treat the memories in its vault as writable by
+  whoever held it, and the vault's contents as readable by whoever held a `write` key.
+  Revoking such a key on an affected release stops new connections only. A holder who is
+  already connected over MBP keeps the access described here until the connection closes,
+  so revoke the key and then restart the server. From this release, revoking a key ends
+  the MBP connections opened with it (see the revocation entry below).
+  **What changed:** a mutating request from an `observe` key and a reading request from a
+  `write` key are now refused with error `4010` ("read-only key cannot write" /
+  "write-only key cannot read") before the engine is called, with the same answer whether or
+  not the memory named in the request exists. An MBP client that used an `observe` key to
+  write, or a `write` key to read, will now get that error and needs a key of the right mode.
+  Every request type the MBP server handles is classified as a read, a mutation or neither,
+  a request type with no classification is refused to everyone, and a test checks every kind
+  of session against every request type, so one cannot be added without that decision
+  (SEC-20).
+
+- MBP no longer decodes a compressed request before checking how large it is
+  (decompression bomb). A compressed frame was decoded in full and only then compared with
+  a 100 MB limit, so the decoder allocated whatever the frame's header claimed. A frame of
+  a few kilobytes cost tens of megabytes, and one a little larger cost gigabytes, before
+  the server answered. The frame could be a PING, which every session may send.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
+  trust, in every release from v0.2.0 to v0.11.0. v0.1.0 is not in that range because its
+  decompressor never read the frame's payload at all, so it refused every compressed
+  frame without decoding anything. No key is needed when any vault is public, and the
+  `default` vault is public out of the box. With no public vault, any valid key of any
+  mode is enough.
+  **What a client could do:** exhaust the server's memory with a handful of small frames.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port
+  (see "Which deployments expose the MBP port" below).
+  **What changed:** a compressed frame may decode to at most 16 MB, which is what an
+  uncompressed frame may carry. The limit was 100 MB. It is now enforced while decoding,
+  so refusing a frame costs memory in proportion to the limit and not to what the frame
+  claims. A compressed payload must be exactly one zstd frame. One connection may have at
+  most 32 MB of decoded payload in flight. A compressed frame that does not fit is
+  answered at once with error `4012` and can be retried when earlier requests have been
+  answered. The other refusals are error `5005` with a message beginning
+  "decompression failed". No request the server accepts is near these limits (an engram's
+  content is at most 16 KB), but a client that concatenated several zstd frames into one
+  payload, compressed with a window over 16 MB (`--ultra` or `--long` modes), or sent more
+  than 16 MB decoded will now get an error (SEC-21).
+
+- A client that disconnects in the middle of an MBP request no longer crashes the server.
+  When a connection closed, the server closed that connection's outgoing queue without
+  waiting for the requests it was still handling. The first of them to finish then tried
+  to answer on the closed queue, which is a fatal error nothing caught, and the whole
+  process exited, taking every vault and REST, gRPC and MCP with it. No intent was
+  needed. A client that timed out or was killed with a request in flight had the same
+  effect.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
+  trust, in every release up to v0.11.0. No key is needed when any vault is public, and
+  the `default` vault is public out of the box. With no public vault, any valid key of
+  any mode is enough.
+  **What a client could do:** stop the server at will, by sending a request and closing
+  the connection before the answer.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port
+  (see "Which deployments expose the MBP port" below), and run the server under
+  something that restarts it. An unexplained exit with
+  `panic: send on closed channel` in the server log was this.
+  **What changed:** a connection now waits for the requests it is handling before it
+  closes its outgoing queue. Requests received before the client left are still carried
+  out and their answers are discarded (SEC-22).
+
+- Revoking an API key now ends what is open with it: MBP connections, and the push
+  streams on REST and gRPC. These three looked at a key once, when the connection or
+  stream opened. Revoking the key, or the key passing its expiry, stopped new ones only.
+  An MBP connection that was already open kept working (reading, writing and deleting,
+  to the limit of the key's mode) for as long as its holder kept it open. An open push
+  stream (REST `GET /api/subscribe`, or the gRPC `Subscribe` stream) kept receiving new
+  memories from the vault, content included, while the same key was refused everywhere
+  else. Either could last indefinitely.
+  **Who is affected:** anyone who has revoked a key, or issued one with an expiry, whose
+  holder could reach the MBP port (8474), the REST port (8475) or the gRPC port (8477),
+  in every release up to v0.11.0. Revocation on those releases did not cut off a holder
+  who was already connected.
+  **What to do:** upgrade. On an affected release, revoke the key and then restart the
+  server, which closes every connection and stream. Revoking alone is not enough. If you
+  revoked a key because it leaked, treat the vault as readable by whoever held it until
+  the restart or upgrade.
+  **What changed:** from this release, every MBP request re-checks the key its connection
+  was opened with. After a key is revoked or expires, the next request on any connection
+  opened with it is refused with error `4010` ("api key is no longer valid") and the
+  server closes the connection. A request that was already being carried out when the
+  key was revoked completes. A push stream re-checks before every push it sends and,
+  when it has nothing to send, every 30 seconds. When the key is no longer valid the
+  stream ends: REST sends an `error` event and closes the response, gRPC ends the call
+  with `Unauthenticated`. A push that was already sent has been delivered. A connection
+  or stream with no key, on a public vault, is ended the same way when the vault is made
+  private. The check costs two to four microseconds per request or push.
+  **What a client will notice:** a client that keeps a stream open on a key that is then
+  revoked, or that expires, now sees the stream end with that error. Reconnecting with
+  the same key fails.
+  **Not covered:** streams opened under an admin session are not ended when the session's
+  24 hours run out, or by logging out. These are the web console's live event stream,
+  which carries the concepts of newly added memories and the tail of the server log,
+  the cluster event stream, and `GET /api/subscribe` when it is opened with a session
+  cookie. Logging out clears the cookie in the browser. It does not close a stream that
+  is already open, and it does not end the session itself, which stays valid until its
+  24 hours are up. Closing the browser tab closes the console's streams (SEC-23).
+
+- An MBP connection now has 15 seconds to complete its handshake. Until now there was no
+  limit. A client that connected and sent nothing, or part of a handshake, held a
+  connection and its resources on the server for as long as it kept the socket open, and
+  a 16-byte header claiming a 16 MB handshake made the server set that memory aside at
+  once. Neither needed a key.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
+  trust, in every release up to v0.11.0.
+  **What a client could do:** hold connections, and 16 MB of memory for each, without
+  authenticating and without sending more than a few bytes.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port.
+  **What changed:** a connection that has not completed its handshake within 15 seconds
+  of being accepted is closed. The limit covers the whole handshake, so sending a byte
+  now and then does not extend it. It is the same 15 seconds the REST server allows for a
+  request to arrive. A handshake may be at most 64 KB and a larger one is refused before
+  any memory is set aside for it. Once the handshake is done the connection is not on
+  a clock, and may stay idle (SEC-27).
+
+- `POST /api/hello` no longer lets a caller with no credential register vaults. The
+  route had no authentication, and it recorded whatever vault name the request carried.
+  Anyone who could reach the REST port could add vault names to the server, 100 a second
+  from one address under the default rate limit, each written to storage for good. The
+  names were not checked, and they showed up in the admin vault list, in the web
+  console and in the server's vault count. A key for one vault could register other
+  names the same way. No memory could be read or written through this, and no key or
+  vault setting was created.
+  **Who is affected:** anyone whose REST port (8475) can be reached by a client they do
+  not trust, in every release from v0.3.0-alpha to v0.11.0. Releases before v0.3.0-alpha
+  did not record the name.
+  **What to do:** upgrade. Then look at your vault list (`muninn vault list -u <admin
+  user> -p`, or the console) for vaults you did not create, and delete them. Upgrading
+  does not remove names that were added earlier.
+  **What changed:** the route now takes the same credentials as every other route that
+  names a vault, and registers only the vault the caller is entitled to. With a key
+  that is the key's vault. With no key it is a vault that is already public. Signed in
+  as admin it is the vault named, which is what the console does after creating one. In
+  a cluster the name is recorded on the primary node only.
+  **What a client will notice:** a hello with no key for a vault that is not public is
+  now answered 401, where it was 200. A hello with a key that names a different vault is
+  answered 400. A hello with a key for its own vault, with or without naming it, works
+  as before, and the response now always carries the vault's name in `vault_id`
+  (SEC-29).
+
+- A caller with no key can no longer make the server's memory and log grow by naming
+  vaults. Every request made without a key names a vault (or means `default`), and the
+  server looks the name up to see whether that vault is public. Each name it did not
+  recognise was kept for the life of the process, so that the "vault has no explicit
+  config" warning is logged once per vault, and was written to the log in full. The name
+  was whatever the caller sent. 2,000 MBP handshakes naming different 32 KB vaults left
+  the server 80 MB larger with no connection open, and 200 gRPC calls naming different
+  1 MB vaults left it 200 MB larger. None of them needed a key, and each was refused.
+  **Who is affected:** anyone whose REST port (8475) or gRPC port (8477) can be reached by
+  a client they do not trust, in every release from v0.2.0 to v0.11.0, and the MBP port
+  (8474) from v0.6.2. v0.1.0 kept nothing, but wrote a log line for every such request.
+  **What to do:** upgrade. Until then, keep those ports away from untrusted clients, and
+  if the server's memory has grown for no reason and its log is full of "vault has no
+  explicit config" warnings naming vaults you do not have, restart it.
+  **What changed:** two things. A name that no vault can have (anything other than 1 to
+  64 lowercase letters, digits, hyphens and underscores) is now refused before it is
+  looked up, and the refusal no longer repeats the name. And the server remembers at
+  most 256 unrecognised names, each cut to 64 characters. The log line for each, and the
+  one line saying it has stopped remembering, are written at DEBUG, because a caller
+  with no key can cause them.
+  **What a client will notice:** a request without a key that names a vault with an
+  invalid name used to be answered "vault ... requires an API key". The message is now
+  "invalid vault name". The status is unchanged: HTTP 401 with code `VAULT_LOCKED` on
+  REST, `Unauthenticated` on gRPC, error `4010` on MBP. Over gRPC and MBP a request with
+  a key that names some other vault with an invalid name gets the same message, also
+  under the status it had before. Requests naming a well-formed vault are answered
+  exactly as before.
+  **What an operator will notice:** nothing at the default log level. The startup line
+  that lists vaults with no explicit configuration is built from the vaults the server
+  stores, so it does not depend on what callers have asked about (SEC-27).
+
+- The MBP listener now limits how many connections it holds. There was no limit. A
+  client that could reach the port could open connections until the server ran out of
+  memory or file descriptors, and needed no key to do it.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
+  trust, in every release up to v0.11.0.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port.
+  **What changed:** the listener holds at most a fixed number of connections, counted
+  from the moment each one is accepted. A connection past the limit is answered with
+  error `4012` ("server is at its connection limit") and closed. The default comes from
+  the server's memory limit. It is the number of connections that fit in a quarter of
+  that limit if every one of them holds as much as a connection can, which is 69 MB (see
+  the next entry), and never fewer than 16. At the default `MUNINN_MEM_LIMIT_GB=4` only 14
+  fit, so the default there is the minimum, 16. It is 59 at 16 and 237 at 64. Set
+  `MUNINN_MBP_MAX_CONNECTIONS` to choose the number yourself. The server logs
+  the limit in force when it starts, as `max_connections` on the `mbp: listening` line.
+  **If you run more than 16 MBP clients at once, set it before you upgrade, or the extra
+  clients will be refused.** Refusals are logged at WARN
+  at most once every 10 seconds, with a count. The limit keeps the server and its other
+  transports running when someone floods this port. It does not keep the port usable.
+  One source can occupy every connection slot, and other MBP clients are then refused
+  until it lets go (SEC-28).
+
+- An MBP client that does not read its replies can no longer make the server hold them.
+  Replies waited in a queue of 256 with no limit on their size, and the server kept
+  writing to a client that was not reading for as long as the client stayed connected.
+  A client that sent requests and never read the answers kept every answer in the
+  server's memory. One connection with no key held 192 MB with sixteen requests, and 183
+  MB with two hundred ordinary recalls, until it disconnected. The limit was about 5 GB
+  for one connection. A client that sent more than 256 requests before reading also lost
+  answers without being told: of 1,000, between 75 and 134 never arrived.
+  **Who is affected:** anyone whose MBP port (8474) can be reached by a client they do not
+  trust, in every release up to v0.11.0. No key is needed when a vault is public. A
+  well-behaved client that pipelined more than 256 requests was affected by the lost
+  answers.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP port.
+  **What changed:** four things. The replies one connection has not read are limited to
+  17 MB. A read or a recall takes its share of that before it is carried out, and waits
+  if there is no room, so a slow client is served at the speed it reads and every request
+  it sent is answered. The server stops reading requests from a connection whose replies
+  are backing up, and from one that has 4 MB of requests in progress. And a connection
+  whose socket accepts no reply data at all for 15 seconds is closed. There is no limit
+  on how long one reply may take, but a slow reader can still be closed: see "A slow
+  reader can be disconnected" below. With this, one connection can make the server hold
+  at most 69
+  MB of requests and replies: 20 MB of requests in progress, 32 MB of decompressed
+  payloads and 17 MB of unread replies. The same test now holds 16 MB where it held 183.
+  **What a client will notice:** a `PING` may carry at most 1,024 bytes. A larger one is
+  refused with error `4003`. `PONG` repeats what `PING` sent, and that was the cheapest
+  way to make the server queue large replies. A reply too large for one frame (16 MB) is
+  now refused with error `4013`, "ask for fewer results". Before, it stopped every later
+  reply on the connection. More than 256 pipelined requests are now all answered.
+  **A slow reader can be disconnected.** A client that stops reading for 15 seconds
+  while replies are waiting is disconnected, and so can a client that is reading, if it
+  reads slowly and has a lot waiting. The server can only see whether its own socket
+  takes more data, and the operating system takes it in large steps: about the first
+  megabyte of waiting replies at once, and then nothing until the client has worked
+  through a good part of that. Measured on one machine with 3.5 MB of replies waiting,
+  over TLS: a client reading 64 KB a second was served, and a client reading 8 KB a
+  second was disconnected after 15 seconds in which the socket took nothing. With 1 MB
+  waiting, TLS clients reading 2 to 16 KB a second were disconnected and clients
+  reading 32 and 64 KB a second were served, and without TLS clients reading 1 to 16 KB
+  a second were served, because the whole megabyte fitted at once. A client that reads
+  each reply as it arrives never has that much waiting and is not affected. A client
+  that requests megabytes of replies and reads them slower than a few tens of KB a
+  second should request less at a time.
+  **What this does not cover:** the memory the server uses to carry out requests. One
+  connection can have 64 in progress at once, on this port as on the others (SEC-30).
+
+- Limits of the MBP listener that this release does not change. The fixes above do not
+  make it safe to expose the MBP port to clients you do not trust. A connection that has
+  completed its handshake has no idle timeout, and a request that is being read has no
+  deadline. The memory for a request is set aside as soon as its 16-byte header arrives,
+  up to 16 MB, so a connection can hold that much for sixteen bytes. The connection
+  limit bounds how many connections there are, and each can hold up to the 69 MB
+  described above. One source can occupy every connection slot, with no key
+  if any vault is public, and lock other clients out of this port. The limit is not
+  applied per source address, because clients on the same machine, behind a proxy, or
+  reaching a container through a published port all arrive from one address. A client
+  that can reach the port can therefore still tie up memory and connections. Keep the
+  port off untrusted networks: leave 8474 on loopback or put it behind a firewall. The
+  next paragraph says which deployments expose it.
+
+- Which deployments expose the MBP port (for the MBP entries above). The server binds
+  every port, MBP's 8474 included, to `127.0.0.1` unless it is told otherwise, so by
+  default MBP can be reached only from the machine the server runs on. It can be reached
+  from elsewhere when `--listen-host` / `MUNINN_LISTEN_HOST` or `--mbp-addr` is set to a
+  routable address.
+  In a container, publishing the port is not enough on its own. Images built from the
+  project Dockerfile, including the published image, which is built from it, set no
+  listen host. The server in them binds the container's own loopback, and a published
+  port (`docker run -p 8474:8474 ...`, as in the README and the self-hosting guide)
+  forwards to an address nothing is listening on. The bundled `docker-compose.yml` is
+  different. It sets `MUNINN_LISTEN_HOST=0.0.0.0` and publishes 8474 on every interface
+  of the host, so a deployment made from it exposes MBP to whatever can reach the host.
+  If you run from
+  that file, or set the listen host yourself, restrict 8474 with a firewall or publish it
+  on loopback only (`127.0.0.1:8474:8474`) unless remote MBP clients are intended.
+
+- Statistics no longer tell a caller about vaults it is not entitled to. `GET /api/stats`
+  and the MBP `STAT` request answered every caller with a `coherence` block listing every
+  vault on the server by name with its engram total, plus the server's vault count and
+  on-disk size. That included a caller with no credential on a public vault and one with
+  a key pinned to a single vault. The gRPC `Stat` call returned the vault count and
+  on-disk size.
+  **Who is affected:** servers with more than one vault where either a vault is public
+  (the `default` vault is, out of the box) or a key has been issued to someone who should
+  not learn what other vaults exist, in every release up to v0.11.0.
+  **What a caller could learn:** the name and size of every vault on the server. Nothing
+  in a vault could be read this way.
+  **What to do:** upgrade. If your vault names are themselves sensitive (a customer or
+  project name), treat them as known to anyone who held a key or could reach a public
+  vault over REST or MBP.
+  **What changed, including the response shape:** for a key or a public-vault caller the
+  answer now covers that one vault. `engram_count` is its count, `vault_count` is `1`,
+  `coherence` holds only its own entry, and `storage_bytes` is `0`, because the on-disk
+  size is one figure for every vault. A new field, `scope`, says which answer it is. It
+  is `vault`, or `server` for the admin session, whose answer is unchanged and is what
+  the web console's dashboard shows. A client that used a key to read the server's vault
+  count or storage size will now see `1` and `0`. Those figures need the admin session.
+  The SDKs do not carry `scope` yet. An SDK client using a key sees a storage size of 0
+  and a vault count of 1 with nothing to say why, and the SDK examples that print the
+  storage size will print "0 bytes".
+  `openapi.yaml` documents `scope` and the two scopes, and its `StatResponse` field
+  names are corrected to the snake_case the server has always sent. Vault names were
+  also returned by the listing calls, which the next entry covers (SEC-24).
+
+- The vault list is no longer given to callers entitled to one vault. REST
+  `GET /api/vaults` returned the name of every vault on the server to a caller with no
+  credential on a public vault and to any key, whichever vault the key was for. The gRPC
+  `ListVaults` call returned every name to any key.
+  **Who is affected:** servers with more than one vault, in every release up to v0.11.0
+  for REST and from v0.8.0 for gRPC. With a public vault no credential was needed, and
+  `default` is public out of the box, so anyone who could reach the REST port could list
+  every vault.
+  **What a caller could learn:** the names of all vaults. A public vault needs no key,
+  so learning its name is all it takes to read and write it. A locked vault's name gives
+  no access.
+  **What to do:** upgrade. If you have public vaults other than `default`, treat their
+  names as known to anyone who could reach the REST port, and lock any that should not
+  be open (`PUT /api/admin/vaults/config`).
+  **Two places still name or count things without a credential.** If you start the server
+  with `--metrics-addr`, the Prometheus endpoint it opens has no authentication, and
+  its per-vault metrics are labelled with vault names. Anyone who can reach that address
+  can read every vault's name. It is off unless you turn it on. Bind it to loopback or to
+  a network only your monitoring can reach. And `GET /api/workers` answers without a
+  credential. It returns server-wide counters for the background workers and names no
+  vault.
+  **What changed:** with a key, or with no credential on a public vault, the list is now
+  the caller's own vault only. The admin session still gets every vault, so the web
+  console is unchanged. `muninn vault list` and `muninn show vaults` used the
+  unauthenticated list. They now sign in as admin first: `muninn vault list` with
+  `-u`/`-p` if given, and otherwise both with the default credentials, but only when
+  the server is on this machine. Another machine is sent no credential you did not
+  give. If there is no sign-in, the command lists what the server will tell it, which
+  is the `default` vault and only when that vault is public, and says that this is not
+  every vault and why. Other public vaults are not listed without a sign-in. Neither
+  command prompts unless you pass `-p`. Scripts that ran `muninn vault list` against a
+  server whose admin password has been changed, or against another machine, need
+  `-u <user> --password=<pw>` to get the full list. The interactive shell signs in when
+  it starts and lists every vault, as before. On another machine it now asks for the
+  credentials instead of trying the default ones first.
+  **Three things to know about the sign-in.** On a local server whose admin password
+  has been changed, each `muninn vault list` or `muninn show vaults` run without
+  credentials tries the default ones, fails, and leaves an `auth.login_failed` entry
+  for `root` in the audit log. Pass `-u`/`-p` to avoid it. The address the CLI signs
+  in at now follows `MUNINNDB_ADMIN_URL` unless `MUNINNDB_UI_URL` is set, and a session
+  is sent only to the host that issued it (see the next entry). And the exit
+  status of the two listing commands is no longer always 0: it is 1 when the server
+  could not be reached, when it listed nothing, and when credentials you gave were
+  refused. `muninn show vaults` no longer prints "default (built-in)" when the server
+  listed nothing. SDK
+  `list vaults` calls made with a
+  key now return one name. `openapi.yaml` describes the scoping, and documents the
+  response as the JSON array the server has always sent (SEC-25).
+
+- The CLI no longer sends an admin session, or the default admin credentials, to a
+  server they do not belong to. The CLI signs in at one address and sends admin requests
+  to another, and the two were set separately: `MUNINNDB_UI_URL` for the sign-in and
+  `MUNINNDB_ADMIN_URL` for the requests. With only `MUNINNDB_ADMIN_URL` set, the sign-in
+  stayed at this machine's own server. So `muninn vault ...`, `muninn api-key ...` and
+  the other admin commands signed in to the LOCAL server and then sent its admin session
+  cookie to the other server with every request. The interactive shell did the same for
+  `show vaults`. With both variables set to different hosts the session issued at one
+  was sent to the other in the same way. And every admin command tried the default
+  admin credentials first, at whatever address it was pointed.
+  **Who is affected:** anyone who has run the CLI with `MUNINNDB_ADMIN_URL` pointing at
+  one host while the sign-in went to another: either without `MUNINNDB_UI_URL`, while a
+  MuninnDB server was running on their own machine that accepted the sign-in, or with
+  `MUNINNDB_UI_URL` set to a different host from `MUNINNDB_ADMIN_URL`. Releases v0.5.1
+  to v0.11.0 for the admin commands, v0.6.1 to v0.11.0 for the shell. `-h <host>` was
+  not affected.
+  **What the other server learned:** a session cookie that is valid as admin on the
+  server that issued it for up to 24 hours. When that is your local server, it is of
+  use only to someone who can also reach your local server's ports, which listen on
+  loopback unless you changed that. Over plain `http://` it was also visible to anyone
+  on the path.
+  **What to do:** upgrade. A session expires 24 hours after it was issued, and nothing
+  in this release or before it revokes one sooner. If this applies to you and the
+  server that issued the session can be reached from the network, limit what can reach
+  it until the last such session has expired.
+  **What changed:** with only `MUNINNDB_ADMIN_URL` set, the CLI now signs in at the same
+  host on the next port, as `-h` always has. Set `MUNINNDB_UI_URL` if your server's
+  console is somewhere else: it is the address the CLI signs in at. A session cookie is
+  sent only to the host that issued it. The one exception is a server whose console and
+  API are on two host names: if you set both variables, and both addresses are on this
+  machine or both are on other machines, the session goes to the API host too, and the
+  CLI prints a line on stderr saying so. An address on this machine is never treated as
+  the same server as one on another machine.
+  **What a user of a remote server must now pass:** credentials. The default admin
+  credentials are tried without being asked only when the sign-in address is on this
+  machine. Against another machine, pass `-u <user> -p` (or `--password=<pw>`) to
+  `muninn vault ...`, `muninn api-key ...` and the other admin commands. Without them
+  the command asks for a password instead of trying the default one. The listing
+  commands do not ask: they print the short list and say no credentials were sent. The
+  interactive shell asks for a user name and password and exits with status 1 if the
+  sign-in fails. `muninn init` does not apply the vault behaviour setting on another
+  machine and prints the command to run instead (SEC-31).
+
+- A subscription can no longer be cancelled or crowded out from MBP, and one gRPC
+  connection can no longer take a vault's whole subscription limit. Over MBP, any
+  connection could cancel any subscription
+  on the server by naming its id, including one in a vault its key was not for. A client
+  could choose its own subscription id, and choosing one already used in another vault
+  replaced that vault's subscription in the server's records. A subscription stayed
+  registered after its connection closed. And MBP subscriptions, which have never
+  delivered anything, counted against the vault's limit of 100: one connection, or after
+  an earlier fix thirteen of them, could fill it, after which nobody else could subscribe
+  to that vault on any transport. Over gRPC one connection could do the same with 100
+  streams.
+  **Who is affected:** servers where anyone you do not fully trust can open an MBP
+  session or a gRPC connection, in every release up to v0.11.0. That includes anyone with
+  no key at all when a vault is public. Choosing an id was also possible over gRPC, from
+  v0.8.0.
+  **What a client could do:** stop other clients receiving push notifications, by
+  cancelling their subscriptions or by using up the vault's limit. Nothing stored could be
+  read or changed this way.
+  **What to do:** upgrade. Until then, do not let untrusted clients reach the MBP or gRPC
+  ports.
+  **What changed:** the server always chooses the subscription id. A `subscription_id`
+  sent by a client is ignored, on MBP and on gRPC, and the id in the answer is the one to
+  use. Over MBP nothing can be subscribed or cancelled any more (next entry), so nothing
+  sent over MBP takes one of a vault's 100 places or ends a subscription held
+  elsewhere. Cancelling any id over MBP is answered the same way as cancelling one that
+  does not exist. Over gRPC one
+  connection may have at most 8 `Subscribe` streams open at once. The ninth is refused
+  with `ResourceExhausted`. A vault's limit also now holds when many subscribers arrive
+  at the same moment. Before, they could all get in.
+  **What a client will notice:** a gRPC client that opens more than 8 `Subscribe` streams
+  on one connection must open another connection for the rest. A subscribe refused
+  because the vault or the server is full is now `ResourceExhausted` over gRPC, where it
+  was `Unknown`.
+  **Subscribing over MBP is now refused.** See the next entry.
+  **What is still open:** a vault's limit of 100 subscriptions can still be used up by a
+  caller who is allowed to subscribe to it. Over REST, 100 requests to
+  `GET /api/subscribe` do it, and on a public vault they need no key. `default` is public
+  unless you lock it. Over gRPC it takes thirteen connections. If your subscribers must
+  not be shut out, lock the vault and give them keys, and keep the REST and gRPC ports
+  away from clients you do not trust (SEC-26).
+
+- `SUBSCRIBE` over MBP is now refused instead of being answered as if it worked. MBP has
+  never delivered a push notification: the server has no code that sends one over this
+  protocol. A `SUBSCRIBE` was answered `SUB_OK` with the status "active" all the same,
+  and the client then waited for notifications that could not arrive.
+  **Who is affected:** any MBP client that sends `SUBSCRIBE`, in every release up to
+  v0.11.0. No such client can have been receiving anything.
+  **What changed:** `SUBSCRIBE` is answered with error `4006` and the message
+  "subscriptions are not delivered over this protocol: use the REST stream (GET
+  /api/subscribe, server-sent events) or the gRPC Subscribe call". `UNSUB` is still
+  answered `UNSUB_OK` and does nothing, as it always did for an id nobody held. A key
+  that may not read is refused for that first, as before.
+  **What to do:** receive push notifications over REST or gRPC. Both deliver them.
+  The feature reference, which said MBP has native push frames, is corrected (SEC-26).
 
 - Bump the Go toolchain to 1.26.11 and `github.com/klauspost/compress` to
   v1.20.2, `google.golang.org/grpc` to v1.83.2 and `golang.org/x/net` to

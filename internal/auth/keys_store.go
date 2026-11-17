@@ -97,6 +97,51 @@ func (s *Store) ValidateAPIKey(token string) (APIKey, error) {
 	return key, nil
 }
 
+// ErrKeyNoLongerValid is returned by APIKeyStillValid for a key that validated
+// once and would not validate now.
+var ErrKeyNoLongerValid = errors.New("api key is no longer valid")
+
+// APIKeyStillValid reports whether a key that ValidateAPIKey accepted earlier
+// would still be accepted now. It is what a long-lived session asks before it
+// acts on the key again: a session that authenticated once and never asked
+// again would keep its access for as long as it stayed open, whatever happened
+// to the key (SEC-23).
+//
+// It returns ErrKeyNoLongerValid when the key's record is gone (it was
+// revoked), when it has expired, or when the record is no longer the one the
+// session was opened with — a different vault or mode under the same secret,
+// which nothing does today and which must not go unnoticed if something ever
+// does.
+//
+// It reads the key's record from the store every time, on purpose. The store
+// is the only thing every path that changes a key goes through: on a cluster
+// follower a revocation arrives as a replicated batch applied straight to
+// storage, and never passes through this Store's methods, so a validity cache
+// invalidated by RevokeAPIKey would stay valid there. The read is one point
+// lookup; BenchmarkAPIKeyStillValid measures it.
+func (s *Store) APIKeyStillValid(key *APIKey) error {
+	if key == nil || len(key.StorageHash) == 0 {
+		return ErrKeyNoLongerValid
+	}
+	data, closer, err := s.db.Get(apiKeyStorageKey(key.StorageHash))
+	if err != nil {
+		return ErrKeyNoLongerValid
+	}
+	defer closer.Close()
+
+	var current APIKey
+	if err := json.Unmarshal(data, &current); err != nil {
+		return ErrKeyNoLongerValid
+	}
+	if current.ID != key.ID || current.Vault != key.Vault || current.Mode != key.Mode {
+		return ErrKeyNoLongerValid
+	}
+	if current.ExpiresAt != nil && time.Now().After(*current.ExpiresAt) {
+		return ErrKeyNoLongerValid
+	}
+	return nil
+}
+
 // ListAPIKeys returns all API key metadata for a vault (tokens not included).
 func (s *Store) ListAPIKeys(vault string) ([]APIKey, error) {
 	prefix := apiKeyVaultIdxPrefix(vault)

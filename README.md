@@ -409,6 +409,7 @@ When you're ready to customize:
 | LLM enrichment | `MUNINN_ENRICH_URL=anthropic://claude-haiku-4-5-20251001` + `MUNINN_ANTHROPIC_KEY=sk-ant-...` |
 | Data directory | `MUNINNDB_DATA=/path/to/data` (default: `~/.muninn/data`) |
 | Memory limit | `MUNINN_MEM_LIMIT_GB=4` |
+| MBP connection limit | `MUNINN_MBP_MAX_CONNECTIONS=64` (default: derived from the memory limit, 16 at 4 GB) |
 
 **Docker:**
 

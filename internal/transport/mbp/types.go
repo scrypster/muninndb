@@ -660,10 +660,34 @@ type ForgetResponse struct {
 	OK bool `msgpack:"ok" json:"ok"`
 }
 
-// StatRequest queries database statistics.
+// StatRequest queries statistics.
+//
+// By default the answer covers ONE vault — Vault, or "default" when it is
+// empty — and says nothing about any other: that is all a caller entitled to
+// one vault may learn (SEC-24).
 type StatRequest struct {
 	Vault string `msgpack:"vault,omitempty" json:"vault,omitempty"`
+
+	// ServerWide asks for the server-wide answer instead: every vault's
+	// coherence entry by name, the server's vault count and its on-disk size
+	// (engram_count is still Vault's own when Vault is set). It is for callers
+	// the server has already established may see every vault — the admin
+	// session behind the console's dashboard.
+	//
+	// It has no wire name on purpose. No msgpack frame and no JSON body can set
+	// it, so no client can ask for it; only server code can, at a call site that
+	// has checked who is asking. TestStatRequest_ServerWideCannotComeOffTheWire
+	// pins that.
+	ServerWide bool `msgpack:"-" json:"-"`
 }
+
+// The values of StatResponse.Scope.
+const (
+	// StatScopeVault: the answer covers the one vault the request named.
+	StatScopeVault = "vault"
+	// StatScopeServer: the answer covers every vault on the server.
+	StatScopeServer = "server"
+)
 
 // CoherenceResult holds coherence metrics for a single vault.
 type CoherenceResult struct {
@@ -675,13 +699,24 @@ type CoherenceResult struct {
 	TotalEngrams         int64   `msgpack:"total_engrams"         json:"total_engrams"`
 }
 
-// StatResponse returns database stats.
+// StatResponse returns statistics for the scope named in Scope.
+//
+// At vault scope every figure is about that one vault: EngramCount is its
+// count, VaultCount is 1, CoherenceScores has at most its own entry, and
+// StorageBytes is 0 — the store's on-disk size is one figure for all vaults, so
+// reporting it would tell a single-vault caller how much everyone else holds.
+// At server scope VaultCount, StorageBytes and CoherenceScores cover the whole
+// server.
 type StatResponse struct {
 	EngramCount     int64                      `msgpack:"engram_count"        json:"engram_count"`
 	VaultCount      int                        `msgpack:"vault_count"         json:"vault_count"`
 	IndexSize       int64                      `msgpack:"index_size"          json:"index_size"`
 	StorageBytes    int64                      `msgpack:"storage_bytes"       json:"storage_bytes"`
 	CoherenceScores map[string]CoherenceResult `msgpack:"coherence,omitempty" json:"coherence,omitempty"`
+	// Scope is StatScopeVault or StatScopeServer: what the figures above cover.
+	// A reader that sees "vault" knows vault_count and storage_bytes are not
+	// the server's.
+	Scope string `msgpack:"scope,omitempty" json:"scope,omitempty"`
 }
 
 // PingRequest is a keepalive probe.

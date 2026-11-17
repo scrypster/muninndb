@@ -953,6 +953,7 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "  MUNINN_GC_PERCENT            Go GC target percentage (default: 200)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_GLOBAL_RPS Global rate limit requests/sec (default: 1000)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_RATE_LIMIT_PER_IP_RPS Per-IP rate limit requests/sec (default: 100)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_MBP_MAX_CONNECTIONS   Most MBP connections held at once (default: derived from MUNINN_MEM_LIMIT_GB, 16 at 4 GB)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_INTERVAL        Automated backup interval (e.g. 6h, 30m); empty = disabled\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_DIR             Directory to write automated backups into\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_BACKUP_RETAIN          Number of automated backups to keep (default: 5)\n")

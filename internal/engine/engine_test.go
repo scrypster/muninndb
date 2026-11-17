@@ -1072,7 +1072,7 @@ func TestCoherenceRegistryAfterWrite(t *testing.T) {
 		}
 	}
 
-	stat, err := eng.Stat(ctx, &mbp.StatRequest{})
+	stat, err := eng.Stat(ctx, &mbp.StatRequest{Vault: vault})
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
@@ -2067,7 +2067,8 @@ func TestStat_CountsConfigOnlyVaults(t *testing.T) {
 	}
 
 	// Stat() must count both config-only vaults (no data written to either).
-	resp, err := eng.Stat(ctx, &mbp.StatRequest{})
+	// The vault count is a server-wide figure, so it is asked for as one.
+	resp, err := eng.Stat(ctx, &mbp.StatRequest{ServerWide: true})
 	if err != nil {
 		t.Fatalf("Stat after SetVaultConfig: %v", err)
 	}
@@ -2100,7 +2101,7 @@ func TestStat_DeduplicatesVaultCount(t *testing.T) {
 		t.Fatalf("SetVaultConfig: %v", err)
 	}
 
-	resp, err := eng.Stat(ctx, &mbp.StatRequest{})
+	resp, err := eng.Stat(ctx, &mbp.StatRequest{ServerWide: true})
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
@@ -2119,7 +2120,7 @@ func TestStat_DefaultVaultMinimum(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	resp, err := eng.Stat(ctx, &mbp.StatRequest{})
+	resp, err := eng.Stat(ctx, &mbp.StatRequest{ServerWide: true})
 	if err != nil {
 		t.Fatalf("Stat on empty engine: %v", err)
 	}

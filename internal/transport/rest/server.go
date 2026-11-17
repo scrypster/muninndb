@@ -89,6 +89,10 @@ type Server struct {
 	server        *http.Server
 	tlsConfig     *tls.Config // nil = plain TCP
 
+	// sseKeepalive overrides sseKeepaliveInterval when positive. Tests set it
+	// so they do not wait thirty seconds for a keepalive.
+	sseKeepalive time.Duration
+
 	// Embedder info — set at construction time, static for the lifetime of the server.
 	embedProvider            string // "ollama", "openai", "voyage", or "none"
 	embedModel               string // model name, or "" if none
@@ -200,7 +204,9 @@ func NewServer(addr string, engine EngineAPI, authStore *auth.Store, sessionSecr
 
 	// Public routes — no auth, no body size limit (health/auth handshake).
 	mux.HandleFunc("GET /api/openapi.yaml", s.withPublicMiddleware(s.handleOpenAPISpec))
-	mux.HandleFunc("POST /api/hello", s.withPublicMiddleware(s.handleHello))
+	// Hello registers a vault's name, which is a write. It is behind vault auth
+	// like every other route that names a vault (SEC-29).
+	mux.HandleFunc("POST /api/hello", s.withMiddleware(s.handleHello))
 	mux.HandleFunc("GET /api/health", s.withPublicMiddleware(s.handleHealth))
 	mux.HandleFunc("GET /api/ready", s.withPublicMiddleware(s.handleReady))
 	mux.HandleFunc("GET /api/workers", s.withPublicMiddleware(s.handleWorkerStats))
@@ -706,12 +712,53 @@ func (s *Server) handleHello(w http.ResponseWriter, r *http.Request) {
 		s.sendError(r, w, http.StatusBadRequest, ErrInvalidEngram, "invalid request body")
 		return
 	}
+	vault, status, err := s.helloVault(r, req.Vault)
+	if err != nil {
+		s.sendError(r, w, status, ErrInvalidEngram, err.Error())
+		return
+	}
+	req.Vault = vault
 	resp, err := s.engine.Hello(r.Context(), &req)
 	if err != nil {
 		s.sendError(r, w, http.StatusUnauthorized, ErrAuthFailed, err.Error())
 		return
 	}
 	s.sendJSON(w, http.StatusOK, resp)
+}
+
+// helloVault is the vault a hello may register: the one the request was
+// authorised for, never one the caller only named (SEC-29). The engine records
+// the name of the vault it is handed, so what reaches it has to be a vault the
+// caller is entitled to.
+//
+//   - With a key it is the key's vault. Naming any other is refused.
+//   - With no key it is the public vault the request named, which the auth
+//     middleware has already checked is public.
+//   - Under an admin session it is the vault named in the body, which is how
+//     the console registers a vault it has just created; an admin may use any
+//     vault, so the name only has to be a vault name.
+//
+// A server built with no auth store authorises nothing anywhere, and takes the
+// name as given, as before.
+func (s *Server) helloVault(r *http.Request, named string) (string, int, error) {
+	named = strings.TrimSpace(named)
+	if s.authStore == nil {
+		return named, 0, nil
+	}
+	if auth.AdminSessionFromContext(r.Context()) {
+		if named == "" {
+			named = ctxVault(r)
+		}
+		if !isValidVaultName(named) {
+			return "", http.StatusBadRequest, errors.New("invalid vault name")
+		}
+		return named, 0, nil
+	}
+	vault, err := resolveHandlerVault(r, named)
+	if err != nil {
+		return "", http.StatusBadRequest, err
+	}
+	return vault, 0, nil
 }
 
 func (s *Server) handleCreateEngram(w http.ResponseWriter, r *http.Request) {
@@ -960,9 +1007,15 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, http.StatusOK, resp)
 }
 
+// handleStats answers about the caller's own vault. Only a verified admin
+// session — the console's dashboard — gets the server-wide answer (every
+// vault's coherence entry, the vault count, the on-disk size); a vault API key
+// or an open vault entitles the caller to one vault and to nothing about the
+// others (SEC-24).
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.engine.Stat(r.Context(), &StatRequest{
-		Vault: ctxVault(r),
+		Vault:      ctxVault(r),
+		ServerWide: auth.AdminSessionFromContext(r.Context()),
 	})
 	if err != nil {
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
@@ -1385,6 +1438,13 @@ func (s *Server) handleListVaults(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Every vault for the admin session (the console's vault picker and
+	// `muninn vault list`); for a key or an open vault, only the caller's own
+	// (SEC-25). A server built with no auth store authenticates nothing, on
+	// any route, and has no caller to scope to.
+	if s.authStore != nil {
+		vaults = auth.VaultsVisibleTo(r.Context(), vaults)
+	}
 	s.sendJSON(w, http.StatusOK, vaults)
 }
 
@@ -1813,6 +1873,29 @@ func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, http.StatusOK, GuideResponse{Guide: guide})
 }
 
+// subscriptionEnded reports why an open subscription stream is no longer
+// authorised, or "" while it is. A server with no auth store authorised nothing
+// at open and has nothing to ask again.
+func (s *Server) subscriptionEnded(ctx context.Context, vault string) string {
+	if s.authStore == nil {
+		return ""
+	}
+	err := s.authStore.StreamStillAuthorized(ctx, vault)
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, auth.ErrVaultNoLongerPublic):
+		return fmt.Sprintf("vault %q requires an API key", vault)
+	default:
+		return auth.ErrKeyNoLongerValid.Error()
+	}
+}
+
+// sseKeepaliveInterval is how often an open subscription stream is sent a ping.
+// It is also the longest a stream with nothing to deliver goes without asking
+// whether it is still authorised (SEC-23).
+const sseKeepaliveInterval = 30 * time.Second
+
 // handleSubscribe opens a long-lived SSE connection. The client receives
 // ActivationPush events as JSON-encoded server-sent events.
 //
@@ -1829,6 +1912,11 @@ func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
 //	            (alias: "push_on_write", which is what the SDKs send)
 //	ttl       — subscription TTL in seconds, 0 = no expiry
 //	rate      — max pushes/sec, default 10
+//
+// The stream is authorised for as long as what authorised it holds: before
+// every push and on every keepalive the server asks again, and ends the stream
+// with an "error" event when the key is no longer valid or the vault is no
+// longer public (SEC-23).
 func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -1945,18 +2033,43 @@ func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "event: subscribed\ndata: {\"id\":%q}\n\n", subID)
 	flusher.Flush()
 
-	ping := time.NewTicker(30 * time.Second)
+	keepalive := sseKeepaliveInterval
+	if s.sseKeepalive > 0 {
+		keepalive = s.sseKeepalive
+	}
+	ping := time.NewTicker(keepalive)
 	defer ping.Stop()
+
+	// What authorised this stream when it opened is asked again before every
+	// push and on every keepalive, and the stream ends when the answer is no:
+	// a key that was revoked or has expired, or, for a caller with no key, a
+	// vault that is no longer public (SEC-23). Returning ends the subscription
+	// too (the deferred Unsubscribe), so it stops counting against the vault.
+	streamEnded := func() bool {
+		reason := s.subscriptionEnded(r.Context(), vault)
+		if reason == "" {
+			return false
+		}
+		fmt.Fprintf(w, "event: error\ndata: {\"error\":%q}\n\n", reason)
+		flusher.Flush()
+		return true
+	}
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ping.C:
+			if streamEnded() {
+				return
+			}
 			fmt.Fprintf(w, "event: ping\ndata: {}\n\n")
 			flusher.Flush()
 		case push, ok := <-pushCh:
 			if !ok {
+				return
+			}
+			if streamEnded() {
 				return
 			}
 			// T6: Check whether the deliver func has been dropping pushes for this

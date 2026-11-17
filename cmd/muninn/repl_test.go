@@ -402,7 +402,7 @@ func TestShellValidateAdminSuccess(t *testing.T) {
 	srv := newAuthServer("session", "abc123")
 	defer srv.Close()
 
-	if err := shellValidateAdmin(srv.URL, "admin", "password"); err != nil {
+	if _, err := shellValidateAdmin(srv.URL, "admin", "password"); err != nil {
 		t.Errorf("shellValidateAdmin: expected nil, got %v", err)
 	}
 }
@@ -414,7 +414,7 @@ func TestShellValidateAdminInvalidCredentials(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := shellValidateAdmin(srv.URL, "wronguser", "wrongpass")
+	_, err := shellValidateAdmin(srv.URL, "wronguser", "wrongpass")
 	if err == nil {
 		t.Error("shellValidateAdmin: expected error for bad credentials, got nil")
 	}
@@ -425,7 +425,7 @@ func TestShellValidateAdminInvalidCredentials(t *testing.T) {
 
 // Test 21: shellValidateAdmin connection error
 func TestShellValidateAdminConnectionError(t *testing.T) {
-	err := shellValidateAdmin("http://127.0.0.1:19999", "test", "test")
+	_, err := shellValidateAdmin("http://127.0.0.1:19999", "test", "test")
 	if err == nil {
 		t.Error("shellValidateAdmin: expected connection error, got nil")
 	}

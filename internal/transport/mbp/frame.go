@@ -110,6 +110,14 @@ var (
 // ReadFrame reads exactly one frame from the reader.
 // Returns io.EOF if the connection is closed cleanly.
 func ReadFrame(r io.Reader) (*Frame, error) {
+	return readFrameLimited(r, MaxPayloadSize)
+}
+
+// readFrameLimited is ReadFrame with the largest payload it will read. A frame
+// whose header declares more is refused on the header alone, with
+// ErrPayloadTooLarge: nothing is allocated for the payload and none of it is
+// read.
+func readFrameLimited(r io.Reader, maxPayload uint32) (*Frame, error) {
 	frame := &Frame{}
 
 	// Read 16-byte prefix
@@ -132,7 +140,7 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 	}
 
 	// Validate payload size
-	if frame.PayloadLength > MaxPayloadSize {
+	if frame.PayloadLength > maxPayload {
 		return nil, ErrPayloadTooLarge
 	}
 

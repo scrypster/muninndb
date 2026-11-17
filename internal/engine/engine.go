@@ -1420,13 +1420,22 @@ func (e *Engine) Hello(ctx context.Context, req *mbp.HelloRequest) (*mbp.HelloRe
 
 	// Register the vault name so it appears in ListVaults even before the
 	// first engram is written (idempotent, cheap).
+	//
+	// This is a write, so two things hold. The CALLER must already have been
+	// authorised for req.Vault: every transport hands Hello the vault it
+	// resolved for the request, never one the client only named (SEC-29). And
+	// it happens on the Cortex only, like every client-originated write (#596):
+	// a Lobe answers the handshake and leaves the name to arrive by
+	// replication, once the Cortex has it.
 	vaultName := req.Vault
 	if vaultName == "" {
 		vaultName = "default"
 	}
-	wsPrefix := e.store.ResolveVaultPrefix(vaultName)
-	if err := e.store.WriteVaultName(wsPrefix, vaultName); err != nil {
-		slog.Warn("engine: Hello: failed to persist vault name", "vault", vaultName, "err", err)
+	if e.refuseNonLeaderWrite() == nil {
+		wsPrefix := e.store.ResolveVaultPrefix(vaultName)
+		if err := e.store.WriteVaultName(wsPrefix, vaultName); err != nil {
+			slog.Warn("engine: Hello: failed to persist vault name", "vault", vaultName, "err", err)
+		}
 	}
 
 	return &mbp.HelloResponse{
@@ -3912,12 +3921,25 @@ func (e *Engine) Subscribe(ctx context.Context, req *mbp.SubscribeRequest) (*mbp
 
 // SubscribeWithDeliver registers a subscription and immediately sets a delivery
 // function that is called (in a goroutine by DeliveryRouter) on every push.
-// Returns the subscription ID. Pass deliver=nil to register without a delivery
-// function (useful for MBP clients that pull via the stream).
+// Returns the subscription ID.
+//
+// With deliver == nil NOTHING IS REGISTERED: an id is returned and that is all.
+// A subscription with no delivery function can never tell anyone anything, and
+// one cannot be attached later. Registering it anyway cost the vault one of
+// its subscription places, cost an embedding call, and cost the trigger worker
+// an evaluation on every write to the vault, on behalf of a subscriber that
+// could not be reached. MBP is the caller this is for: its SUBSCRIBE has never
+// delivered a push (the server writes no ACTIVATION frame), and thirteen
+// connections with no key used it to fill a public vault's limit and shut out
+// the REST and gRPC subscribers who can be delivered to (SEC-26).
+//
+// The id is always chosen here, a fresh random one. req.SubscriptionID is
+// ignored: ids are one namespace across every vault, so an id a client could
+// choose is an id it could choose to be somebody else's (SEC-26).
 func (e *Engine) SubscribeWithDeliver(ctx context.Context, req *mbp.SubscribeRequest, deliver trigger.DeliverFunc) (string, error) {
-	subID := req.SubscriptionID
-	if subID == "" {
-		subID = uuid.New().String()
+	subID := uuid.New().String()
+	if deliver == nil {
+		return subID, nil
 	}
 
 	// Resolve vault to a routing uint32 using the same BigEndian convention
@@ -4309,7 +4331,49 @@ func (e *Engine) cleanSearchIndexesAfterHardDelete(wsPrefix [8]byte, id [16]byte
 }
 
 // Stat implements mbp.EngineAPI.Stat.
+//
+// The answer is about ONE vault unless the request says ServerWide — and no
+// client can say that (the field has no wire name; see mbp.StatRequest). So a
+// transport that hands the engine the vault its caller is entitled to cannot
+// leak another vault's name, size or existence through Stat, whichever
+// transport it is and whether or not it remembered to filter (SEC-24).
 func (e *Engine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatResponse, error) {
+	if !req.ServerWide {
+		return e.statVault(ctx, req.Vault), nil
+	}
+	return e.statServer(ctx, req.Vault), nil
+}
+
+// statVault is the answer for a caller entitled to one vault. Every figure is
+// that vault's own: VaultCount is the one vault in scope, the coherence block
+// has at most its entry, and the store's on-disk size — one figure for every
+// vault — is left out.
+func (e *Engine) statVault(ctx context.Context, vault string) *mbp.StatResponse {
+	if vault == "" {
+		// An unnamed vault is the default vault, as everywhere else. It is
+		// never "all of them": that is what ServerWide is for.
+		vault = "default"
+	}
+	resp := &mbp.StatResponse{
+		Scope:       mbp.StatScopeVault,
+		EngramCount: e.store.GetVaultCount(ctx, e.store.ResolveVaultPrefix(vault)),
+		VaultCount:  1,
+	}
+	if e.coherence != nil {
+		for _, snap := range e.coherence.Snapshots() {
+			if snap.VaultName == vault {
+				resp.CoherenceScores = map[string]mbp.CoherenceResult{vault: coherenceResult(snap)}
+				break
+			}
+		}
+	}
+	return resp
+}
+
+// statServer is the server-wide answer: every vault's coherence entry by name,
+// the vault count and the on-disk size. EngramCount is vault's own when a
+// vault is named and the server's total otherwise.
+func (e *Engine) statServer(ctx context.Context, vault string) *mbp.StatResponse {
 	vaultNames, _ := e.store.ListVaultNames()
 
 	// Count all vaults: data vaults + config-only (empty) vaults, deduplicated.
@@ -4333,12 +4397,13 @@ func (e *Engine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatRespo
 	}
 
 	engramCount := e.engramCount.Load()
-	if req.Vault != "" {
-		wsPrefix := e.store.ResolveVaultPrefix(req.Vault)
+	if vault != "" {
+		wsPrefix := e.store.ResolveVaultPrefix(vault)
 		engramCount = e.store.GetVaultCount(ctx, wsPrefix)
 	}
 
 	resp := &mbp.StatResponse{
+		Scope:        mbp.StatScopeServer,
 		EngramCount:  engramCount,
 		VaultCount:   vaultCount,
 		StorageBytes: e.store.DiskSize(),
@@ -4350,19 +4415,23 @@ func (e *Engine) Stat(ctx context.Context, req *mbp.StatRequest) (*mbp.StatRespo
 		if len(snapshots) > 0 {
 			resp.CoherenceScores = make(map[string]mbp.CoherenceResult, len(snapshots))
 			for _, snap := range snapshots {
-				resp.CoherenceScores[snap.VaultName] = mbp.CoherenceResult{
-					Score:                snap.Score,
-					OrphanRatio:          snap.OrphanRatio,
-					ContradictionDensity: snap.ContradictionDensity,
-					DuplicationPressure:  snap.DuplicationPressure,
-					TemporalVariance:     snap.TemporalVariance,
-					TotalEngrams:         snap.TotalEngrams,
-				}
+				resp.CoherenceScores[snap.VaultName] = coherenceResult(snap)
 			}
 		}
 	}
 
-	return resp, nil
+	return resp
+}
+
+func coherenceResult(snap coherence.Result) mbp.CoherenceResult {
+	return mbp.CoherenceResult{
+		Score:                snap.Score,
+		OrphanRatio:          snap.OrphanRatio,
+		ContradictionDensity: snap.ContradictionDensity,
+		DuplicationPressure:  snap.DuplicationPressure,
+		TemporalVariance:     snap.TemporalVariance,
+		TotalEngrams:         snap.TotalEngrams,
+	}
 }
 
 // ListVaults returns all vault names that have been written to.
