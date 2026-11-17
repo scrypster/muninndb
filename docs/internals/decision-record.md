@@ -2420,13 +2420,39 @@ new restore code, and eight guards no test pinned. What changed, and why:
 - *Effect check through the real binary (2026-11-16).* Develop (2aeb67f0) and this branch, each on
   its own copy of the same production data, with invented vaults, driven over MCP and REST. The
   binary has no decay clock, so time was moved offline between passes by setting the invented
-  edges' `lastActivated` back (the only time decay reads). On develop, a replaced memory lost its
+  edges' `lastActivated` back. Decay's clock is `lastActivated`, or `createdAt` when
+  `lastActivated` is 0, which it is on every edge `muninn_link` writes, and a non-zero value
+  overrides that fallback. On develop, a replaced memory lost its
   `superseded_by` in the history view and accepted a rival link in five of seven shapes (a
   negative weight deleted at the first pass, an edge at 1.0 erased by recall learning, two edges
   archived after a day, two relations meeting at one floor key after 200 days, a co-activated edge
   archived after 125 days). In a sixth (G) it kept the supersedes edge and silently lost the other
-  relation's link at the shared floor key. Recall's lazy restore then forked two memories, whose
+  relation's link. With time moved in two jumps that showed at the +200 day pass. At the real
+  cadence (a pass every 30 simulated minutes) it happens at day 6.333, mid-decay, when the
+  relates_to edge's new ceiling lands exactly on the key the supersedes edge moved to two hours
+  earlier (0.692429), and the supersedes edge's own move then deletes that key. The survivor is
+  the same. Recall's lazy restore then forked two memories, whose
   evolve was refused as forked. On the branch every replaced memory kept its successor, every rival was
   refused, and recall forked nothing. The branch's one-off restore, run over develop's data, put
   back the archived edge whose target was free, left the one whose target a rival now held with a
   WARN naming all three, logged one INFO line with the counts, and did not run again on restart.
+
+**Third review (2026-11-16).** A delta review of the second round found no data loss, three guards
+no test pinned, a cost not named, and a refusal that reached callers as a server fault.
+- *Each guard now has a test that fails without it:* the single-pair weight move's lock (a decay
+  chunk inside its window left two keys for one edge), the lazy restore's lock on the mirrored
+  pair (a decay chunk archived a live D to S edge into the mirrored row, and the restore then
+  deleted it), and `CollisionSkips` counting only relation-guard skips (a dead endpoint counted as
+  one would have dropped out of `Stats().Errors`).
+- *The refusal is the caller's to act on, so no transport reports it as a fault.* `engine.Link`
+  names both relations and says to choose another weight (the storage error carries both
+  relations, `AssocRelTypeCollisionError`, with its old text). REST answers 409, as it does for a
+  soft-deleted endpoint, where it answered 500 with "an internal error occurred", logged an ERROR,
+  and the Python SDK retried it three times. gRPC returns FailedPrecondition, the code the server
+  already uses for "fix something first", where it returned Unknown and logged an ERROR. MBP
+  already returned an error frame with code 4005 and the engine's text, and MCP returns that text
+  as a tool error. Nothing but the error mapping changed.
+- *The weight move's cost is named, not fixed here.* Holding every pair's stripe through the
+  commit is what closes the windows. A batch of more than about 1,400 pairs takes all 256 stripes,
+  and the measured waits are in COG-27 residual 8. Chunking the batch changes how much of a
+  batch commits together, which is its own decision, and is the next increment.
