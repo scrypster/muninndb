@@ -243,6 +243,37 @@ func TestASlowReaderIsServedNotClosed(t *testing.T) {
 	}
 }
 
+// sendBufferListener sets the send buffer of every connection it accepts.
+type sendBufferListener struct {
+	net.Listener
+	bytes int
+}
+
+func (l sendBufferListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if tc, ok := c.(*net.TCPConn); ok && err == nil {
+		_ = tc.SetWriteBuffer(l.bytes)
+	}
+	return c, err
+}
+
+// smallServerSendBuffer gives the server's side of every connection a send
+// buffer of a few kilobytes, so that a client which stops reading holds the
+// server's writer up after about one socket buffer of replies, on every
+// platform alike.
+//
+// The other way to hold the writer up, shrinking the CLIENT's receive buffer,
+// is not used. On Linux a receive buffer of a few kilobytes makes the kernel
+// close the window and reopen it only on the sender's zero-window probe, one
+// segment every 200 ms, whatever the server does: about 25 KB a second once
+// the client starts reading. Measured with no MBP code at all, a plain TCP
+// server and client with the same frame sizes deliver 26 replies a second that
+// way, and the server under test delivered 27. With this test's earlier 20,000
+// requests that took longer than the package is given.
+func smallServerSendBuffer(ln net.Listener) net.Listener {
+	return sendBufferListener{Listener: ln, bytes: 4096}
+}
+
 // TestEveryPipelinedRequestIsAnswered: a client may send many requests before
 // it reads any answer. Every one is answered. The reply queue holds 256
 // frames, and a reply that found it full used to be dropped without a word:
@@ -250,21 +281,24 @@ func TestASlowReaderIsServedNotClosed(t *testing.T) {
 // reading requests while the queue could not hold their answers, so the
 // requests wait in the socket and none is lost.
 //
-// The replies here are small ones, which are always queued, and there are far
-// more of them than the socket buffers hold, so the writer really is held up
-// and it is the reader's waiting that keeps the queue from overflowing.
+// The replies are small ones, which are always queued. The server's send
+// buffer is a few kilobytes and the client reads nothing at first, so the
+// writer is held up after a few hundred replies and it is the reader's waiting
+// that keeps the queue from overflowing. Two thousand requests are several
+// times what the queue and the socket buffers hold between them.
 func TestEveryPipelinedRequestIsAnswered(t *testing.T) {
-	env := newMatrixEnv(t)
+	env := newMatrixEnvListening(t, nil, smallServerSendBuffer, nil)
 	const vault = "harbour-notices"
 	if err := env.store.SetVaultConfig(auth.VaultConfig{Name: vault, Public: true}); err != nil {
 		t.Fatal(err)
 	}
 	client := dialMBP(t, env.addr, "", vault)
-	if tc, ok := client.conn.(*net.TCPConn); ok {
-		_ = tc.SetReadBuffer(4096)
-	}
 
-	const requests = 20000
+	const requests = 2000
+	// However slow the machine, the whole exchange ends inside this, with a
+	// failure that says what happened rather than the package's timeout.
+	deadline := time.Now().Add(60 * time.Second)
+	_ = client.conn.SetDeadline(deadline)
 	payload, _ := mbp.EncodeMsgpack(&mbp.PingRequest{Data: strings.Repeat("w", 900)})
 	wrote := make(chan error, 1)
 	go func() {
@@ -283,11 +317,20 @@ func TestEveryPipelinedRequestIsAnswered(t *testing.T) {
 		t.Errorf("%d bytes of small replies are queued for one connection; the queue holds 256 of at most 4 KiB", unread)
 	}
 
+	start := time.Now()
 	seen := map[uint64]bool{}
+	var readErr error
 	for len(seen) < requests {
-		_ = client.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		// An answer that was dropped never comes: stop waiting once none has
+		// come for a while, rather than at the overall deadline.
+		next := time.Now().Add(10 * time.Second)
+		if next.After(deadline) {
+			next = deadline
+		}
+		_ = client.conn.SetReadDeadline(next)
 		f, err := mbp.ReadFrame(client.conn)
 		if err != nil {
+			readErr = err
 			break
 		}
 		if f.Type != mbp.TypePong {
@@ -295,8 +338,9 @@ func TestEveryPipelinedRequestIsAnswered(t *testing.T) {
 		}
 		seen[f.CorrelationID] = true
 	}
+	t.Logf("%d of %d pipelined PINGs answered in %s", len(seen), requests, time.Since(start).Round(time.Millisecond))
 	if len(seen) != requests {
-		t.Errorf("%d of %d pipelined PINGs were answered; the rest were dropped", len(seen), requests)
+		t.Errorf("%d of %d pipelined PINGs were answered; the rest were dropped (read ended with %v)", len(seen), requests, readErr)
 	}
 	if err := <-wrote; err != nil {
 		t.Errorf("writing the requests: %v", err)
@@ -341,7 +385,10 @@ func TestPingEchoesASmallPayloadOnly(t *testing.T) {
 // takes. If its key is revoked while it waits, it is not carried out when room
 // comes: it is answered the way any frame of an ended session is.
 func TestARequestThatWaitedIsCheckedAgainstItsSessionAgain(t *testing.T) {
-	env := newMatrixEnvWith(t, func(s *mbp.Server) { s.SetReplyStallTimeoutForTest(5 * time.Minute) })
+	// The server's send buffer is small, so that replies back up as soon as the
+	// client stops reading (smallServerSendBuffer says why it is not the
+	// client's receive buffer that is made small).
+	env := newMatrixEnvListening(t, nil, smallServerSendBuffer, func(s *mbp.Server) { s.SetReplyStallTimeoutForTest(5 * time.Minute) })
 	const vault = "pilot-station"
 	if err := env.store.SetVaultConfig(auth.VaultConfig{Name: vault, Public: false}); err != nil {
 		t.Fatal(err)
@@ -359,9 +406,6 @@ func TestARequestThatWaitedIsCheckedAgainstItsSessionAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := dialMBP(t, env.addr, token, vault)
-	if tc, ok := client.conn.(*net.TCPConn); ok {
-		_ = tc.SetReadBuffer(4096)
-	}
 	// Wait for the vault under test to answer in full too.
 	deadline := time.Now().Add(90 * time.Second)
 	for {

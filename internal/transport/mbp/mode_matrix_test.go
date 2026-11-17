@@ -213,6 +213,14 @@ func newMatrixEnvWith(t testing.TB, configure func(*mbp.Server)) *matrixEnv {
 // certificate.
 func newMatrixEnvTLS(t testing.TB, tlsConfig *tls.Config, configure func(*mbp.Server)) *matrixEnv {
 	t.Helper()
+	return newMatrixEnvListening(t, tlsConfig, nil, configure)
+}
+
+// newMatrixEnvListening is newMatrixEnvTLS with the test's listener passed
+// through wrap, when it is not nil, before the server is given it. A test uses
+// it to set socket options on the connections the server accepts.
+func newMatrixEnvListening(t testing.TB, tlsConfig *tls.Config, wrap func(net.Listener) net.Listener, configure func(*mbp.Server)) *matrixEnv {
+	t.Helper()
 	opts := storage.DefaultOptions()
 	opts.FS = vfs.NewMem()
 	db, err := storage.OpenPebble("mbp-mode-matrix", opts)
@@ -245,6 +253,9 @@ func newMatrixEnvTLS(t testing.TB, tlsConfig *tls.Config, configure func(*mbp.Se
 		t.Fatalf("listen: %v", err)
 	}
 	addr := ln.Addr().String()
+	if wrap != nil {
+		ln = wrap(ln)
+	}
 
 	rec := &recordingEngine{EngineAPI: eng}
 	srv := mbp.NewServer(addr, rec, authStore, tlsConfig)
