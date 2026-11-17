@@ -718,7 +718,7 @@ type ActivationEngine struct {
 	// scoreClock, when set, replaces the wall clock at the two places scoring
 	// reads it: phase 4's activation-log recency and phase 6's `now` (recency
 	// and decay on weighted_sum and CGDN, validity windows). nil = time.Now.
-	// Test-only; see SetScoreClockForTesting.
+	// Test-only. See SetScoreClockForTesting.
 	scoreClock func() time.Time
 }
 

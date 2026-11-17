@@ -145,18 +145,17 @@ func TestCloneVaultData_VaultCountComputedNotCopied(t *testing.T) {
 		t.Errorf("expected 3 engrams copied, got %d", copied)
 	}
 
-	// Verify the stored VaultCountKey value equals 3.
+	// The clone resets the target's count rather than computing it: no saved
+	// key may disagree with what is stored (vault_count.go).
 	vaultCountKey := keys.VaultCountKey(wsTarget)
 	val, err := Get(store.db, vaultCountKey)
 	if err != nil {
 		t.Fatalf("Get VaultCountKey: %v", err)
 	}
-	if len(val) != 8 {
-		t.Fatalf("VaultCountKey value has unexpected length %d", len(val))
-	}
-	storedCount := int64(binary.BigEndian.Uint64(val))
-	if storedCount != 3 {
-		t.Errorf("stored vault count = %d, want 3", storedCount)
+	if len(val) == 8 {
+		if storedCount := int64(binary.BigEndian.Uint64(val)); storedCount != 3 {
+			t.Errorf("saved vault count = %d, want 3 or no key", storedCount)
+		}
 	}
 
 	// Also verify in-memory counter.
@@ -199,16 +198,18 @@ func TestCloneVaultData_0x15VaultCountKeySkipped(t *testing.T) {
 		t.Fatalf("CloneVaultData: %v", err)
 	}
 
-	// Target count must equal the real engram count (1), not the inflated source value.
+	// Target count must equal the real engram count (1), not the inflated
+	// source value. The source's key is never copied, and the target's count
+	// is reset and seeded from a scan (vault_count.go).
 	dstCountKey := keys.VaultCountKey(wsTarget)
 	val, err := Get(store.db, dstCountKey)
 	if err != nil {
 		t.Fatalf("Get dst VaultCountKey: %v", err)
 	}
-	if len(val) != 8 {
-		t.Fatalf("dst count key length %d, want 8", len(val))
+	if len(val) == 8 && int64(binary.BigEndian.Uint64(val)) == 9999 {
+		t.Fatal("the source's count key was copied to the target")
 	}
-	dstCount := int64(binary.BigEndian.Uint64(val))
+	dstCount := store.GetVaultCount(ctx, wsTarget)
 	if dstCount != copied {
 		t.Errorf("dst vault count = %d, want %d (copied engrams)", dstCount, copied)
 	}

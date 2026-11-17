@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/scrypster/muninndb/internal/prefix"
@@ -46,13 +47,18 @@ var clearVaultDataPrefixes = []byte{
 // to remove those after clearing.
 // Returns the vault engram count captured before deletion.
 //
-// Safe TOCTOU ordering:
-//  1. Point-delete VaultCountKey (0x15, 9-byte) from Pebble FIRST to prevent a
-//     concurrent writer from re-seeding the counter from the stale persisted value.
-//  2. Evict the in-memory vaultCounters entry — any subsequent write that races
-//     here now seeds from a scan of the (already range-tombstoned) key space → 0.
-//  3. Commit the range tombstones for all vault-scoped data prefixes.
-//  4. Evict all in-memory caches (L1, assocCache, metaCache, recentActiveCache).
+// Ordering:
+//  1. Commit the range tombstones for all vault-scoped data prefixes (0x15 is
+//     one of them).
+//  2. Evict all in-memory caches (L1, assocCache, metaCache, recentActiveCache).
+//  3. On every exit, reset the vault's count (resetVaultCount): under the
+//     exclusive count lock, drop the counter and the coalescer entry and delete
+//     the 0x15 key. The count used to be dropped BEFORE the range delete. A
+//     write racing the clear then re-seeded from the records about to be
+//     deleted, and the empty vault kept that count across restarts. Under
+//     max_engrams the pruner then deleted new memories to make room for the
+//     phantom ones. A write that commits before the reset is either deleted by
+//     the range delete or counted by the next seed's scan, never both.
 //
 // Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17, 0x1F,
 // 0x20–0x22, 0x24–0x2E, 0x30, 0x31
@@ -65,23 +71,17 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 	// Deferred so it runs on every exit, including a failed commit that may
 	// still have landed — dropping the set is always safe (it is rebuilt).
 	defer ps.resetRetired(ws)
+	// Deferred so it runs after the range delete below, on every exit,
+	// including a failed commit that may still have landed.
+	defer func() {
+		if err := ps.resetVaultCount(ws); err != nil {
+			slog.Warn("clear vault: count reset failed", "err", err)
+		}
+	}()
 	// Capture count before anything is deleted.
 	vaultCount := ps.GetVaultCount(ctx, ws)
 
-	// Step 1: point-delete VaultCountKey from Pebble FIRST (prevents stale re-seed).
-	// 0x15 | ws[8] = 9 bytes — the short form of the count key (not the EpisodeKey).
-	vaultCountKey := keys.VaultCountKey(ws)
-	if err := ps.db.Delete(vaultCountKey, pebble.NoSync); err != nil && !errors.Is(err, pebble.ErrNotFound) {
-		return 0, fmt.Errorf("clear vault: delete count key: %w", err)
-	}
-
-	// Step 2: evict in-memory counter (any concurrent write now re-seeds from scan → 0).
-	ps.vaultCounters.Delete(ws)
-	// Also drain any pending coalescer entry so a concurrent 100ms flush cannot
-	// write the stale count back to Pebble after the point-delete in Step 1.
-	ps.counterFlush.Delete(ws)
-
-	// Step 2b: drain any in-flight provenance writes (0x16 keys) so they land
+	// Drain any in-flight provenance writes (0x16 keys) so they land
 	// BEFORE the range tombstones, not after. If they landed after the tombstones
 	// they would be visible to iterators despite the vault being cleared.
 	if ps.provWork != nil {
@@ -105,17 +105,22 @@ func (ps *PebbleStore) ClearVault(ctx context.Context, ws [8]byte) (int64, error
 		hi[0] = p
 		copy(hi[1:], wsPlus[:])
 		if err := batch.DeleteRange(lo, hi, nil); err != nil {
-			// On error here, Steps 1-2 have already removed VaultCountKey from Pebble
-			// and evicted the in-memory counter, but data keys remain.
-			// Recovery on restart via getOrInitCounter scan is self-healing.
+			// Nothing committed. The deferred count reset still runs, and the
+			// next access seeds from a scan of what is stored.
 			return 0, fmt.Errorf("clear vault: delete range 0x%02X: %w", p, err)
 		}
 	}
 	if err := ps.deleteVaultEntityReverseIndex(batch, ws); err != nil {
 		return 0, fmt.Errorf("clear vault: delete entity reverse index: %w", err)
 	}
+	if h := ps.clearBeforeRangeDeleteForTest; h != nil {
+		h()
+	}
 	if err := ps.commitBatch(batch, pebble.Sync); err != nil {
 		return 0, fmt.Errorf("clear vault: commit: %w", err)
+	}
+	if h := ps.clearAfterRangeDeleteForTest; h != nil {
+		h()
 	}
 
 	// Step 4: evict all in-memory caches.

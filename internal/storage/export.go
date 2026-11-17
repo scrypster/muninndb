@@ -264,6 +264,15 @@ func (ps *PebbleStore) ImportVaultData(
 	// Bulk raw-KV copy bypasses the per-engram lifecycle hooks: drop the
 	// target's retired set so its next reader rebuilds it (retired.go).
 	defer ps.resetRetired(wsTarget)
+	// The count is reset on every exit, success or not: batches commit as the
+	// archive streams in, so even a failed import has changed what is stored.
+	// The next access seeds from a scan (vault_count.go). The archive's own
+	// count key is never imported, see below.
+	defer func() {
+		if err := ps.resetVaultCount(wsTarget); err != nil {
+			slog.Warn("import: vault count reset failed", "vault", vaultName, "err", err)
+		}
+	}()
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("import: gzip reader: %w", err)
@@ -387,6 +396,13 @@ func (ps *PebbleStore) ImportVaultData(
 				copy(fullKey[9:], strippedKey[1:])
 
 				prefixByte := strippedKey[0]
+
+				// The archive's 9-byte vault count key is the SOURCE's saved
+				// count, possibly stale or inflated. Never import it: the
+				// target's count is reset after the import and recounted.
+				if prefixByte == prefix.VaultCount && len(strippedKey) == 1 {
+					continue
+				}
 
 				// Deduplication: for EngramKey (prefix.Engram), check if this engram already exists
 				// in the target vault. If it does, record its ID in skipIDs so that all
@@ -513,9 +529,6 @@ func (ps *PebbleStore) ImportVaultData(
 			kv.batch.Close()
 			kv.committed = true
 
-			// Seed the in-memory vault counter.
-			vc := ps.getOrInitCounter(ctx, wsTarget)
-			vc.count.Store(kv.engramCount)
 		}
 	}
 
@@ -531,10 +544,6 @@ func (ps *PebbleStore) ImportVaultData(
 			}
 		}
 		kv.batch.Close()
-
-		// Seed the in-memory vault counter.
-		vc := ps.getOrInitCounter(ctx, wsTarget)
-		vc.count.Store(kv.engramCount)
 
 		return &ExportResult{
 			EngramCount: kv.engramCount,

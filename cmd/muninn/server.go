@@ -1483,6 +1483,13 @@ func runServer() {
 
 		coordinator.OnBecameCortex = func(epoch uint64) {
 			slog.Info("[cluster] node promoted to Cortex — starting cognitive workers", "epoch", epoch)
+			// A follower applied the leader's writes as raw records and never
+			// moved its own vault counts. Only a leader prunes, and a stale count
+			// under max_engrams prunes real memories, so every count is reset
+			// here and seeded from a scan on next access.
+			if err := store.ResetAllVaultCounts(); err != nil {
+				slog.Error("[cluster] vault count reset at promotion failed", "err", err)
+			}
 			cogHeb = cognitive.NewHebbianWorker(hebbianStore)
 			contra := cognitive.NewContradictWorker(contradictStore)
 			conf := cognitive.NewConfidenceWorker(confidenceStore)

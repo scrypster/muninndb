@@ -95,28 +95,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It used to end only when the process's run context was cancelled, so a prune still running
   when the store was closed next panicked with "pebble: closed". Seen killing a test run under
   the race detector, and possible at server shutdown.
-- Vaults with `max_engrams` set could lose memories they should have kept. The server keeps
-  a count of each vault's memories and saves it. When the first thing a server process did
-  with a vault was write to it, that first write was counted twice: once by the scan that
-  sets up the count and once more as a new write. A vault's count therefore read one high
-  after its first single write, and twice the batch size after a first batch write. The
-  saved count is trusted on every later start, so the error never went away. The pruner
-  deletes `count - max_engrams` memories, so it deleted real memories to make up for ones
-  that did not exist, and kept the vault below its limit from then on. Measured on a test
-  vault: a first batch of 5 with `max_engrams: 5` pruned all 5. A first batch of 10 with
-  `max_engrams: 8` pruned all 10. Five single writes with `max_engrams: 3` left 2. Vaults
-  without `max_engrams` lost nothing, and `retention_days` does not use the count. The
-  count also feeds how rare recall judges an entity to be, so entity-boosted
-  `weighted_sum` scores were slightly high. A vault whose first action in a process was a
-  delete was counted one low in the same way, and a vault merge into a vault the process had
-  not touched yet counted the merged memories twice.
-  - **On upgrade**, migration v7 recounts every vault from the memories it actually holds
-    and logs each correction as `migration v7: vault memory count corrected` with the
-    vault, the saved count and the stored count. A vault with `max_engrams` whose saved
-    count was high has lost that many memories, or fewer if it never went over its limit.
-    Pruned memories are hard-deleted, so restore them from a backup if you need them.
-  - **Downgrade:** after migration v7 has run, an older binary refuses to start on the same
-    data, as after any migration.
+- Vaults with `max_engrams` set could lose memories they should have kept, and so could a
+  vault that was written to while it was being cleared. The server keeps a count of each
+  vault's memories in memory and saves it to disk. The pruner deletes `count - max_engrams`
+  memories, so a count that read too high deleted real memories to make room for ones that
+  did not exist. The count could read too high in several ways. A vault's first write in a
+  process was counted twice, and a first batch of k counted 2k. A merge into a vault the
+  process had not touched counted the merged memories twice. A write that landed while a
+  vault was being cleared brought the old count back to the empty vault. An imported vault
+  took the saved count from the archive. Measured on test vaults: a first batch of 5 with
+  `max_engrams: 5` pruned all 5, a first batch of 10 with `max_engrams: 8` pruned all 10,
+  and five single writes with `max_engrams: 3` left 2. The count could also read too low,
+  after a crash or when a delete and a write overlapped, which only stops the pruner early.
+  Vaults without `max_engrams` lost nothing, and `retention_days` does not use the count.
+  The count also feeds how rare recall judges an entity to be, so entity-boosted
+  `weighted_sum` scores were slightly off.
+  - **How it works now:** the count on disk is a copy of the count in memory, written only
+    by the background save, and trusted only after a clean shutdown. A start after a crash,
+    or the first start of this version, recounts every vault from the memories it holds and
+    logs each correction as `vault memory count corrected at start` with the vault, the saved
+    count and the stored count. A vault with `max_engrams` whose saved count was high may
+    have lost up to that many memories. Pruned memories are hard deleted, so restore them
+    from a backup if you need them.
+  - **The count includes soft-deleted memories**, and `max_engrams` counts them too. This is
+    unchanged here. On one production vault copy 29% of stored memories were soft-deleted.
+  - **Rollback:** no schema change, so an older binary still starts on the same data. The
+    next start of this version after an older one has changed a count recounts again.
+  - **Clusters:** a follower applies the leader's writes without moving its own counts, so
+    its counts are stale while it follows. They are reset when it becomes the leader, which
+    is the only role that prunes. Measured before this reset: a follower read 8 for 5 after
+    its leader forgot 3.
+  - **Not covered:** an older binary that is killed within about 100 ms of its last write
+    leaves counts that the next start of this version trusts. A write still running when
+    the server writes its clean-shutdown record is missing from the count until the next
+    unclean start.
 - Declaring `supersedes` inline on a new memory now retires the old one, exactly as
   `muninn_link` does. A write can carry links to existing memories: the `relationships`
   parameter of `muninn_remember` and `muninn_remember_batch`, and the `relationships` /
@@ -191,7 +203,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ok` and lag 0. Each replica now keeps a checksum of the last entry it applied and sends it
   when it joins. The leader compares it with its own entry at that position and refuses the
   join when they differ, or when the replica's position is past the end of the leader's log
-  (STO-27).
+  (STO-30).
   - **What you see:** `GET /v1/cluster/health` on the refused replica answers 503 with a new
     `reason` field, both nodes log `join: REFUSED`, and `muninn cluster status` prints the
     reason. The replica keeps voting and serving reads.

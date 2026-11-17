@@ -85,7 +85,7 @@ func seedReadOnlyPair(t *testing.T, eng *Engine, as *auth.Store, store *storage.
 	// Distinct, ordered creation times. An id's millisecond comes from its
 	// CreatedAt and NewULID draws fresh entropy per call, so two writes in the
 	// same millisecond sorted at random. The Hebbian worker learns only on the
-	// key min(id)->max(id); when the partner sorted first it strengthened the
+	// key min(id)->max(id). When the partner sorted first it strengthened the
 	// partner->probe key and the seeded probe->partner edge stayed at 0.1
 	// (forced: 11 of 20 runs failed with "0.1 -> 0.1").
 	probeAt := time.Now().Add(-2 * time.Second)
@@ -210,8 +210,8 @@ func TestActivate_NotReadOnly_StillHebbianStrengthens(t *testing.T) {
 	if after <= initialWeight {
 		// Report what tells the causes apart: the worker learns only the key
 		// min(id)->max(id), so a probe that sorts after its partner sends the
-		// update to the reverse key (the CI failure: see seedReadOnlyPair); a
-		// zero score skips the pair; and the worker's counters show an event
+		// update to the reverse key (the CI failure, see seedReadOnlyPair). A
+		// zero score skips the pair. The worker's counters show an event
 		// that never arrived, was dropped, or failed to persist.
 		reverse, _ := store.GetAssocWeight(ctx, ws, partnerID, probeID)
 		for _, a := range resp.Activations {
