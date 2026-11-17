@@ -771,9 +771,21 @@ When connectivity is restored, reconciliation triggers automatically after ~2s (
 | `prune_interval_sec` | int | 60 | How often Cortex prunes fully-replicated WAL segments and replication-log entries |
 | `max_log_backlog` | int | 5000 | Hard ceiling on replication-log entries retained behind the head, regardless of replica acks. A Lobe left behind the prune point is dropped and rejoins via snapshot. `0` disables the ceiling (unbounded retention) |
 | `recon_delay_ms` | int | 2000 | Delay before reconciliation after Lobe reconnects |
-| `tls` | TLSConfig | — | Mutual TLS for inter-node traffic |
+| `tls` | TLSConfig | — | Read but **not applied** in this release. Inter-node traffic is not encrypted. See [Network security](#network-security) |
 
 Config files: `{dataDir}/muninn.yaml` (cluster: section) or `{dataDir}/cluster.yaml`.
+
+### Network security
+
+Traffic between cluster nodes is **not encrypted** in this release. The `tls` setting above is read but not applied, so memory contents, replication entries and elections travel between nodes as plain TCP.
+
+What the cluster secret does and does not cover:
+
+- A node asking to join sends a value derived from the secret, and the primary refuses a node that cannot produce it.
+- Peer hellos are signed with the secret. The signature does not change between connections, so it can be replayed, and the frames after it are not signed.
+- The answer to a join, and the replication stream that follows, carry nothing the joining node can check. Whatever answers a node's join dial is trusted by that node.
+
+So treat the cluster `bind_addr` like a database port: run the nodes on a private network you control, or link them over an encrypted tunnel such as WireGuard or a VPN, and firewall the cluster port so that only the other cluster members can reach it. With an empty `cluster_secret` any host that can reach the port can join.
 
 ### Environment Variables
 
