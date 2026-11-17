@@ -2383,8 +2383,10 @@ new restore code, and eight guards no test pinned. What changed, and why:
 - *The weight move checks its destination, and holds the pairs' guard locks through the commit.*
   The regression: a supersedes edge declared at 1.0 from an older memory onto a newer one, with
   a relates_to edge on the same directed pair, was erased by ordinary history-view recalls,
-  because the Hebbian worker moved relates_to up to 1.0 with a plain `Set`. On develop decay had
-  moved the supersedes edge off 1.0 first, so this branch's exemption made it permanent.
+  because the Hebbian worker moved relates_to up to 1.0 with a plain `Set`. Develop erased it too
+  when the recalls came before its first decay pass moved the supersedes edge off 1.0 (the review's
+  probe I, and the effect check through the binary). With supersedes exempt from decay it could
+  happen at any time (probe I2).
   Skipping supersedes inside the Hebbian update would not close it: the edge that moves is the
   other one. The review proposed the check alone. A check without the lock lets a Link pass its
   own check at the same destination before the move commits (the race the STO-15 lock closed
@@ -2415,3 +2417,16 @@ new restore code, and eight guards no test pinned. What changed, and why:
   all 2,581 newer to older (the direction `evolve` and inline supersedes write), none older to
   newer. Hebbian moves only older to newer pairs, so the regression above had no live instance
   there. 1,894 of the 2,581 share their directed pair with another relation.
+- *Effect check through the real binary (2026-11-16).* Develop (2aeb67f0) and this branch, each on
+  its own copy of the same production data, with invented vaults, driven over MCP and REST. The
+  binary has no decay clock, so time was moved offline between passes by setting the invented
+  edges' `lastActivated` back (the only time decay reads). On develop, a replaced memory lost its
+  `superseded_by` in the history view and accepted a rival link in five of seven shapes (a
+  negative weight deleted at the first pass, an edge at 1.0 erased by recall learning, two edges
+  archived after a day, two relations meeting at one floor key after 200 days, a co-activated edge
+  archived after 125 days). In a sixth (G) it kept the supersedes edge and silently lost the other
+  relation's link at the shared floor key. Recall's lazy restore then forked two memories, whose
+  evolve was refused as forked. On the branch every replaced memory kept its successor, every rival was
+  refused, and recall forked nothing. The branch's one-off restore, run over develop's data, put
+  back the archived edge whose target was free, left the one whose target a rival now held with a
+  WARN naming all three, logged one INFO line with the counts, and did not run again on restart.

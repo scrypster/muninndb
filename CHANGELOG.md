@@ -69,7 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used to happen when both reached the same weight. Recall learning could do it with ordinary
   history view recalls: a `supersedes` link declared at weight 1.0 from an older memory onto a
   newer one was erased once another link between the same two memories climbed to 1.0. Such a
-  link now keeps the weight it has.
+  link now keeps the weight it has. A link of another relation between the same two memories, at
+  the weight a `supersedes` link between them already has, is refused for as long as both exist,
+  with an error naming both relations. Choose another weight. Before, such a link was accepted once
+  decay had moved the `supersedes` link, and one of the two was lost later when both decayed to the
+  same weight.
 - Swift SDK: `writeBatch` no longer fails on every successful batch. The SDK expected each
   item of the response to carry `created_at`, which the server has never sent, so decoding
   threw `keyNotFound` after the memories had already been stored. `BatchWriteResult` now has
