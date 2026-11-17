@@ -33,7 +33,7 @@ const RULES = [
       'check. If a field was added, renamed, retyped, or removed:',
       '',
       '- `sdk/python/` + `sdk/muninndb/` (alias stub) — published to PyPI on tag',
-      '- `sdk/node/` — `@muninndb/client`, published to npm on tag',
+      '- `sdk/node/` — `@muninndb/client`, not on npm yet (the publish job skips without NPM_TOKEN)',
       '- `sdk/php/` — split-pushed to the `muninndb-php` repo on tag',
       '- `sdk/go/`, `sdk/kotlin/`, `sdk/swift/` — ship in-repo, no separate publish',
       '',

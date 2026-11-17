@@ -14,7 +14,11 @@ Official TypeScript / Node.js SDK for **MuninnDB** — the cognitive memory data
 ## Installation
 
 ```bash
-npm install @muninndb/client
+# @muninndb/client is not on npm yet. Build it from this repository:
+git clone https://github.com/scrypster/muninndb.git
+cd muninndb/sdk/node && npm ci && npm run build && npm pack
+# then, in your project, install the .tgz file that npm pack printed:
+npm install /path/to/muninndb/sdk/node/muninndb-client-<version>.tgz
 ```
 
 ## Quick Start
