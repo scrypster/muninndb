@@ -313,13 +313,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaces. Carrying `verified` needs a credential that may assert `verified`: one that may
   not is refused rather than given a demoted copy. `muninn_evolve` adds a warning to its
   response when the level it carried is `verified` or `untrusted`, because the text that
-  level described has just changed; set the level with `muninn_trust`. An `upsert_mode` write
+  level described has just changed. Set the level with `muninn_trust`. An `upsert_mode` write
   that supplies `trust` or `confidence` now has them applied when the content changes: they
   were applied when the memory was created and dropped on every later change. An
   identical-content call is still a no-op, but an invalid or unauthorised `trust` on it is
   now rejected instead of ignored. Confidence is still not carried: an evolved memory is
   stored at confidence 1.0 unless an `upsert_mode` write supplies one, as before. The
-  `upsert_mode` descriptions (MCP and OpenAPI) said confidence was inherited; they now say
+  `upsert_mode` descriptions (MCP and OpenAPI) said confidence was inherited. They now say
   what happens. Nothing is migrated: versions written by an earlier release keep the
   `inferred` they were given. The version each one replaced still holds its original level,
   and `muninn_trust` on the current version restores it. `muninn_consolidate` is not changed
@@ -335,7 +335,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A confidence outside (0,1] is no longer stored. Confidence multiplies into the recall
   score, and a write could ask for 5 and get it. A value above 1 is now stored as 1, and 0, a
   negative value or NaN means not supplied, so the memory is stored at 1.0. This applies to
-  single and batch writes and to the content-change step of an `upsert_mode` write; MCP
+  single and batch writes and to the content-change step of an `upsert_mode` write. MCP
   already limited the value. A write cannot store 0 (#872).
 
 - A connected follower no longer serves a memory that was soft-deleted on the leader.

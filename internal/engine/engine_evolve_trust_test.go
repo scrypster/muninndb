@@ -1082,6 +1082,105 @@ func TestSetTrust_SupersededTargetIsRefusedAndNamesTheHead(t *testing.T) {
 	}
 }
 
+// TestSetTrust_AfterAnUndoneEvolve_SetsTheServedVersion: evolve A to B, forget
+// B, restore A is the ordinary way to undo an evolve, and evolve's own refusal
+// suggests it. Recall then serves A again. A trust level set on A must land on
+// A. Refusing it and naming the forgotten B would send the revocation to a
+// memory nobody is served, which is the silent loss the refusal exists to stop.
+// One step deeper, A to B to C, forget C, restore B: recall serves B, so a call
+// on A is refused naming B, not the forgotten C, and a call on B is accepted.
+// And a successor in another lifecycle state (completed) still carries the
+// chain, as it does for recall: a call on its predecessor is refused naming it.
+func TestSetTrust_AfterAnUndoneEvolve_SetsTheServedVersion(t *testing.T) {
+	eng, cleanup := testEnv(t)
+	defer cleanup()
+	ctx := withMode(auth.ModeWrite)
+	const vault = "trailwork"
+
+	a, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: vault, Concept: "Ford crossing depth",
+		Content: "The ford is knee deep in late summer.", Trust: "verified",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	b, err := eng.Evolve(ctx, vault, a.ID, "The ford is waist deep in late summer.", "resurveyed", nil, "")
+	if err != nil {
+		t.Fatalf("Evolve: %v", err)
+	}
+	if _, err := eng.Forget(ctx, &mbp.ForgetRequest{Vault: vault, ID: b.String()}); err != nil {
+		t.Fatalf("Forget the successor: %v", err)
+	}
+	if _, err := eng.Restore(ctx, vault, a.ID); err != nil {
+		t.Fatalf("Restore the original: %v", err)
+	}
+	if err := eng.SetTrust(ctx, vault, a.ID, "untrusted"); err != nil {
+		t.Fatalf("SetTrust on the restored version recall serves was refused: %v", err)
+	}
+	if got := readEngram(t, eng, vault, a.ID).Trust; got != storage.TrustUntrusted {
+		t.Errorf("restored version trust = %d (%s), want untrusted", got, got.String())
+	}
+
+	// A to B to C, forget C, restore B: B is the served version.
+	x, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: vault, Concept: "Switchback count",
+		Content: "The climb has twelve switchbacks.", Trust: "verified",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	y, err := eng.Evolve(ctx, vault, x.ID, "The climb has fourteen switchbacks.", "recounted", nil, "")
+	if err != nil {
+		t.Fatalf("Evolve x: %v", err)
+	}
+	z, err := eng.Evolve(ctx, vault, y.String(), "The climb has fifteen switchbacks.", "recounted again", nil, "")
+	if err != nil {
+		t.Fatalf("Evolve y: %v", err)
+	}
+	if _, err := eng.Forget(ctx, &mbp.ForgetRequest{Vault: vault, ID: z.String()}); err != nil {
+		t.Fatalf("Forget the head: %v", err)
+	}
+	if _, err := eng.Restore(ctx, vault, y.String()); err != nil {
+		t.Fatalf("Restore the middle version: %v", err)
+	}
+	err = eng.SetTrust(ctx, vault, x.ID, "untrusted")
+	if !errors.Is(err, ErrTrustTargetSuperseded) {
+		t.Fatalf("SetTrust on the first version with an active successor: want ErrTrustTargetSuperseded, got %v", err)
+	}
+	if !strings.Contains(err.Error(), y.String()) || strings.Contains(err.Error(), z.String()) {
+		t.Errorf("refusal must name the active successor %s and not the forgotten %s: %v", y.String(), z.String(), err)
+	}
+	if err := eng.SetTrust(ctx, vault, y.String(), "untrusted"); err != nil {
+		t.Fatalf("SetTrust on the restored middle version was refused: %v", err)
+	}
+	if got := readEngram(t, eng, vault, y.String()).Trust; got != storage.TrustUntrusted {
+		t.Errorf("restored middle version trust = %d (%s), want untrusted", got, got.String())
+	}
+
+	// A completed successor still carries the chain.
+	p, err := eng.Write(ctx, &mbp.WriteRequest{
+		Vault: vault, Concept: "Trail closure notice",
+		Content: "The north trail is closed for repairs.", Trust: "verified",
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	q, err := eng.Evolve(ctx, vault, p.ID, "The north trail repairs are scheduled for spring.", "updated", nil, "")
+	if err != nil {
+		t.Fatalf("Evolve: %v", err)
+	}
+	if err := eng.UpdateLifecycleState(ctx, vault, q.String(), "completed"); err != nil {
+		t.Fatalf("UpdateLifecycleState(completed): %v", err)
+	}
+	err = eng.SetTrust(ctx, vault, p.ID, "untrusted")
+	if !errors.Is(err, ErrTrustTargetSuperseded) || !strings.Contains(err.Error(), q.String()) {
+		t.Fatalf("SetTrust on the predecessor of a completed successor: want a refusal naming %s, got %v", q.String(), err)
+	}
+	if got := readEngram(t, eng, vault, p.ID).Trust; got != storage.TrustVerified {
+		t.Errorf("a refused SetTrust changed the retired version: trust=%s", got.String())
+	}
+}
+
 // TestSetTrust_RacingAnEvolve_NeverLandsOnARetiredVersion: SetTrust and an
 // evolve of the same memory, started together. Whatever the interleaving, a
 // SetTrust that reports success must be visible on the live version — it ran

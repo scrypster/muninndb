@@ -133,6 +133,13 @@ func (e *Engine) refuseSupersededEvolveTarget(ctx context.Context, ws [8]byte, t
 //
 // Like the evolve guard this is a writer's walk, not gated by recall
 // visibility, and it costs an ordinary target one reverse-association read.
+//
+// A successor counts unless recall's walk would treat it as retracted
+// (supersederRetracted: archived, or plainly forgotten). Evolve A to B, forget
+// B, restore A is the ordinary undo of an evolve: B keeps its supersedes link,
+// but the supersession is voided at that hop and recall serves A, so the level
+// is set on A. A successor in any other state (completed, paused, retired by a
+// later evolve) still carries the chain, exactly as it does for recall.
 func (e *Engine) refuseSupersededTrustTarget(ctx context.Context, ws [8]byte, target storage.ULID) error {
 	succ, err := e.distinctSuperseders(ctx, ws, target)
 	if err != nil {
@@ -151,23 +158,39 @@ func (e *Engine) refuseSupersededTrustTarget(ctx context.Context, ws [8]byte, ta
 	limit := e.supersessionWalkLimit(ctx, ws)
 	visited := map[storage.ULID]bool{target: true}
 	cur := target
+	servedIs := func(v storage.ULID) error {
+		if v == target {
+			return nil
+		}
+		return refuse(fmt.Sprintf("Its current version is %s. Set the trust level on %s instead.", v.String(), v.String()))
+	}
 	for depth := 0; depth < limit; depth++ {
 		if len(succ) > 1 {
-			return refuse(fmt.Sprintf("Its version history is forked at %s; read it with muninn_read and set the level on the version you mean.", cur.String()))
+			return refuse(fmt.Sprintf("Its version history is forked at %s. Read it with muninn_read and set the level on the version you mean.", cur.String()))
 		}
 		next := succ[0]
 		if visited[next] {
 			return refuse(fmt.Sprintf("Its supersession chain has a cycle at %s.", next.String()))
 		}
 		visited[next] = true
+		eng, err := e.store.GetEngram(ctx, ws, next)
+		if errors.Is(err, storage.ErrNotFound) {
+			return servedIs(cur) // a dangling edge ends the chain, as it does for recall
+		}
+		if err != nil {
+			return fmt.Errorf("trust: read successor %s: %w", next.String(), err)
+		}
+		if supersederRetracted(eng) {
+			return servedIs(cur) // supersession voided at this hop, as recall treats it
+		}
 		cur = next
 		succ, err = e.distinctSuperseders(ctx, ws, cur)
 		if err != nil {
 			return fmt.Errorf("trust: walk successor chain: %w", err)
 		}
 		if len(succ) == 0 {
-			return refuse(fmt.Sprintf("Its current version is %s — set the trust level on %s instead.", cur.String(), cur.String()))
+			return servedIs(cur)
 		}
 	}
-	return refuse(fmt.Sprintf("Its successor chain is longer than %d hops; the last version reached is %s.", limit, cur.String()))
+	return refuse(fmt.Sprintf("Its successor chain is longer than %d hops. The last version reached is %s.", limit, cur.String()))
 }
