@@ -11,11 +11,17 @@ import (
 )
 
 // countRawRelationshipKeys returns the number of RAW 0x21 keys in a vault.
-// Paired with countRelEntityIndexKeys so a failure can say WHICH path
-// DeleteEngram took: if 0x21 survives alongside 0x26, the delete fell through
-// to the key-only fallback and skipped deleteEntityLinks entirely; if 0x21 is
-// gone but 0x26 remains, deleteEntityLinks ran and its length guard skipped
-// the key.
+// Paired with countRelEntityIndexKeys so a failure can say HOW the cleanup
+// was lost, not just that it was:
+//
+//   - 0x21 > 0 alongside 0x26 > 0 means NO 0x21/0x26 deletes were queued at
+//     all. Two paths share that signature: DeleteEngram's key-only fallback
+//     (which skips deleteEntityLinks), and deleteEntityLinks' own rel-iter
+//     open failure (entity.go), which returns before queuing them while
+//     DeleteEngram only WARNs and commits anyway. It does NOT tell those two
+//     apart.
+//   - 0x21 == 0 with 0x26 > 0 is exact: deleteEntityLinks ran and its length
+//     guard skipped the key.
 func countRawRelationshipKeys(t *testing.T, store *PebbleStore, ws [8]byte) int {
 	t.Helper()
 	p := make([]byte, 1+8)
@@ -388,9 +394,10 @@ func TestDeleteEngram_CleansRelEntityIndex(t *testing.T) {
 	afterIdx := countRelEntityIndexKeys(t, store, ws)
 	require.Equal(t, 0, afterIdx,
 		"raw 0x26 key count after DeleteEngram must be zero (0x21 keys left: %d; "+
-			"0x21 > 0 means DeleteEngram took its key-only fallback and never ran "+
-			"deleteEntityLinks; 0x21 == 0 means deleteEntityLinks ran and its length "+
-			"guard skipped the key)", afterRel)
+			"0x21 > 0 means no 0x21/0x26 deletes were queued at all, from either the "+
+			"key-only fallback or a rel-iter open failure inside deleteEntityLinks; "+
+			"0x21 == 0 means deleteEntityLinks ran and its length guard skipped the "+
+			"key)", afterRel)
 	require.Equal(t, 0, afterRel, "raw 0x21 key count after DeleteEngram must be zero")
 
 	// After hard delete: 0x26 entries must be gone.
