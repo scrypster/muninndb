@@ -9,7 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- Each release reaches Packagist. The PHP SDK release tag goes on the split commit, whose
+  root holds `composer.json`. It used to go on the monorepo commit, which has none, so
+  Packagist listed no PHP SDK release between v0.2.3 and v0.12.1.
+
+### Internal
+
+- The Homebrew formula and the PHP SDK are published with short-lived tokens from the
+  organization's CI app. The personal token and the deploy key used before are refused
+  since the repositories moved into the scrypster organization.
 
 ---
 

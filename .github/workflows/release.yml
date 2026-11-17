@@ -230,11 +230,25 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      # The tap is pushed with a short-lived token from the scrypster-ci GitHub
+      # App, limited to homebrew-tap and to contents. The personal token used
+      # before stopped working when the repositories moved into the scrypster
+      # organization, whose policy refuses tokens that live longer than a year.
+      - name: Mint a token for homebrew-tap
+        id: tap-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SCRYPSTER_CI_APP_ID }}
+          private-key: ${{ secrets.SCRYPSTER_CI_PRIVATE_KEY }}
+          owner: scrypster
+          repositories: homebrew-tap
+          permission-contents: write
+
       - name: Checkout homebrew-tap
         uses: actions/checkout@v5
         with:
           repository: scrypster/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          token: ${{ steps.tap-token.outputs.token }}
           path: homebrew-tap
 
       - name: Download release binaries and compute SHA256s
