@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -813,10 +814,19 @@ func assocMonotonicAnchor(stored, incoming int32) int32 {
 // Unlike the batch form there is no per-pair skip channel to report through:
 // one call, one pair, so a dead endpoint is simply the call's error, and both
 // callers already log-and-continue on one.
+//
+// STO-15: moving an edge to a new weight is a write at a new key, and the key
+// does not carry the relation. A move onto a key another relation holds is
+// refused with ErrAssocRelTypeCollision and the edge keeps its weight. The
+// check and the commit are held together by the pair's guard lock, as in
+// WriteAssociation.
 func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, a, b ULID, weight float32, countDelta uint32) error {
 	if err := ps.checkEndpointsLive(wsPrefix, [16]byte(a), [16]byte(b)); err != nil {
 		return err
 	}
+	mu := ps.assocGuardLocks.For(assocPairLockKey(wsPrefix, a, b))
+	mu.Lock()
+	defer mu.Unlock()
 
 	batch := ps.db.NewBatch()
 	defer batch.Close()
@@ -832,6 +842,9 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 	}
 	relType, confidence, createdAt, existingLastActivated, existingPeak, existingCoAct, existingRestoredAt, err := ps.getAssocValueFull(ctx, wsPrefix, a, b)
 	if err != nil {
+		return fmt.Errorf("update assoc weight: %w", err)
+	}
+	if err := checkRelTypeCollision(ps.db, wsPrefix, [16]byte(a), weight, [16]byte(b), relType); err != nil {
 		return fmt.Errorf("update assoc weight: %w", err)
 	}
 
@@ -903,7 +916,9 @@ func (ps *PebbleStore) UpdateAssocWeight(ctx context.Context, wsPrefix [8]byte, 
 
 // AssocBatchSkipError reports that UpdateAssocWeightBatch committed every
 // update whose existing metadata it could read, and SKIPPED the ones it could
-// not. It is returned alongside a successful commit — the batch that landed is
+// not, the ones with a dead endpoint, and the ones whose move would land on a
+// key another relation holds (STO-15, see CollisionSkips). It is returned
+// alongside a successful commit — the batch that landed is
 // durable — so a caller must treat it as "partially applied", not "failed".
 //
 // Skipped holds indices into the updates slice passed to the call, ascending.
@@ -945,6 +960,21 @@ func (e *AssocBatchSkipError) Error() string {
 // Pebble failure.
 func (e *AssocBatchSkipError) Unwrap() []error { return e.Errs }
 
+// CollisionSkips returns the indices of the updates skipped because the key
+// the edge would move to holds another relation (ErrAssocRelTypeCollision,
+// STO-15). Such an edge keeps the weight it has: the skip is the guard doing
+// its job, not a fault, and a caller that counts faults leaves these out.
+// Declared as a method for the same reason as SkippedUpdates.
+func (e *AssocBatchSkipError) CollisionSkips() []int {
+	var out []int
+	for i, err := range e.Errs {
+		if i < len(e.Skipped) && errors.Is(err, ErrAssocRelTypeCollision) {
+			out = append(out, e.Skipped[i])
+		}
+	}
+	return out
+}
+
 // UpdateAssocWeightBatch updates multiple association weights in a single Pebble
 // batch. Every update whose existing metadata could be read is committed
 // atomically — the batch is all-or-nothing about what it WRITES, so no pair is
@@ -978,7 +1008,31 @@ func (e *AssocBatchSkipError) Unwrap() []error { return e.Errs }
 // silently-wrong class one layer up, so a partial application returns
 // *AssocBatchSkipError naming each skipped pair and its cause, with the indices
 // the caller needs to know which of its updates did not land.
+//
+// # A move onto another relation's key is skipped too (STO-15)
+//
+// The weight is in the key and the relation is not, so moving an edge to a
+// weight another relation of the same pair sits at used to Set over that
+// relation and erase it. The Hebbian worker reached this with ordinary calls:
+// a relates_to edge climbing to 1.0 erased a supersedes edge declared at 1.0
+// on the same directed pair, the target looked free, and a rival was linked.
+// Such an update is skipped with ErrAssocRelTypeCollision as its cause
+// (AssocBatchSkipError.CollisionSkips) and the edge keeps its weight.
+//
+// Every pair in the batch has its guard lock held from the reads through the
+// commit, as WriteAssociation and a batch commit hold theirs, so a Link cannot
+// land on the destination between the check and the write, and a decay chunk
+// cannot commit inside this read-to-commit window (nor this one inside
+// decay's). Edges this batch itself moves are not visible to the check: the
+// in-tree callers send at most one update per pair.
 func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error {
+	lockKeys := make([][]byte, 0, len(updates))
+	for _, u := range updates {
+		lockKeys = append(lockKeys, assocPairLockKey(u.WS, ULID(u.Src), ULID(u.Dst)))
+	}
+	unlock := ps.assocGuardLocks.lockMany(lockKeys)
+	defer unlock()
+
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
@@ -1027,6 +1081,13 @@ func (ps *PebbleStore) UpdateAssocWeightBatch(ctx context.Context, updates []Ass
 				ULID(update.Src).String(), ULID(update.Dst).String(), err))
 			continue
 		}
+		if err := checkRelTypeCollision(ps.db, update.WS, update.Src, update.Weight, update.Dst, relType); err != nil {
+			skipped = append(skipped, i)
+			skipErrs = append(skipErrs, fmt.Errorf("pair %s->%s: %w",
+				ULID(update.Src).String(), ULID(update.Dst).String(), err))
+			continue
+		}
+		testAssocGuardPoint("weight-update", update.WS, ULID(update.Src), ULID(update.Dst))
 		applied++
 
 		// The decay anchor is monotonic: a late-arriving or remotely-produced
@@ -1146,6 +1207,12 @@ const assocDecayWriteEpsilon = 0.001
 // exactly that window (the assocWeightRepairPreFlushHook precedent).
 var decayPreCommitHook func()
 
+// decayPreLockHook is a TEST-ONLY seam, nil in production. It fires once per
+// decay chunk, after the scan collected the chunk from its snapshot and before
+// the pairs' guard locks are taken, so a test can change an edge the scan has
+// already read (the window the re-check exists for).
+var decayPreLockHook func()
+
 // decayEntry is one edge a decay pass moves, archives, deletes or re-stamps.
 type decayEntry struct {
 	src     [16]byte
@@ -1168,8 +1235,19 @@ type decayEntry struct {
 // The caller holds the STO-15 guard lock of every pair in the chunk and keeps
 // it through the commit.
 //
+// What the re-check covers is a change COMMITTED between the scan's snapshot
+// and these locks. What the held locks cover is a change committed between
+// this re-check and the chunk's commit, and only from a writer that takes the
+// pair's guard lock: WriteAssociation (every Link), a batch commit's guarded
+// edges, the weight update (the Hebbian worker and dream inference) and both
+// archive restores. Writers that take no pair lock can still commit in that
+// window, and decay then writes over them: the hard-delete cascade (a deleted
+// memory's edge written back) and the associations an engram write carries
+// inline. Both were open on develop before this guard existed, for the whole
+// pass rather than one chunk.
+//
 //   - The edge must still be at the key the scan read, with the same relation.
-//     The scan reads a snapshot, so a Link, a Hebbian update or a delete since
+//     The scan reads a snapshot, so a Link, a weight update or a delete since
 //     then would otherwise be overwritten by a stale value, or a deleted edge
 //     written back.
 //   - An archive must not replace another relation's archive row (the 0x25 key
@@ -1313,6 +1391,9 @@ func (ps *PebbleStore) DecayAssocWeights(ctx context.Context, wsPrefix [8]byte, 
 	flushChunk := func() error {
 		if len(chunk) == 0 {
 			return nil
+		}
+		if decayPreLockHook != nil {
+			decayPreLockHook()
 		}
 		lockKeys := make([][]byte, 0, len(chunk))
 		for _, e := range chunk {

@@ -13,6 +13,35 @@ import (
 	"github.com/scrypster/muninndb/internal/storage/keys"
 )
 
+// GetSupersedesRestoreMark reads the per-vault watermark (0x31) of the
+// one-time restore of archived supersedes edges. Returns 0 if the restore has
+// never completed over the vault.
+func (ps *PebbleStore) GetSupersedesRestoreMark(ctx context.Context, ws [8]byte) (uint8, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	v, err := Get(ps.db, keys.SupersedesRestoreMarkKey(ws))
+	if err != nil {
+		return 0, fmt.Errorf("read supersedes restore mark: %w", err)
+	}
+	if len(v) == 0 {
+		return 0, nil
+	}
+	return v[0], nil
+}
+
+// SetSupersedesRestoreMark records that the restore at the given version
+// completed over the vault. Local to the node that ran it, like the 0x2E
+// mark: only the leader runs the restore, and a node that becomes leader
+// later runs it over its own copy, which its replicated batches have kept
+// equal to the leader's.
+func (ps *PebbleStore) SetSupersedesRestoreMark(ctx context.Context, ws [8]byte, version uint8) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return ps.db.Set(keys.SupersedesRestoreMarkKey(ws), []byte{version}, pebble.NoSync)
+}
+
 // ArchivedSupersedesEdge is a supersedes edge an older binary's decay pass
 // moved to the 0x25 archive: Src declared that it supersedes Dst.
 type ArchivedSupersedesEdge struct {
@@ -74,11 +103,20 @@ const (
 	SupersedesLeftCollision
 	// SupersedesLeftNoRow: the row is no longer an archived supersedes row.
 	SupersedesLeftNoRow
+	// SupersedesAlreadyLive: the same source holds a live supersedes edge on
+	// the target already (it was linked again after the archive), so the
+	// declaration is in effect. The row is removed and nothing is written:
+	// restoring it would put a second live key for one declaration. holders
+	// names any other successor the target has (an existing fork, reported,
+	// never resolved here).
+	SupersedesAlreadyLive
 )
 
 // RestoreArchivedSupersedes puts one archived supersedes edge back, at the
 // weight it was declared with (its peak), when nothing else has taken its
-// target since. Otherwise it changes nothing and says why; holders names the
+// target since. When the same source is live on the target already, the row
+// is removed and nothing is written (SupersedesAlreadyLive). Otherwise it
+// changes nothing and says why; holders names the
 // target's other successors when that is the reason. The caller holds the
 // target's evolve lock, the lock every supersedes link of that target takes,
 // so no rival can land between the check and the write. The edge goes back in
@@ -108,10 +146,24 @@ func (ps *PebbleStore) RestoreArchivedSupersedes(ctx context.Context, ws [8]byte
 	if err != nil {
 		return 0, nil, fmt.Errorf("read successors of %s: %w", dst.String(), err)
 	}
+	alreadyLive := false
 	for _, s := range succ {
-		if s != src {
+		if s == src {
+			alreadyLive = true
+		} else {
 			holders = append(holders, s)
 		}
+	}
+	if alreadyLive {
+		batch := ps.db.NewBatch()
+		defer batch.Close()
+		_ = batch.Delete(archKey, nil)
+		testAssocGuardPoint("supersedes-restore", ws, src, dst)
+		if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
+			return 0, nil, fmt.Errorf("drop archived supersedes row: %w", err)
+		}
+		ps.replicateBatch(batch)
+		return SupersedesAlreadyLive, holders, nil
 	}
 	if len(holders) > 0 {
 		return SupersedesLeftTargetHeld, holders, nil
@@ -122,6 +174,7 @@ func (ps *PebbleStore) RestoreArchivedSupersedes(ctx context.Context, ws [8]byte
 	}
 
 	live := encodeArchiveValue(RelSupersedes, confidence, createdAt, lastActivated, peak, coAct, int32(time.Now().Unix()))
+	testAssocGuardPoint("supersedes-restore", ws, src, dst)
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 	_ = batch.Set(keys.AssocFwdKey(ws, [16]byte(src), w, [16]byte(dst)), live[:], nil)

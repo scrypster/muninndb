@@ -43,6 +43,9 @@ type restoredEdge struct {
 //     (RestoreArchivedSupersedes), under the target's evolve lock.
 //   - A row whose restore key holds a live edge of another relation (STO-15),
 //     checked under the pair's guard lock and held through the commit.
+//
+// A symmetric edge's mirrored row is removed with it only when that row holds
+// the same relation: the (dst, src) key can hold another edge's row.
 func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, srcID [16]byte, maxN int) ([][16]byte, error) {
 	if maxN <= 0 || maxN > restoreTopN {
 		maxN = restoreTopN
@@ -167,9 +170,16 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 
 	now := int32(time.Now().Unix())
 
-	lockKeys := make([][]byte, 0, len(candidates))
+	// The mirrored row of a symmetric edge sits under the swapped pair, whose
+	// guard lock decay holds when it archives an edge of that pair, so it is
+	// taken too: the mirror's relation is read below and must not change
+	// before the commit.
+	lockKeys := make([][]byte, 0, 2*len(candidates))
 	for _, c := range candidates {
 		lockKeys = append(lockKeys, assocPairLockKey(ws, ULID(srcID), ULID(c.dst)))
+		if c.relType.IsSymmetric() {
+			lockKeys = append(lockKeys, assocPairLockKey(ws, ULID(c.dst), ULID(srcID)))
+		}
 	}
 	unlock := ps.assocGuardLocks.lockMany(lockKeys)
 	defer unlock()
@@ -229,10 +239,23 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 		// row per edge. Deleting a key that was never written (a directional
 		// edge, or a symmetric edge whose sibling GC already reaped) is a
 		// harmless no-op.
+		//
+		// The mirrored key is (dst, src), with no relation in it, so it can
+		// hold a different edge's row: an older binary's decay archived
+		// across relations, and a store can hold relates_to under (S, D) and
+		// a supersedes declaration of D onto S under (D, S). That row is
+		// deleted only when it holds this edge's relation (STO-15: the
+		// restore never writes over another relation, live or archived).
 		if c.relType.IsSymmetric() {
-			_ = batch.Delete(keys.ArchiveAssocKey(ws, c.dst, srcID), nil)
+			mirror := keys.ArchiveAssocKey(ws, c.dst, srcID)
+			if mv, err := Get(ps.db, mirror); err == nil && mv != nil {
+				if mrel, _, _, _, _, _, _ := decodeAssocValue(mv); mrel == c.relType {
+					_ = batch.Delete(mirror, nil)
+				}
+			}
 		}
 
+		testAssocGuardPoint("lazy-restore", ws, ULID(srcID), ULID(c.dst))
 		restoredDsts = append(restoredDsts, c.dst)
 	}
 

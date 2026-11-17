@@ -37,7 +37,9 @@ type HebbianStore interface {
 	// A pair whose existing metadata cannot be read is skipped rather than
 	// overwritten with fabricated defaults, and reported through an error that
 	// also exposes SkippedUpdates() []int (indices into updates). Callers that
-	// act on an update landing must consult it.
+	// act on an update landing must consult it. An update whose move would land
+	// on a key another relation holds is skipped too (STO-15), and listed again
+	// by CollisionSkips() []int: that edge keeps its weight, which is not a fault.
 	UpdateAssocWeightBatch(ctx context.Context, updates []AssocWeightUpdate) error
 }
 
@@ -387,6 +389,12 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 	// fabricated defaults, and reported via an error that names the skipped
 	// indices (storage.AssocBatchSkipError). Matching on the method rather than
 	// the concrete type keeps this package free of a storage dependency.
+	//
+	// A store may also skip an update because the key the edge would move to
+	// holds another relation of the same pair (STO-15, reported through
+	// CollisionSkips). That edge keeps its weight: the guard worked, nothing is
+	// broken, so it is not counted as a fault and is logged at DEBUG only. Its
+	// callback is suppressed like any other update that did not land.
 	var batchErr error
 	notPersisted := map[int]struct{}{}
 	if len(updates) > 0 {
@@ -398,11 +406,23 @@ func (hw *HebbianWorker) processBatch(ctx context.Context, batch []CoActivationE
 				for _, i := range skipped {
 					notPersisted[i] = struct{}{}
 				}
-				slog.Error("hebbian: association weight updates skipped — existing metadata unreadable; "+
-					"the rest of the batch was applied",
-					"batch_size", len(updates),
-					"skipped", len(skipped),
-					"error", err)
+				kept := 0
+				var collided interface{ CollisionSkips() []int }
+				if errors.As(err, &collided) {
+					kept = len(collided.CollisionSkips())
+				}
+				if kept == len(skipped) {
+					batchErr = nil
+					slog.Debug("hebbian: association weight updates kept their weight, another relation holds the key they would move to",
+						"batch_size", len(updates), "kept", kept)
+				} else {
+					slog.Error("hebbian: association weight updates skipped, existing metadata unreadable or an endpoint gone, "+
+						"the rest of the batch was applied",
+						"batch_size", len(updates),
+						"skipped", len(skipped)-kept,
+						"kept_by_relation_guard", kept,
+						"error", err)
+				}
 			} else {
 				// Nothing landed: no update in this batch is persisted.
 				for i := range updates {

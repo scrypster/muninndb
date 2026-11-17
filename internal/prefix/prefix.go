@@ -100,6 +100,12 @@ const (
 	// history: 0x2B → 0x2D → 0x2E → 0x2F → 0x30 (0x2F taken by Replication,
 	// #726).
 	UpsertKey byte = 0x30
+	// SupersedesRestoreMark (0x31) — vault-scoped watermark for the one-time
+	// restore of the supersedes edges an older binary's association decay
+	// archived to 0x25 (2026-11-16). It is its own key, not a value of 0x2E,
+	// so the two passes keep separate version sequences: a later bump of
+	// either one's version cannot skip or repeat the other.
+	SupersedesRestoreMark byte = 0x31
 	// Capability (0x40/0x41 — clean since #612)
 	Capability         byte = 0x40
 	CapabilityVaultIdx byte = 0x41
@@ -183,6 +189,7 @@ var registry = []Entry{
 	{AssocWeightRepairMark, "storage", "AssocWeightRepairMark", "vault-scoped-data"},
 	{Replication, "replication", "Replication", "replication"},
 	{UpsertKey, "storage", "UpsertKey", "vault-scoped-data"},
+	{SupersedesRestoreMark, "storage", "SupersedesRestoreMark", "vault-scoped-data"},
 	{Capability, "capability", "Capability", "capability"},
 	{CapabilityVaultIdx, "capability", "CapabilityVaultIdx", "capability"},
 	{AdminUser, "auth", "AdminUser", "auth"},

@@ -38,6 +38,7 @@ var clearVaultDataPrefixes = []byte{
 	prefix.ProspectiveIntent,     // armed intentions (THE PUSH); a cleared vault must not keep firing notices
 	prefix.AssocWeightRepairMark, // a cleared vault has no associations left to repair
 	prefix.UpsertKey,             // upsert forward-index pins — must not outlive a cleared vault
+	prefix.SupersedesRestoreMark, // a cleared vault has no archived supersedes rows left to restore
 }
 
 // ClearVault deletes all data keys for a vault using Pebble range tombstones.
@@ -54,7 +55,7 @@ var clearVaultDataPrefixes = []byte{
 //  4. Evict all in-memory caches (L1, assocCache, metaCache, recentActiveCache).
 //
 // Prefixes cleared (vault-scoped): 0x01–0x0D, 0x10, 0x12–0x17, 0x1F,
-// 0x20–0x22, 0x24–0x2E, 0x30
+// 0x20–0x22, 0x24–0x2E, 0x30, 0x31
 // Prefixes NOT cleared (global or name keys):
 //   - 0x0E vault meta key (preserved by Clear, deleted by DeleteVaultNameOnly)
 //   - 0x0F name index    (global by name hash, deleted by DeleteVaultNameOnly)

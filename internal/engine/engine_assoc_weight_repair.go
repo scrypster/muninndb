@@ -15,11 +15,13 @@ import (
 // re-visit already-marked vaults.
 const assocWeightRepairVersion uint8 = 1
 
-// archivedSupersedesRestored is the 0x2E watermark value after the leader's
-// first decay pass over a vault has also restored the supersedes edges an
-// older binary's decay archived (restoreArchivedSupersedesOnce). It is above
-// assocWeightRepairVersion, so the startup pass still skips the vault.
-const archivedSupersedesRestored uint8 = 2
+// supersedesRestoreVersion is written to the per-vault 0x31 watermark after
+// the leader's decay pass over a vault has restored the supersedes edges an
+// older binary's decay archived (restoreArchivedSupersedesOnce). It is a key
+// of its own rather than a value of 0x2E: two passes sharing one byte share
+// one version sequence, so a later bump of assocWeightRepairVersion would have
+// either skipped this restore or re-run the startup repair on every boot.
+const supersedesRestoreVersion uint8 = 1
 
 // runLegacyFullWeightAssocRepair is a one-shot startup pass that relocates
 // pre-fix weight-1.0 association keys from the weight-0.0 key position the
@@ -221,27 +223,31 @@ func defaultAssocWeightRepairDelay() time.Duration {
 }
 
 // restoreArchivedSupersedesOnce runs restoreArchivedSupersedes for a vault the
-// startup pass has marked at version 1 and nothing has marked higher, then
-// marks it archivedSupersedesRestored. It is called from decayAllVaults, after
-// the leader gate, because what it decides depends on which successors a
-// target has: a follower that decided on its own, a replication lag behind the
-// leader, could restore an edge the leader leaves archived and fork a target
-// the leader does not. The leader decides, and its batches reach the
-// followers. A failure is logged and retried on the next decay pass; it never
-// stops decay, which no longer touches supersedes edges or overwrites another
-// relation's archive row.
+// startup pass has swept (0x2E at or above assocWeightRepairVersion: the legacy
+// repair comes first) and whose 0x31 mark is below supersedesRestoreVersion,
+// then marks it. It is called from decayAllVaults, after the leader gate,
+// because what it decides depends on which successors a target has: a
+// follower that decided on its own, a replication lag behind the leader, could
+// restore an edge the leader leaves archived and fork a target the leader does
+// not. The leader decides, and its batches reach the followers. A failure is
+// logged and retried on the next decay pass; it never stops decay, which no
+// longer touches supersedes edges or overwrites another relation's archive row.
 func (e *Engine) restoreArchivedSupersedesOnce(ctx context.Context, vaultName string, ws [8]byte) {
-	mark, err := e.store.GetAssocWeightRepairMark(ctx, ws)
-	if err != nil || mark != assocWeightRepairVersion {
+	swept, err := e.store.GetAssocWeightRepairMark(ctx, ws)
+	if err != nil || swept < assocWeightRepairVersion {
+		return
+	}
+	done, err := e.store.GetSupersedesRestoreMark(ctx, ws)
+	if err != nil || done >= supersedesRestoreVersion {
 		return
 	}
 	if err := e.restoreArchivedSupersedes(ctx, vaultName, ws); err != nil {
 		if ctx.Err() == nil {
-			slog.Warn("engine: restoring archived supersedes edges failed; retried on the next decay pass", "vault", vaultName, "err", err)
+			slog.Warn("engine: restoring archived supersedes edges failed, retried on the next decay pass", "vault", vaultName, "err", err)
 		}
 		return
 	}
-	if err := e.store.SetAssocWeightRepairMark(ctx, ws, archivedSupersedesRestored); err != nil {
+	if err := e.store.SetSupersedesRestoreMark(ctx, ws, supersedesRestoreVersion); err != nil {
 		slog.Warn("engine: archived supersedes restore: write watermark", "vault", vaultName, "err", err)
 	}
 }
@@ -249,20 +255,22 @@ func (e *Engine) restoreArchivedSupersedesOnce(ctx context.Context, vaultName st
 // restoreArchivedSupersedes restores, for one vault, the supersedes edges an
 // older binary's decay archived (moved to 0x25). From then on such an edge's
 // target looked free: a rival could be linked, and a recall's lazy restore
-// then forked the target. Each archived supersedes edge is put
-// back under the target's evolve lock (the lock every supersedes link of that
-// target takes) when nothing else has taken the target since. When something
-// has, the store holds two declarations for one memory, and this changes
-// neither: the row stays archived, the other successor stays live and in
-// effect, and a WARN names all of them. To keep the archived one instead, a
-// person hard-deletes the live one and links the archived one again. Nothing
-// is deleted here.
+// then forked the target. Each archived supersedes edge is put back under the
+// target's evolve lock (the lock every supersedes link of that target takes)
+// when nothing else has taken the target since. When something has, the store
+// holds two declarations for one memory, and this changes neither: the row
+// stays archived, the other successor stays live and in effect, and a WARN
+// names all of them. To keep the archived one instead, a person hard-deletes
+// the live one and links the archived one again. A row whose key another
+// relation holds stays archived too, and a WARN names it. A row whose source
+// was linked to the target again since is already in effect: the row is
+// dropped and nothing is written. Nothing live is deleted here.
 func (e *Engine) restoreArchivedSupersedes(ctx context.Context, vaultName string, ws [8]byte) error {
 	rows, err := e.store.ArchivedSupersedes(ctx, ws)
 	if err != nil {
 		return err
 	}
-	var restored, held, gone, collided int
+	var restored, already, held, gone, collided int
 	for _, r := range rows {
 		mu := e.evolveLock(ws, r.Dst)
 		mu.Lock()
@@ -271,26 +279,35 @@ func (e *Engine) restoreArchivedSupersedes(ctx context.Context, vaultName string
 		if err != nil {
 			return err
 		}
+		others := make([]string, len(holders))
+		for i, h := range holders {
+			others[i] = h.String()
+		}
 		switch outcome {
 		case storage.SupersedesRestored:
 			restored++
+		case storage.SupersedesAlreadyLive:
+			already++
+			if len(holders) > 0 {
+				slog.Warn("engine: a target already has more than one successor, which this restore does not resolve, nothing was deleted",
+					"vault", vaultName, "target", r.Dst.String(), "successor", r.Src.String(), "other_successors", strings.Join(others, ","))
+			}
 		case storage.SupersedesLeftTargetHeld:
 			held++
-			others := make([]string, len(holders))
-			for i, h := range holders {
-				others[i] = h.String()
-			}
-			slog.Warn("engine: an archived supersedes edge was left archived because its target has another successor now, which stays in effect; nothing was deleted",
+			slog.Warn("engine: an archived supersedes edge was left archived because its target has another successor now, which stays in effect, nothing was deleted",
 				"vault", vaultName, "archived_successor", r.Src.String(), "target", r.Dst.String(), "other_successors", strings.Join(others, ","))
 		case storage.SupersedesLeftEndpointGone:
 			gone++
 		case storage.SupersedesLeftCollision:
 			collided++
+			slog.Warn("engine: an archived supersedes edge was left archived because an edge of another relation holds the key it would be restored at",
+				"vault", vaultName, "archived_successor", r.Src.String(), "target", r.Dst.String())
 		}
 	}
 	if len(rows) > 0 {
 		slog.Info("engine: archived supersedes edges examined", "vault", vaultName, "restored", restored,
-			"left_target_has_another_successor", held, "left_endpoint_gone", gone, "left_key_held_by_another_relation", collided)
+			"already_live", already, "left_target_has_another_successor", held, "left_endpoint_gone", gone,
+			"left_key_held_by_another_relation", collided)
 	}
 	return nil
 }
