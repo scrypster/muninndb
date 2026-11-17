@@ -1588,6 +1588,13 @@ func (s *Server) handleEvolve(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.engine.Evolve(r.Context(), ctxVault(r), id, body.NewContent, body.Reason)
 	if err != nil {
+		// A request the engine refuses as invalid is the caller's to fix, not a
+		// storage failure: answer it the way POST /api/engrams answers the same
+		// error. An invalid request must never surface as a 500.
+		if errors.Is(err, engine.ErrInvalidRequest) {
+			s.sendError(r, w, http.StatusUnprocessableEntity, ErrInvalidEngram, err.Error())
+			return
+		}
 		s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 		return
 	}

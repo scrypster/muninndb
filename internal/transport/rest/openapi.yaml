@@ -104,6 +104,7 @@ components:
           type: number
           format: float
           default: 0
+          description: "Belief that the fact is true, in (0,1]. Omitted, 0 or negative means not supplied, and the memory is stored at 1.0; a value above 1 is stored as 1. A write cannot store 0."
         stability:
           type: number
           format: float
@@ -126,7 +127,7 @@ components:
         upsert_mode:
           type: boolean
           default: false
-          description: "When true with idempotent_id set, keep one stable memory per key: created on first use, evolved (superseding the previous version, which stays retrievable as history) when the content changes, and a no-op when the content is identical. Requires idempotent_id. On the evolve step only content, concept and importance are taken from the request; tags, confidence and trust are inherited from the previous version."
+          description: "When true with idempotent_id set, keep one stable memory per key: created on first use, evolved (superseding the previous version, which stays retrievable as history) when the content changes, and a no-op when the content is identical. Requires idempotent_id. On the evolve step content always comes from the request, and tags, memory type and type label are always inherited from the previous version; concept, importance and trust are inherited too unless the request supplies them, in which case the request's value is honored (trust=verified, supplied or inherited, requires a write or full credential). Confidence is not inherited: a confidence in (0,1] on the request is applied, otherwise the new version is stored at 1.0. These values apply only when the content changes: an identical-content call is a no-op and applies none of them, though an invalid or unauthorised trust is still rejected."
         memory_type:
           type: integer
           format: uint8
@@ -2549,6 +2550,7 @@ paths:
     post:
       tags: [cognitive]
       summary: "Evolve the content of an engram, preserving history."
+      description: "Creates a new version of the memory and keeps the old one as history. The new version carries the previous version's trust level: editing the content does not clear an `untrusted` flag and does not drop a `verified` one. The response carries the new id only; nothing in it says which level was carried. REST has no operation that changes the trust level of an existing memory today; it can be changed with `muninn_trust` over MCP. Confidence is not carried: the new version is stored at confidence 1.0."
       security:
         - BearerAuth: []
       parameters:
@@ -2583,6 +2585,12 @@ paths:
           $ref: "#/components/responses/NotCortex"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "422":
+          description: "The request was well-formed but the engine refused it as invalid. Nothing was written."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
 

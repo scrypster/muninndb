@@ -1007,13 +1007,30 @@ func TestSmoke_AllMCPTools(t *testing.T) {
 	})
 
 	t.Run("muninn_trust", func(t *testing.T) {
+		// A memory of its own: idA has been superseded by an earlier step, and
+		// muninn_trust refuses a superseded memory (it names the current
+		// version instead), so setting a level on idA would test the refusal,
+		// not the tool.
+		r := mcpTool(t, tok, "muninn_remember", map[string]any{
+			"vault":   vault,
+			"concept": "trust target",
+			"content": "a memory whose trust level the smoke test sets",
+		})
+		id, _ := r["id"].(string)
+		if id == "" {
+			t.Fatalf("failed to create a memory for muninn_trust: %v", r)
+		}
 		result := mcpTool(t, tok, "muninn_trust", map[string]any{
 			"vault": vault,
-			"id":    idA,
+			"id":    id,
 			"trust": "verified",
 		})
 		if errVal, hasErr := result["error"]; hasErr {
 			t.Errorf("muninn_trust returned error field: %v", errVal)
+		}
+		read := mcpTool(t, tok, "muninn_read", map[string]any{"vault": vault, "id": id})
+		if got, _ := read["trust"].(string); got != "verified" {
+			t.Errorf("muninn_trust did not land: read back trust=%q, want verified", got)
 		}
 	})
 
