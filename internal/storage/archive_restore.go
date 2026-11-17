@@ -32,6 +32,17 @@ type restoredEdge struct {
 // selects the top maxN by consolidation score, restores them to the live index
 // at peakWeight * 0.25, stamps restoredAt = now on the live write, and removes
 // them from the archive. Returns the restored dst IDs.
+//
+// Two rows are left where they are:
+//
+//   - A SUPERSEDES row. This runs on recall, holding no lock that orders it
+//     against a supersedes link of the same target, so it cannot know whether
+//     another memory took the target after the row was archived, and restoring
+//     it then forked the target. Decay no longer archives supersedes edges; the
+//     rows an older binary left are restored by the startup association repair
+//     (RestoreArchivedSupersedes), under the target's evolve lock.
+//   - A row whose restore key holds a live edge of another relation (STO-15),
+//     checked under the pair's guard lock and held through the commit.
 func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, srcID [16]byte, maxN int) ([][16]byte, error) {
 	if maxN <= 0 || maxN > restoreTopN {
 		maxN = restoreTopN
@@ -114,6 +125,9 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 		copy(dstID[:], k[25:41])
 
 		relType, confidence, createdAt, lastActivated, peakWeight, coActivationCount, _ := decodeAssocValue(v)
+		if relType == RelSupersedes {
+			continue
+		}
 
 		daysSince := time.Since(time.Unix(int64(lastActivated), 0)).Hours() / 24
 		if daysSince < 1 {
@@ -153,6 +167,13 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 
 	now := int32(time.Now().Unix())
 
+	lockKeys := make([][]byte, 0, len(candidates))
+	for _, c := range candidates {
+		lockKeys = append(lockKeys, assocPairLockKey(ws, ULID(srcID), ULID(c.dst)))
+	}
+	unlock := ps.assocGuardLocks.lockMany(lockKeys)
+	defer unlock()
+
 	batch := ps.db.NewBatch()
 	defer batch.Close()
 
@@ -170,6 +191,9 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 		}
 
 		restoreW := c.restoreWeight
+		if checkRelTypeCollision(ps.db, ws, srcID, restoreW, c.dst, c.relType) != nil {
+			continue // another relation is live at that key: leave this row archived
+		}
 
 		// Encode the live value using the 30-byte archive format so that restoredAt is stamped.
 		// decodeAssocValue handles both 26-byte and 30-byte values via a length check.
@@ -212,6 +236,9 @@ func (ps *PebbleStore) RestoreArchivedEdges(ctx context.Context, ws [8]byte, src
 		restoredDsts = append(restoredDsts, c.dst)
 	}
 
+	if batch.Empty() {
+		return nil, nil
+	}
 	if err := ps.commitBatch(batch, pebble.NoSync); err != nil {
 		return nil, err
 	}
