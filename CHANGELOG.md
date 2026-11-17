@@ -203,7 +203,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ok` and lag 0. Each replica now keeps a checksum of the last entry it applied and sends it
   when it joins. The leader compares it with its own entry at that position and refuses the
   join when they differ, or when the replica's position is past the end of the leader's log
-  (STO-30).
+  (STO-27).
   - **What you see:** `GET /v1/cluster/health` on the refused replica answers 503 with a new
     `reason` field, both nodes log `join: REFUSED`, and `muninn cluster status` prints the
     reason. The replica keeps voting and serving reads.
