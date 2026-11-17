@@ -214,19 +214,29 @@ func (l *ReplicationLog) ReadSince(afterSeq uint64, limit int) ([]ReplicationEnt
 // Lobe has not yet applied will cause a permanent replication gap — the Lobe
 // must rejoin via snapshot if it falls behind a pruned point.
 func (l *ReplicationLog) Prune(untilSeq uint64) error {
+	_, err := l.prune(untilSeq)
+	return err
+}
+
+// prune is Prune, and also reports whether this call issued a delete. It is
+// false for both early returns: a watermark at or past the head (the head
+// entry is never pruned, so a cluster whose replicas have all acknowledged the
+// head prunes nothing until the next write), and a watermark this process has
+// already pruned to. The caller logs a prune only when one happened.
+func (l *ReplicationLog) prune(untilSeq uint64) (deleted bool, err error) {
 	l.mu.Lock()
 	if err := l.ensureSeqInit(); err != nil {
 		l.mu.Unlock()
-		return err
+		return false, err
 	}
 	seq := l.seq
 	if untilSeq >= seq {
 		l.mu.Unlock()
-		return nil // nothing to prune
+		return false, nil // nothing to prune
 	}
 	if untilSeq <= l.lastPruned {
 		l.mu.Unlock()
-		return nil // already pruned past this watermark
+		return false, nil // already pruned past this watermark
 	}
 	from := l.lastPruned + 1
 	l.lastPruned = untilSeq
@@ -245,10 +255,10 @@ func (l *ReplicationLog) Prune(untilSeq uint64) error {
 	batch := l.db.NewBatch()
 	defer batch.Close()
 	if err := batch.DeleteRange(startKey, endKey, nil); err != nil {
-		return fmt.Errorf("replication log prune: delete range: %w", err)
+		return false, fmt.Errorf("replication log prune: delete range: %w", err)
 	}
 	if err := batch.Commit(nil); err != nil {
-		return fmt.Errorf("replication log prune: commit: %w", err)
+		return false, fmt.Errorf("replication log prune: commit: %w", err)
 	}
 
 	// Reclaim the space now. Pebble deletes are tombstones — the bytes come
@@ -276,20 +286,49 @@ func (l *ReplicationLog) Prune(untilSeq uint64) error {
 			" reclaimed by a later compaction", "err", err, "from_seq", from, "until_seq", untilSeq)
 	}
 
-	return nil
+	return true, nil
 }
 
 // CurrentSeq returns the latest committed sequence number.
 // Thread-safe.
+//
+// It returns 0 when the counter cannot be read, which is indistinguishable
+// from an empty log. A caller that would act on a low value — refusing a
+// follower, for one — must use Head instead.
 func (l *ReplicationLog) CurrentSeq() uint64 {
+	seq, _ := l.Head()
+	return seq
+}
+
+// Head returns the latest committed sequence number, or an error when the
+// counter cannot be read from the store. Thread-safe.
+func (l *ReplicationLog) Head() (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	if err := l.ensureSeqInit(); err != nil {
-		return 0
+		return 0, err
 	}
+	return l.seq, nil
+}
 
-	return l.seq
+// sumAt returns the checksum (entrySum) of the entry this log holds at seq,
+// and whether it holds one. A pruned or never-written sequence is not an
+// error. Thread-safe: it reads the store directly.
+func (l *ReplicationLog) sumAt(seq uint64) (sum uint32, found bool, err error) {
+	val, closer, err := l.db.Get(replicationEntryKey(seq))
+	if err == pebble.ErrNotFound {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	defer closer.Close()
+	var e ReplicationEntry
+	if err := msgpack.Unmarshal(val, &e); err != nil {
+		return 0, false, fmt.Errorf("malformed log entry at seq %d: %w", seq, err)
+	}
+	return entrySum(e), true, nil
 }
 
 // AdvanceTo raises the sequence counter to seq when it is below it, so the next

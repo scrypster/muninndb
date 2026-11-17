@@ -2016,6 +2016,13 @@ components:
         replication_lag:
           type: integer
           format: int64
+        reason:
+          type: string
+          description: >-
+            Why the status is not ok when the lag does not explain it. Set on a
+            replica that has stopped replicating because its leader refused it:
+            it holds an entry the leader does not. The status is then `down`
+            and the response is a 503.
 
     ClusterNodesResponse:
       type: object
@@ -4375,7 +4382,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ClusterHealthResponse"
         "503":
-          description: "Cluster down."
+          description: "This node is down for cluster purposes: no role yet, too far behind, or a replica that has stopped replicating (see `reason`)."
           content:
             application/json:
               schema:

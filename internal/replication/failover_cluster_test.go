@@ -106,6 +106,7 @@ func newCluster(t *testing.T, ids, roles []string) []*clusterNode {
 			PruneIntervalSec: 3600,
 		}
 		n.coord = NewClusterCoordinator(cfg, n.log, n.applier, epochStore)
+		n.coord.haltRetry = testHaltRetry
 		n.appendFn = LocalAppendFunc(n.coord, n.log)
 	}
 	// Teardown in production order (cmd/muninn/server.go): stop every
@@ -453,9 +454,17 @@ func TestFailover_FollowerBehindNewLeaderReceivesItsWrites(t *testing.T) {
 		return fmt.Sprintf("%s holds %d of %d writes the new leader accepted (leader head %d, follower applied %d)",
 			behind.id, behind.count(post), len(post), ahead.log.CurrentSeq(), behind.applier.LastApplied())
 	})
+	if _, halted := behind.coord.ReplicationHalt(); halted {
+		t.Errorf("%s reports a replication halt. A follower behind its leader is not ahead of it", behind.id)
+	}
 	if got := behind.applier.LastApplied(); got != ahead.log.CurrentSeq() {
 		t.Errorf("%s applied position = %d, want the new leader's head %d", behind.id, got, ahead.log.CurrentSeq())
 	}
 	t.Logf("still open, not covered by the sequence rule: %s holds %d of the %d entries written while it lagged, "+
 		"and reports replication lag %d", behind.id, behind.count(gap), len(gap), behind.coord.ReplicationLag())
 }
+
+// testHaltRetry replaces the five seconds a refused follower waits before it
+// asks again (haltRetryInterval). The wait is not a tuning knob, and nothing
+// these tests assert depends on its length, only on its being there.
+const testHaltRetry = 100 * time.Millisecond

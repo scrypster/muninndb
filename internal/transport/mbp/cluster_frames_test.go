@@ -1,6 +1,7 @@
 package mbp
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -527,4 +528,258 @@ func TestFrameTypeConstants_NoConflicts(t *testing.T) {
 		}
 		clusterSeen[v] = name
 	}
+}
+
+// joinResponseBeforeLeaderHeadSeq is JoinResponse as every binary built before
+// LeaderHeadSeq encodes and decodes it: the same fields and tags, minus that
+// one. It stands in for the other side of a rolling upgrade.
+type joinResponseBeforeLeaderHeadSeq struct {
+	Accepted               bool           `msgpack:"accepted"`
+	CortexID               string         `msgpack:"cortex_id"`
+	CortexAddr             string         `msgpack:"cortex_addr"`
+	Epoch                  uint64         `msgpack:"epoch"`
+	Members                []GossipMember `msgpack:"members"`
+	RejectReason           string         `msgpack:"reject_reason,omitempty"`
+	NeedsSnapshot          bool           `msgpack:"needs_snapshot,omitempty"`
+	SnapshotSeq            uint64         `msgpack:"snapshot_seq,omitempty"`
+	MinProtocolVersion     uint16         `msgpack:"min_proto_ver,omitempty"`
+	CurrentProtocolVersion uint16         `msgpack:"current_proto_ver,omitempty"`
+}
+
+// TestJoinResponse_LeaderHeadSeqIsAdditiveOnTheWire pins the two properties
+// the field's design depends on.
+//
+// Additive: a binary without the field reads a response that carries it, and a
+// binary with the field reads one that does not, each losing nothing else.
+//
+// Absent is not zero: a Cortex with an empty log reports a head of 0 and a
+// follower that has applied anything is ahead of it, while a Cortex that says
+// nothing about its head has told the follower nothing. If a zero head were
+// dropped on encode, or an absent one decoded as zero, an upgraded follower
+// would refuse every Cortex that had not been upgraded yet.
+func TestJoinResponse_LeaderHeadSeqIsAdditiveOnTheWire(t *testing.T) {
+	head := func(v uint64) *uint64 { return &v }
+
+	t.Run("an older binary decodes a response that carries the head", func(t *testing.T) {
+		sent := JoinResponse{
+			Accepted: true, CortexID: "node-a", CortexAddr: "127.0.0.1:1", Epoch: 7,
+			Members:       []GossipMember{{ID: "node-b", Addr: "127.0.0.1:2", Role: 2, LastSeq: 9}},
+			LeaderHeadSeq: head(4242),
+		}
+		var got joinResponseBeforeLeaderHeadSeq
+		mustUnmarshal(t, mustMarshal(t, sent), &got)
+		if !got.Accepted || got.CortexID != "node-a" || got.CortexAddr != "127.0.0.1:1" || got.Epoch != 7 ||
+			len(got.Members) != 1 || got.Members[0].ID != "node-b" {
+			t.Errorf("an older binary lost fields decoding a newer response: %+v", got)
+		}
+	})
+
+	t.Run("a newer binary decodes an older response as head unknown", func(t *testing.T) {
+		sent := joinResponseBeforeLeaderHeadSeq{Accepted: true, CortexID: "node-a", Epoch: 7}
+		var got JoinResponse
+		mustUnmarshal(t, mustMarshal(t, sent), &got)
+		if got.LeaderHeadSeq != nil {
+			t.Errorf("LeaderHeadSeq = %d from a response that did not carry it, want nil", *got.LeaderHeadSeq)
+		}
+		if !got.Accepted || got.CortexID != "node-a" || got.Epoch != 7 {
+			t.Errorf("lost fields decoding an older response: %+v", got)
+		}
+	})
+
+	t.Run("a head of zero survives the round trip as zero, not as absent", func(t *testing.T) {
+		var got JoinResponse
+		mustUnmarshal(t, mustMarshal(t, JoinResponse{Accepted: true, LeaderHeadSeq: head(0)}), &got)
+		if got.LeaderHeadSeq == nil {
+			t.Fatal("a reported head of 0 was dropped on the wire: an empty log would look like an unknown one")
+		}
+		if *got.LeaderHeadSeq != 0 {
+			t.Errorf("LeaderHeadSeq = %d, want 0", *got.LeaderHeadSeq)
+		}
+	})
+
+	t.Run("an unset head is not put on the wire at all", func(t *testing.T) {
+		var asMap map[string]any
+		mustUnmarshal(t, mustMarshal(t, JoinResponse{Accepted: true}), &asMap)
+		if _, present := asMap["leader_head_seq"]; present {
+			t.Error("an unset LeaderHeadSeq was encoded; an older response and a newer one with no head must look the same")
+		}
+		mustUnmarshal(t, mustMarshal(t, JoinResponse{Accepted: true, LeaderHeadSeq: head(11)}), &asMap)
+		if v, present := asMap["leader_head_seq"]; !present {
+			t.Error("a set LeaderHeadSeq was not encoded under leader_head_seq")
+		} else if fmt.Sprint(v) != "11" {
+			t.Errorf("leader_head_seq on the wire = %v, want 11", v)
+		}
+	})
+}
+
+// joinRequestBeforeLastAppliedSum is JoinRequest as a binary built before
+// LastAppliedSum encodes and decodes it.
+type joinRequestBeforeLastAppliedSum struct {
+	NodeID          string   `msgpack:"node_id"`
+	Addr            string   `msgpack:"addr"`
+	LastApplied     uint64   `msgpack:"last_applied"`
+	Capabilities    []string `msgpack:"capabilities"`
+	SecretHash      []byte   `msgpack:"secret_hash"`
+	Role            uint8    `msgpack:"role,omitempty"`
+	Probe           bool     `msgpack:"probe,omitempty"`
+	ProtocolVersion uint16   `msgpack:"proto_ver,omitempty"`
+}
+
+// TestJoinRequestAndResponse_MatchCheckFieldsAreAdditive: the two fields the
+// entry match check adds must not disturb a peer built without them, and their
+// absence must read as "nothing to compare", never as a value.
+func TestJoinRequestAndResponse_MatchCheckFieldsAreAdditive(t *testing.T) {
+	t.Run("an older leader decodes a request that carries the checksum", func(t *testing.T) {
+		sent := JoinRequest{
+			NodeID: "node-b", Addr: "127.0.0.1:2", LastApplied: 49, SecretHash: []byte{1, 2, 3},
+			Role: 2, ProtocolVersion: 2, LastAppliedSum: []byte{0xde, 0xad, 0xbe, 0xef},
+		}
+		var got joinRequestBeforeLastAppliedSum
+		mustUnmarshal(t, mustMarshal(t, sent), &got)
+		if got.NodeID != "node-b" || got.Addr != "127.0.0.1:2" || got.LastApplied != 49 ||
+			string(got.SecretHash) != "\x01\x02\x03" || got.Role != 2 || got.ProtocolVersion != 2 {
+			t.Errorf("an older leader lost fields decoding a newer request: %+v", got)
+		}
+	})
+
+	t.Run("a newer leader decodes an older request as no checksum", func(t *testing.T) {
+		var got JoinRequest
+		mustUnmarshal(t, mustMarshal(t, joinRequestBeforeLastAppliedSum{NodeID: "node-b", LastApplied: 49}), &got)
+		if len(got.LastAppliedSum) != 0 {
+			t.Errorf("LastAppliedSum = %x from a request that did not carry one", got.LastAppliedSum)
+		}
+		if got.NodeID != "node-b" || got.LastApplied != 49 {
+			t.Errorf("lost fields decoding an older request: %+v", got)
+		}
+	})
+
+	t.Run("a follower with no checksum puts nothing on the wire", func(t *testing.T) {
+		var asMap map[string]any
+		mustUnmarshal(t, mustMarshal(t, JoinRequest{NodeID: "node-b", LastApplied: 49}), &asMap)
+		if _, present := asMap["last_applied_sum"]; present {
+			t.Error("an empty LastAppliedSum was encoded")
+		}
+	})
+
+	t.Run("a checksum of all zero bytes is still a checksum", func(t *testing.T) {
+		var got JoinRequest
+		mustUnmarshal(t, mustMarshal(t, JoinRequest{NodeID: "node-b", LastApplied: 49, LastAppliedSum: []byte{0, 0, 0, 0}}), &got)
+		if len(got.LastAppliedSum) != 4 {
+			t.Errorf("a zero checksum came back with length %d: it would read as no checksum", len(got.LastAppliedSum))
+		}
+	})
+
+	t.Run("an older follower decodes a refusal marked diverged as an ordinary rejection", func(t *testing.T) {
+		head := uint64(45)
+		sent := JoinResponse{Accepted: false, CortexID: "node-a", Epoch: 2, RejectReason: "invented reason", LeaderHeadSeq: &head, Diverged: true}
+		var got joinResponseBeforeLeaderHeadSeq
+		mustUnmarshal(t, mustMarshal(t, sent), &got)
+		if got.Accepted || got.RejectReason != "invented reason" || got.CortexID != "node-a" || got.Epoch != 2 {
+			t.Errorf("an older follower misread a diverged refusal: %+v", got)
+		}
+	})
+
+	t.Run("an older leader's rejection is not read as diverged", func(t *testing.T) {
+		var got JoinResponse
+		mustUnmarshal(t, mustMarshal(t, joinResponseBeforeLeaderHeadSeq{Accepted: false, RejectReason: "not cortex"}), &got)
+		if got.Diverged {
+			t.Error("Diverged = true from a response that did not carry it")
+		}
+	})
+}
+
+// TestJoinRequestAndResponse_RefusalRecordFieldsAreAdditive: the three fields
+// a stored refusal adds (JoinRequest.Halted, JoinResponse.Matched and
+// Unverified) must not disturb a peer built without them, and their absence
+// must read as "nothing was confirmed", which is the reading that keeps a
+// refused replica refused.
+func TestJoinRequestAndResponse_RefusalRecordFieldsAreAdditive(t *testing.T) {
+	t.Run("an older leader decodes a request from a replica that says it was refused", func(t *testing.T) {
+		sent := JoinRequest{
+			NodeID: "node-b", Addr: "127.0.0.1:2", LastApplied: 49, SecretHash: []byte{1, 2, 3},
+			Role: 2, ProtocolVersion: 2, LastAppliedSum: []byte{0xde, 0xad, 0xbe, 0xef}, Halted: true,
+		}
+		var got joinRequestBeforeLastAppliedSum
+		mustUnmarshal(t, mustMarshal(t, sent), &got)
+		if got.NodeID != "node-b" || got.Addr != "127.0.0.1:2" || got.LastApplied != 49 ||
+			string(got.SecretHash) != "\x01\x02\x03" || got.Role != 2 || got.ProtocolVersion != 2 {
+			t.Errorf("an older leader lost fields decoding a newer request: %+v", got)
+		}
+	})
+
+	t.Run("a newer leader decodes an older request as never refused", func(t *testing.T) {
+		var got JoinRequest
+		mustUnmarshal(t, mustMarshal(t, joinRequestBeforeLastAppliedSum{NodeID: "node-b", LastApplied: 49}), &got)
+		if got.Halted {
+			t.Error("Halted = true from a request that did not carry it")
+		}
+	})
+
+	t.Run("a replica that was never refused puts nothing on the wire", func(t *testing.T) {
+		var asMap map[string]any
+		mustUnmarshal(t, mustMarshal(t, JoinRequest{NodeID: "node-b", LastApplied: 49}), &asMap)
+		if _, present := asMap["halted"]; present {
+			t.Error("an unset Halted was encoded")
+		}
+		mustUnmarshal(t, mustMarshal(t, JoinRequest{NodeID: "node-b", LastApplied: 49, Halted: true}), &asMap)
+		if v, present := asMap["halted"]; !present || v != true {
+			t.Errorf("a set Halted is on the wire as %v (present %v), want true under halted", v, present)
+		}
+	})
+
+	t.Run("an older leader's acceptance confirms nothing", func(t *testing.T) {
+		var got JoinResponse
+		mustUnmarshal(t, mustMarshal(t, joinResponseBeforeLeaderHeadSeq{Accepted: true, CortexID: "node-a", Epoch: 2}), &got)
+		if !got.Accepted || got.Matched || got.Unverified || got.Diverged {
+			t.Errorf("an older acceptance decoded as Accepted=%v Matched=%v Unverified=%v Diverged=%v, want accepted and nothing else",
+				got.Accepted, got.Matched, got.Unverified, got.Diverged)
+		}
+	})
+
+	t.Run("an acceptance that confirmed nothing puts neither flag on the wire", func(t *testing.T) {
+		var asMap map[string]any
+		mustUnmarshal(t, mustMarshal(t, JoinResponse{Accepted: true}), &asMap)
+		for _, key := range []string{"matched", "unverified"} {
+			if _, present := asMap[key]; present {
+				t.Errorf("an unset %s was encoded", key)
+			}
+		}
+	})
+
+	t.Run("an older replica decodes a confirmed acceptance as an acceptance", func(t *testing.T) {
+		head := uint64(45)
+		sent := JoinResponse{Accepted: true, CortexID: "node-a", CortexAddr: "127.0.0.1:1", Epoch: 2, LeaderHeadSeq: &head, Matched: true}
+		var got joinResponseBeforeLeaderHeadSeq
+		mustUnmarshal(t, mustMarshal(t, sent), &got)
+		if !got.Accepted || got.CortexID != "node-a" || got.CortexAddr != "127.0.0.1:1" || got.Epoch != 2 {
+			t.Errorf("an older replica misread a confirmed acceptance: %+v", got)
+		}
+	})
+
+	t.Run("an older replica decodes an unconfirmed refusal as an ordinary rejection", func(t *testing.T) {
+		head := uint64(45)
+		sent := JoinResponse{Accepted: false, CortexID: "node-a", Epoch: 2, RejectReason: "invented reason", LeaderHeadSeq: &head, Unverified: true}
+		var got joinResponseBeforeLeaderHeadSeq
+		mustUnmarshal(t, mustMarshal(t, sent), &got)
+		if got.Accepted || got.RejectReason != "invented reason" || got.CortexID != "node-a" || got.Epoch != 2 {
+			t.Errorf("an older replica misread an unconfirmed refusal: %+v", got)
+		}
+	})
+
+	t.Run("the three flags survive a round trip between two builds that have them", func(t *testing.T) {
+		var req JoinRequest
+		mustUnmarshal(t, mustMarshal(t, JoinRequest{NodeID: "node-b", Halted: true}), &req)
+		if !req.Halted {
+			t.Error("Halted was lost in a round trip")
+		}
+		var resp JoinResponse
+		mustUnmarshal(t, mustMarshal(t, JoinResponse{Accepted: true, Matched: true}), &resp)
+		if !resp.Matched || resp.Unverified {
+			t.Errorf("round trip of Matched: Matched=%v Unverified=%v", resp.Matched, resp.Unverified)
+		}
+		mustUnmarshal(t, mustMarshal(t, JoinResponse{Unverified: true}), &resp)
+		if !resp.Unverified {
+			t.Error("Unverified was lost in a round trip")
+		}
+	})
 }

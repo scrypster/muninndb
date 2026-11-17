@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/vmihailenco/msgpack/v5"
@@ -24,6 +26,53 @@ import (
 // snapshot (or roll the Cortex forward).
 var ErrEpochRegression = errors.New("replication: cortex epoch is behind this node and no resnapshot was offered")
 
+// ErrFollowerAhead is returned by the join path when this node holds an entry
+// the Cortex does not, and no resnapshot was offered. Either this node has
+// applied further than the Cortex's replication log reaches, or the entry it
+// applied last is not the entry the Cortex holds at that sequence number. Both
+// mean the two nodes followed different leaders over some range: a failover
+// elected a replica that was behind this one, or the Cortex was rebuilt or
+// restored from an older state. Following it would not reconcile the two. This
+// node's applier skips every entry numbered at or below its own position, so
+// it would discard the Cortex's entries in that range while reporting no lag.
+//
+// There is no automatic recovery. The refusal is kept on this node's disk
+// (HaltRecord) and stands until a leader confirms this node's last entry, this
+// node becomes the leader, or an operator replaces its store. See
+// docs/cluster-operations.md, "A replica the leader refuses".
+var ErrFollowerAhead = errors.New("replication: this node holds an entry the cortex does not")
+
+// aheadRejectPrefix starts the RejectReason a Cortex gives a joiner that holds
+// an entry the Cortex does not. A joiner built before the Diverged flag sees
+// only this text, in its "join: rejected by Cortex" error line.
+const aheadRejectPrefix = "lobe cannot follow this cortex"
+
+// aheadRemedy is the operator guidance attached to every report of the
+// condition, on either side. It names both choices, because the node that
+// reports it answers 503 from the moment it starts and this text may be all an
+// operator has read.
+const aheadRemedy = "The replica holds entries the Cortex never received, so it cannot follow it, " +
+	"and restarting either node does not change that. An operator has two choices. " +
+	"Keep the Cortex's history: re-seed this replica from the Cortex. " +
+	"Or keep the replica's history: make this replica the Cortex and re-seed every other node from it. " +
+	"Do NOT delete the replica's data directory and restart it. " +
+	"See docs/cluster-operations.md, \"A replica the leader refuses\""
+
+// unverifiedRejectPrefix starts the RejectReason a Cortex gives a joiner that
+// was refused before and whose last entry this Cortex cannot confirm.
+const unverifiedRejectPrefix = "lobe was refused before and cannot be confirmed by this cortex"
+
+// aheadOfLeader reports whether resp shows that a node whose apply cursor is at
+// lastApplied has gone further than the answering Cortex's log. It is false
+// when the Cortex did not report its head (an older binary — nothing can be
+// concluded) and when a snapshot is about to replace this node's state.
+func aheadOfLeader(resp mbp.JoinResponse, lastApplied uint64) (head uint64, ahead bool) {
+	if resp.LeaderHeadSeq == nil || resp.NeedsSnapshot {
+		return 0, false
+	}
+	return *resp.LeaderHeadSeq, lastApplied > *resp.LeaderHeadSeq
+}
+
 // JoinHandler handles incoming JoinRequests on the Cortex side.
 // It is safe for concurrent access.
 type JoinHandler struct {
@@ -34,6 +83,12 @@ type JoinHandler struct {
 	repLog        *ReplicationLog
 	db            *pebble.DB // non-nil when snapshot streaming is supported
 	mgr           *ConnManager
+
+	// appliedMark reports this node's own apply cursor and the checksum of the
+	// entry at it (Applier.LastAppliedMark). Nil when the handler was built
+	// without an applier, and then the comparison in divergence that needs it
+	// is skipped.
+	appliedMark func() (seq uint64, sum uint32, ok bool)
 
 	members map[string]NodeInfo
 	mu      sync.RWMutex
@@ -194,6 +249,15 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 		}
 	}
 
+	// A joiner that holds an entry this Cortex does not is not admitted, and
+	// neither is one that was refused before and cannot be confirmed now. The
+	// coordinator asks the same question before it registers the connection
+	// (HandleIncomingJoin); this is the answer for every other caller.
+	refusal, refused, matched := h.refuseIfAhead(req)
+	if refused {
+		return refusal
+	}
+
 	info := NodeInfo{
 		NodeID:  req.NodeID,
 		Addr:    req.Addr,
@@ -225,6 +289,26 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 		CortexID:   h.localNodeID,
 		CortexAddr: h.localAddr,
 		Epoch:      currentEpoch,
+		// Only a comparison that came out equal. A joiner holding a refusal
+		// record follows on nothing less.
+		Matched: matched,
+	}
+
+	// Tell the joiner where this Cortex's log ends, so it can check for itself
+	// that it is not ahead of it. Left out when the head cannot be read: an
+	// absent value claims nothing, a wrong 0 would turn every joiner away.
+	if h.repLog != nil {
+		if head, err := h.repLog.Head(); err == nil {
+			resp.LeaderHeadSeq = &head
+			// Both positions, once per join, so the gap between a lobe and this
+			// Cortex at the moment it joined can be read back from the log.
+			slog.Info("join: lobe admitted",
+				"lobe", req.NodeID, "lobe_last_applied", req.LastApplied, "cortex_head", head, "epoch", currentEpoch,
+				"last_entry_confirmed", matched, "lobe_was_refused_before", req.Halted)
+		} else {
+			slog.Warn("join: cannot read this Cortex's log head; the joiner cannot verify it is not ahead",
+				"lobe", req.NodeID, "err", err)
+		}
 	}
 
 	// Phase 2: if this handler has a DB, every joining Lobe gets a snapshot.
@@ -236,6 +320,160 @@ func (h *JoinHandler) HandleJoinRequest(req mbp.JoinRequest, conn *PeerConn) mbp
 	}
 
 	return resp
+}
+
+// refuseIfAhead decides whether a joiner must be turned away, and returns the
+// response to send if so. matched reports, for a joiner that is not turned
+// away, that its last entry was compared with this Cortex's and is the same.
+//
+// Two joiners are refused.
+//
+// One that holds an entry this Cortex does not (compare returns joinDiffers).
+// Streaming to it would not repair anything. Its applier skips every entry
+// numbered at or below its own position, so it would drop this Cortex's
+// entries in that range while acknowledging the stream.
+//
+// One that was refused before (JoinRequest.Halted) and whose last entry this
+// Cortex cannot confirm. The proof of the earlier refusal was a log entry, and
+// logs are pruned. "Cannot compare" must not undo a refusal that was proven.
+//
+// Nothing is refused when a snapshot will replace the joiner's state (a
+// handler built with a DB) or when the handler has no log to compare with.
+//
+// The caller must have authenticated the request: the response discloses the
+// log head.
+func (h *JoinHandler) refuseIfAhead(req mbp.JoinRequest) (resp mbp.JoinResponse, refused, matched bool) {
+	if h.db != nil || h.repLog == nil {
+		return mbp.JoinResponse{}, false, false
+	}
+	epoch := h.epochStore.Load()
+	verdict, why := joinUnknown, "this cortex cannot read its own log head"
+	var headPtr *uint64
+	head, err := h.repLog.Head()
+	if err == nil {
+		headPtr = &head
+		verdict, why = h.compare(req, head)
+	}
+	switch {
+	case verdict == joinMatches:
+		return mbp.JoinResponse{}, false, true
+	case verdict == joinDiffers:
+		slog.Error("join: REFUSED: the joining replica holds an entry this Cortex does not",
+			"lobe", req.NodeID,
+			"lobe_last_applied", req.LastApplied,
+			"cortex_head", head,
+			"why", why,
+			"epoch", epoch,
+			"remedy", aheadRemedy,
+		)
+		return mbp.JoinResponse{
+			Accepted:      false,
+			RejectReason:  fmt.Sprintf("%s: %s. %s", aheadRejectPrefix, why, aheadRemedy),
+			Epoch:         epoch,
+			CortexID:      h.localNodeID,
+			LeaderHeadSeq: headPtr,
+			Diverged:      true,
+		}, true, false
+	case req.Halted:
+		slog.Error("join: REFUSED: the joining replica was refused by a Cortex before, and this Cortex cannot confirm that its last entry is its own",
+			"lobe", req.NodeID,
+			"lobe_last_applied", req.LastApplied,
+			"cortex_head", head,
+			"cannot_compare_because", why,
+			"epoch", epoch,
+			"remedy", aheadRemedy,
+		)
+		return mbp.JoinResponse{
+			Accepted:      false,
+			RejectReason:  fmt.Sprintf("%s: %s. %s", unverifiedRejectPrefix, why, aheadRemedy),
+			Epoch:         epoch,
+			CortexID:      h.localNodeID,
+			LeaderHeadSeq: headPtr,
+			Unverified:    true,
+		}, true, false
+	}
+	return mbp.JoinResponse{}, false, false
+}
+
+// joinVerdict is what comparing a joiner's last entry with this Cortex's says.
+type joinVerdict int
+
+const (
+	// joinUnknown: nothing proves the two the same or different.
+	joinUnknown joinVerdict = iota
+	// joinMatches: the joiner's last entry is the entry this Cortex holds at
+	// that sequence number.
+	joinMatches
+	// joinDiffers: the joiner holds an entry this Cortex does not.
+	joinDiffers
+)
+
+// compare says whether the joiner's last entry is this Cortex's, with the
+// reason in words: why they differ, or why it cannot tell.
+//
+// It answers joinDiffers only on proof, because a wrong refusal takes a
+// healthy replica out of replication until an operator re-seeds it. There are
+// two proofs.
+//
+// The joiner's position is past this Cortex's log head. This Cortex has never
+// numbered an entry there, so the joiner's came from someone else.
+//
+// The joiner's entry at its position is not this Cortex's entry at that
+// position. This is the one a position cannot show: once this Cortex has
+// written past the joiner, the two numbers look fine, and the joiner would
+// skip everything this Cortex numbered up to its own position. What this
+// Cortex holds "at that position" is one of two things:
+//
+//   - The entry in its own log, when the position is ABOVE this node's apply
+//     cursor. It wrote that entry itself and has applied nothing over it. A
+//     log entry at or below the cursor is not used to refuse: it dates from
+//     before this node followed someone else, and what it applied since may
+//     have replaced it.
+//   - The entry it applied itself, when the position IS its apply cursor. It
+//     keeps that entry's checksum the same way the joiner does.
+//
+// It answers joinMatches when the joiner's checksum equals either of those.
+//
+// Everywhere else it is joinUnknown: a joiner that sent no checksum (an older
+// build, or a cursor no entry was applied at), an entry this log has pruned,
+// a position inside the range this node applied as a follower and never
+// logged. What the caller does with that depends on the joiner. One that has
+// never been refused is admitted. One that has been is not.
+func (h *JoinHandler) compare(req mbp.JoinRequest, head uint64) (joinVerdict, string) {
+	at := req.LastApplied
+	if at > head {
+		return joinDiffers, fmt.Sprintf("the lobe has applied through seq %d but this cortex's log head is %d", at, head)
+	}
+	if at == 0 {
+		return joinUnknown, "the lobe reports that it has applied nothing"
+	}
+	if len(req.LastAppliedSum) != 4 {
+		return joinUnknown, fmt.Sprintf("the lobe sent no checksum for its entry at seq %d", at)
+	}
+	want := binary.BigEndian.Uint32(req.LastAppliedSum)
+
+	logSum, inLog, err := h.repLog.sumAt(at)
+	if err != nil {
+		slog.Warn("join: cannot read this Cortex's log entry to compare with the joiner's",
+			"lobe", req.NodeID, "seq", at, "err", err)
+		inLog = false
+	}
+	var ownSeq uint64
+	var ownSum uint32
+	var ownOK bool
+	if h.appliedMark != nil {
+		ownSeq, ownSum, ownOK = h.appliedMark()
+	}
+	switch {
+	case inLog && logSum == want, ownOK && at == ownSeq && ownSum == want:
+		return joinMatches, ""
+	case inLog && at > ownSeq, ownOK && at == ownSeq:
+		return joinDiffers, fmt.Sprintf("the lobe's entry at seq %d is not the entry this cortex holds at seq %d "+
+			"(this cortex's log head is %d)", at, at, head)
+	case inLog:
+		return joinUnknown, fmt.Sprintf("this cortex's log entry at seq %d dates from before it last followed another cortex", at)
+	}
+	return joinUnknown, fmt.Sprintf("this cortex holds no entry at seq %d to compare with (pruned, or applied while it was a follower and never logged)", at)
 }
 
 // FireOnLobeJoined invokes the OnLobeJoined callback for a previously-registered
@@ -469,8 +707,15 @@ func (c *JoinClient) joinConn(ctx context.Context, conn net.Conn) (JoinResult, e
 	}
 
 	var lastApplied uint64
+	var lastAppliedSum []byte
+	var halted bool
 	if c.applier != nil {
-		lastApplied = c.applier.LastApplied()
+		seq, sum, ok := c.applier.LastAppliedMark()
+		lastApplied = seq
+		if ok {
+			lastAppliedSum = binary.BigEndian.AppendUint32(nil, sum)
+		}
+		_, halted = c.applier.Halt()
 	}
 
 	// Compute HMAC-SHA256 of nodeID+role (#538: role covered at proto v2+).
@@ -486,6 +731,8 @@ func (c *JoinClient) joinConn(ctx context.Context, conn net.Conn) (JoinResult, e
 		NodeID:          c.localNodeID,
 		Addr:            c.localAddr,
 		LastApplied:     lastApplied,
+		LastAppliedSum:  lastAppliedSum,
+		Halted:          halted,
 		SecretHash:      secretHash,
 		Role:            uint8(c.localRole),
 		ProtocolVersion: mbp.CurrentProtocolVersion,
@@ -534,6 +781,20 @@ func (c *JoinClient) joinConn(ctx context.Context, conn net.Conn) (JoinResult, e
 		return JoinResult{}, fmt.Errorf("join: unmarshal response: %w", err)
 	}
 
+	// This node holds an entry the Cortex does not: refuse. Either the Cortex
+	// said so (Diverged), or its reported head is behind this node's position,
+	// whether it accepted or not. Checked before the generic rejection so the
+	// Cortex's own refusal is reported for what it is.
+	head, ahead := aheadOfLeader(resp, lastApplied)
+	if ahead || (resp.Diverged && !resp.Accepted) {
+		return JoinResult{JoinResponse: resp}, c.refuseAhead(resp, lastApplied, head, ahead)
+	}
+	// This node was refused before, said so, and the Cortex cannot confirm its
+	// last entry. Not a new proof: the recorded refusal stands.
+	if halted && resp.Unverified && !resp.Accepted {
+		return JoinResult{JoinResponse: resp}, c.upholdHalt(resp, lastApplied)
+	}
+
 	if !resp.Accepted {
 		slog.Error("join: rejected by Cortex",
 			"reason", resp.RejectReason,
@@ -580,6 +841,35 @@ func (c *JoinClient) joinConn(ctx context.Context, conn net.Conn) (JoinResult, e
 		// Case 3 — adoption deferred until the snapshot has landed.
 	}
 
+	// A node that holds a refusal record follows a Cortex only when that
+	// Cortex has confirmed its last entry, or when a snapshot is about to
+	// replace its state (ResetTo removes the record with the old cursor). It
+	// does not follow because a Cortex accepted it: one that cannot compare
+	// accepts, and so does one built before the check. This is enforced here,
+	// on the node that holds the record, whatever the Cortex decided.
+	if halted && !resp.NeedsSnapshot {
+		if !resp.Matched {
+			return JoinResult{JoinResponse: resp}, c.upholdHalt(resp, lastApplied)
+		}
+		was, _, err := c.applier.ClearHalt()
+		if err != nil {
+			return JoinResult{JoinResponse: resp}, fmt.Errorf("join: %w", err)
+		}
+		slog.Warn("join: the refusal this node held is lifted: the Cortex confirmed that this node's last entry is its own",
+			"node", c.localNodeID,
+			"cortex", resp.CortexID,
+			"cortex_epoch", resp.Epoch,
+			"last_applied", lastApplied,
+			"was_refused_by", was.LeaderID,
+			"was_refused_in_epoch", was.Epoch,
+		)
+	}
+	if resp.LeaderHeadSeq == nil && !resp.NeedsSnapshot && lastApplied > 0 {
+		slog.Warn("join: the Cortex did not report its replication log head (an older binary); "+
+			"this node cannot verify it is not ahead of it",
+			"node", c.localNodeID, "cortex", resp.CortexID, "last_applied", lastApplied)
+	}
+
 	// Register Cortex as a known peer in ConnManager.
 	if resp.CortexID != "" && resp.CortexAddr != "" {
 		c.mgr.AddPeer(resp.CortexID, resp.CortexAddr)
@@ -620,6 +910,87 @@ func (c *JoinClient) joinConn(ctx context.Context, conn net.Conn) (JoinResult, e
 	}
 
 	return result, nil
+}
+
+// refuseAhead records and reports that this node holds an entry the Cortex
+// that answered with resp does not, and returns the error the join fails with.
+// pastHead says which proof it was: this node's position is past the Cortex's
+// head, or (the Cortex's own finding) the entries at this node's position
+// differ.
+//
+// The record is written to disk before this returns (Applier.SetHalt), so the
+// refusal outlasts a restart of this node and the pruning of the entry that
+// proved it.
+func (c *JoinClient) refuseAhead(resp mbp.JoinResponse, lastApplied, head uint64, pastHead bool) error {
+	if resp.LeaderHeadSeq != nil {
+		head = *resp.LeaderHeadSeq
+	}
+	why := fmt.Sprintf("this node has applied through seq %d but cortex %q (epoch %d) reports log head %d",
+		lastApplied, resp.CortexID, resp.Epoch, head)
+	if !pastHead {
+		why = fmt.Sprintf("this node's entry at seq %d is not the entry cortex %q (epoch %d) holds at that position (cortex log head %d)",
+			lastApplied, resp.CortexID, resp.Epoch, head)
+	}
+	rec := HaltRecord{
+		LeaderID:    resp.CortexID,
+		Epoch:       resp.Epoch,
+		LastApplied: lastApplied,
+		LeaderHead:  head,
+		Why:         why,
+		At:          time.Now().Unix(),
+		Position:    positionApplyCursor,
+	}
+	if c.applier != nil {
+		if err := c.applier.SetHalt(rec); errors.Is(err, errLeading) {
+			slog.Warn("join: a refusal arrived after this node took the leader role; it is not recorded",
+				"node", c.localNodeID, "cortex", resp.CortexID, "cortex_epoch", resp.Epoch)
+		} else if err != nil {
+			slog.Error("join: the refusal could not be written to disk; it holds until this process stops and would not survive a restart",
+				"node", c.localNodeID, "err", err)
+		}
+	}
+	slog.Error("join: REFUSED: this node holds an entry the Cortex does not",
+		"node", c.localNodeID,
+		"cortex", resp.CortexID,
+		"cortex_epoch", resp.Epoch,
+		"last_applied", lastApplied,
+		"cortex_head", head,
+		"why", why,
+		"remedy", aheadRemedy,
+	)
+	return rec.err()
+}
+
+// upholdHalt is the answer to a Cortex that did not confirm this node's last
+// entry while this node holds a refusal record: the Cortex said so itself
+// (JoinResponse.Unverified), or it accepted the join without confirming
+// anything (it could not compare, or it is a build from before the check).
+// The record stays. Which Cortex term was asked is added to it, so that the
+// reason this node reports names the leader an operator is looking at now as
+// well as the one that proved the difference.
+func (c *JoinClient) upholdHalt(resp mbp.JoinResponse, lastApplied uint64) error {
+	rec, ok, err := c.applier.upholdHalt(resp.CortexID, resp.Epoch)
+	if err != nil {
+		slog.Error("join: could not update the stored refusal record", "node", c.localNodeID, "err", err)
+	}
+	if !ok {
+		// The record went away between the request and the response (this
+		// node took the leader role, or a snapshot landed). Nothing stands
+		// any more.
+		return fmt.Errorf("join: rejected by cortex: %s", resp.RejectReason)
+	}
+	slog.Error("join: REFUSED: this node was refused by a Cortex before, and this Cortex did not confirm that its last entry is the Cortex's own",
+		"node", c.localNodeID,
+		"cortex", resp.CortexID,
+		"cortex_epoch", resp.Epoch,
+		"cortex_accepted_the_join", resp.Accepted,
+		"last_applied", lastApplied,
+		"refused_by", rec.LeaderID,
+		"refused_in_epoch", rec.Epoch,
+		"refused_because", rec.Why,
+		"remedy", aheadRemedy,
+	)
+	return rec.err()
 }
 
 // receiveSnapshot reads a snapshot stream from conn and applies it to the local DB.

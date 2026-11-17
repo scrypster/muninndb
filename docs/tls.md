@@ -26,7 +26,7 @@ The minimum protocol version is **TLS 1.2**.
 
 > **Note:** The metrics endpoint (`--metrics-addr`, off by default) is the one exception — it is plain HTTP with no auth and is **not** covered by `--tls-cert`. If you enable it, bind it to loopback (e.g. `127.0.0.1:9090`); never expose it on a public interface.
 
-> **Note:** `--tls-cert` configures **client-facing** TLS only. It does **not** configure inter-node **cluster** TLS — clustering uses its own auto-generated mutual-TLS certificates on the cluster `bind_addr` (which also defaults to `:8474`). See [Cluster Operations](cluster-operations.md) for inter-node transport security.
+> **Note:** `--tls-cert` configures **client-facing** TLS only. Traffic **between cluster nodes is not encrypted** in this release. The cluster `tls` setting is read but not applied, and no certificates are generated for it. The cluster secret lets the primary check a node that asks to join, but the replication stream itself is plain TCP. Run cluster nodes on a network you control, or connect them over an encrypted tunnel such as WireGuard or a VPN, and allow only the other cluster members to reach the cluster `bind_addr`. See [Cluster Operations](cluster-operations.md#network-security).
 
 ---
 

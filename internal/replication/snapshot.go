@@ -137,11 +137,19 @@ func (s *SnapshotSender) Send(ctx context.Context, conn *PeerConn) (uint64, erro
 // sequence numbering instead of restarting at 0 and having every entry it
 // emits skipped as "already applied" by a follower whose watermark is higher.
 //
+// One metadata key is the exception: the refusal record (replHaltKey). It is a
+// verdict on the sending node's own history as a follower, it means nothing on
+// another node, and a node that received it would start refused. A leader
+// holds none (it is removed at promotion), so this is a second lock on a door
+// that is already shut.
+//
 // This filter is only expressible because #726 gave replication its own prefix.
 // Under 0x19 it would also have dropped every idempotency receipt.
 func skipFromSnapshot(k []byte) bool {
-	_, isEntry := entrySeqFromKey(k)
-	return isEntry
+	if _, isEntry := entrySeqFromKey(k); isEntry {
+		return true
+	}
+	return bytes.Equal(k, replHaltKey())
 }
 
 // countKeys counts the keys the snapshot will actually ship. It iterates all
