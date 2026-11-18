@@ -25,9 +25,11 @@ const (
 	localModelDim   = 384 // bge-small-en-v1.5 output dimension
 	localMaxTokens  = 256 // model max sequence length
 	ortSentinelFile = ".ort_extracted"
-	// localMaxBatch is the most texts one ORT inference call carries. Every
-	// text is padded to localMaxTokens, so inference cost and its transient
-	// memory scale linearly with the batch while throughput does not improve:
+	// localMaxBatch is the most texts one ORT inference call carries. A batch
+	// is padded to its longest text (at most localMaxTokens), so inference
+	// cost and its transient memory scale linearly with the batch while
+	// throughput does not improve. Measured with every text padded to the full
+	// window, the worst case a batch of long texts still reaches:
 	// measured with the bundled model (512 texts, chunk 8/16/32/64) throughput
 	// was flat at ~48-57 items/s while peak RSS rose ~670-790 MB / ~1.1 GB /
 	// ~1.4 GB / ~2.2-2.6 GB. 8 keeps the batch lane's peak under 1 GB on a
@@ -99,6 +101,9 @@ type LocalProvider struct {
 	// how tests observe ordering and in-flight counts without sleeping.
 	onLaneAcquired func(lane string)
 	onLaneReleased func(lane string)
+	// onPacked, when non-nil, is called with the sequence length each batch
+	// was padded to. Test-only instrumentation, like the lane hooks.
+	onPacked func(seqLen int)
 
 	session *ort.DynamicAdvancedSession
 	tok     *tokenizer.Tokenizer
@@ -111,6 +116,11 @@ type LocalProvider struct {
 	maxTokens  int
 	meanPool   bool
 	inputNames []string // the model's declared inputs, fed in this order
+	// padToMax pads every batch to maxTokens. It is set only for a model
+	// whose input declares a fixed sequence length; any other model is fed
+	// each batch padded to its longest text, so a short query does not pay
+	// for a full window of padding.
+	padToMax bool
 }
 
 func (p *LocalProvider) Name() string { return "local" }
@@ -231,6 +241,7 @@ func (p *LocalProvider) initBundledLocked(modelDir string) (int, error) {
 	p.maxTokens = localMaxTokens
 	p.meanPool = false // bge encodes sentence meaning into [CLS]
 	p.inputNames = []string{"input_ids", "attention_mask", "token_type_ids"}
+	p.padToMax = false // the bundled export's sequence axis is dynamic
 
 	modelPath := filepath.Join(modelDir, "model_int8.onnx")
 	session, err := p.newSession(modelPath, p.inputNames, "last_hidden_state")
@@ -288,6 +299,7 @@ func (p *LocalProvider) initUserModelLocked(cfg ProviderHTTPConfig) (int, error)
 	p.maxTokens = maxTokens
 	p.meanPool = meanPool
 	p.inputNames = inputNames
+	p.padToMax = hasFixedSequenceLength(inputs)
 	p.session = session
 
 	// Probe: the model's true output dimension comes from running one real
@@ -367,6 +379,21 @@ func resolveModelInputs(inputs []ort.InputOutputInfo) ([]string, error) {
 	return names, nil
 }
 
+// hasFixedSequenceLength reports whether any model input declares a fixed
+// (positive) sequence axis. Such an export only accepts one sequence length,
+// so it keeps being fed full maxTokens-padded batches, exactly as before
+// batches were padded to their longest text. A dynamic axis is reported by
+// ORT as -1 (or 0), and a rank other than 2 is left to fail where it does
+// today.
+func hasFixedSequenceLength(inputs []ort.InputOutputInfo) bool {
+	for _, in := range inputs {
+		if len(in.Dimensions) == 2 && in.Dimensions[1] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveModelOutput picks the hidden-state output: "last_hidden_state" when
 // present, otherwise the model's single output, otherwise "token_embeddings".
 // A configurable output tensor name is deliberately deferred until a model
@@ -403,7 +430,7 @@ func resolveModelOutput(outputs []ort.InputOutputInfo) (string, error) {
 // and non-zero. Caller holds p.mu; p.session, p.tok, p.maxTokens and
 // p.inputNames must be set.
 func (p *LocalProvider) probeDimensionLocked() (int, error) {
-	inputs, _, cleanup, err := p.packBatchLocked([]string{"dimension probe"})
+	inputs, _, seqLen, cleanup, err := p.packBatchLocked([]string{"dimension probe"})
 	if err != nil {
 		return 0, err
 	}
@@ -428,12 +455,12 @@ func (p *LocalProvider) probeDimensionLocked() (int, error) {
 	if len(shape) != 3 {
 		return 0, fmt.Errorf("probe output has rank %d, want 3 ([batch, sequence, dim])", len(shape))
 	}
-	// EmbedBatch pre-allocates its output as [batch, maxTokens, dim]; a model
-	// whose output sequence axis differs from the padded input length would
-	// pass a dim-only probe and then fail every real embedding call — reject
-	// it here, at init, instead (#583 fail-loud).
-	if int(shape[1]) != p.maxTokens {
-		return 0, fmt.Errorf("probe output sequence length %d does not match the padded input length %d — this model's output shape is unsupported", shape[1], p.maxTokens)
+	// EmbedBatch pre-allocates its output as [batch, padded length, dim]; a
+	// model whose output sequence axis differs from the padded input length
+	// would pass a dim-only probe and then fail every real embedding call —
+	// reject it here, at init, instead (#583 fail-loud).
+	if int(shape[1]) != seqLen {
+		return 0, fmt.Errorf("probe output sequence length %d does not match the padded input length %d — this model's output shape is unsupported", shape[1], seqLen)
 	}
 	dim := int(shape[2])
 	if dim <= 0 {
@@ -463,13 +490,41 @@ func (p *LocalProvider) probeDimensionLocked() (int, error) {
 }
 
 // packBatchLocked tokenizes texts and packs them into one input tensor per
-// input the model declares, in p.inputNames order. It also returns the flat
-// attention-mask buffer ([len(texts) * p.maxTokens], shared with the
-// attention_mask tensor — valid until cleanup runs) for pooling, and a
-// cleanup that destroys the tensors. Caller holds p.mu.
-func (p *LocalProvider) packBatchLocked(texts []string) ([]ort.Value, []int64, func(), error) {
+// input the model declares, in p.inputNames order. Every text is truncated to
+// p.maxTokens; the batch is padded to its longest (truncated) text, or to
+// p.maxTokens when the model only accepts a fixed length (p.padToMax). It
+// returns the tensors, the flat attention-mask buffer ([len(texts) * seqLen],
+// shared with the attention_mask tensor — valid until cleanup runs) for
+// pooling, the padded length seqLen, and a cleanup that destroys the tensors.
+// Caller holds p.mu.
+func (p *LocalProvider) packBatchLocked(texts []string) ([]ort.Value, []int64, int, func(), error) {
 	batchSize := len(texts)
-	inShape := ort.NewShape(int64(batchSize), int64(p.maxTokens))
+
+	// Tokenize first: the padded length depends on the longest text.
+	type encoded struct{ ids, mask, typeIDs []int }
+	encs := make([]encoded, batchSize)
+	seqLen := 1
+	for i, text := range texts {
+		enc, encErr := p.tok.EncodeSingle(text, true)
+		if encErr != nil {
+			return nil, nil, 0, nil, fmt.Errorf("local provider: tokenize text[%d]: %w", i, encErr)
+		}
+		e := encoded{ids: enc.GetIds(), mask: enc.GetAttentionMask(), typeIDs: enc.GetTypeIds()}
+		if len(e.ids) > p.maxTokens {
+			e.ids, e.mask = e.ids[:p.maxTokens], e.mask[:p.maxTokens]
+			if len(e.typeIDs) > p.maxTokens {
+				e.typeIDs = e.typeIDs[:p.maxTokens]
+			}
+		}
+		if len(e.ids) > seqLen {
+			seqLen = len(e.ids)
+		}
+		encs[i] = e
+	}
+	if p.padToMax {
+		seqLen = p.maxTokens
+	}
+	inShape := ort.NewShape(int64(batchSize), int64(seqLen))
 
 	values := make([]ort.Value, 0, len(p.inputNames))
 	cleanup := func() {
@@ -485,7 +540,7 @@ func (p *LocalProvider) packBatchLocked(texts []string) ([]ort.Value, []int64, f
 		t, err := ort.NewEmptyTensor[int64](inShape)
 		if err != nil {
 			cleanup()
-			return nil, nil, nil, fmt.Errorf("local provider: alloc %s: %w", name, err)
+			return nil, nil, 0, nil, fmt.Errorf("local provider: alloc %s: %w", name, err)
 		}
 		values = append(values, t)
 		buf := t.GetData()
@@ -503,32 +558,21 @@ func (p *LocalProvider) packBatchLocked(texts []string) ([]ort.Value, []int64, f
 		}
 	}
 
-	// Tokenize and pack each text into the batch tensors.
-	for i, text := range texts {
-		enc, encErr := p.tok.EncodeSingle(text, true)
-		if encErr != nil {
-			cleanup()
-			return nil, nil, nil, fmt.Errorf("local provider: tokenize text[%d]: %w", i, encErr)
-		}
-		ids := enc.GetIds()
-		mask := enc.GetAttentionMask()
-		typeIDs := enc.GetTypeIds()
-
-		seqLen := len(ids)
-		if seqLen > p.maxTokens {
-			seqLen = p.maxTokens
-		}
-		offset := i * p.maxTokens
-		for j := 0; j < seqLen; j++ {
-			idsBuf[offset+j] = int64(ids[j])
-			maskBuf[offset+j] = int64(mask[j])
+	for i, e := range encs {
+		offset := i * seqLen
+		for j := range e.ids {
+			idsBuf[offset+j] = int64(e.ids[j])
+			maskBuf[offset+j] = int64(e.mask[j])
 			if typeBuf != nil {
-				typeBuf[offset+j] = int64(typeIDs[j])
+				typeBuf[offset+j] = int64(e.typeIDs[j])
 			}
 		}
 	}
 
-	return values, maskBuf, cleanup, nil
+	if p.onPacked != nil {
+		p.onPacked(seqLen)
+	}
+	return values, maskBuf, seqLen, cleanup, nil
 }
 
 // EmbedBatch tokenizes up to localMaxBatch texts, runs a single ORT inference
@@ -570,13 +614,13 @@ func (p *LocalProvider) EmbedBatch(ctx context.Context, texts []string) ([]float
 	}
 
 	batchSize := len(texts)
-	inputs, poolMask, cleanup, err := p.packBatchLocked(texts)
+	inputs, poolMask, seqLen, cleanup, err := p.packBatchLocked(texts)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
 
-	outShape := ort.NewShape(int64(batchSize), int64(p.maxTokens), int64(p.dim))
+	outShape := ort.NewShape(int64(batchSize), int64(seqLen), int64(p.dim))
 	outputTensor, err := ort.NewEmptyTensor[float32](outShape)
 	if err != nil {
 		return nil, fmt.Errorf("local provider: alloc output: %w", err)
@@ -588,17 +632,17 @@ func (p *LocalProvider) EmbedBatch(ctx context.Context, texts []string) ([]float
 		return nil, fmt.Errorf("local provider: ORT run: %w", err)
 	}
 
-	// Unpack output shape [batchSize, maxTokens, dim] and pool each sequence:
+	// Unpack output shape [batchSize, seqLen, dim] and pool each sequence:
 	// the [CLS] token (position 0) for bge-family models, masked mean for
 	// mean-pooled families (e.g. e5); then L2-normalise.
 	hidden := outputTensor.GetData()
 	result := make([]float32, 0, batchSize*p.dim)
-	seqStride := p.maxTokens * p.dim
+	seqStride := seqLen * p.dim
 	for i := 0; i < batchSize; i++ {
 		seqHidden := hidden[i*seqStride : (i+1)*seqStride]
 		var vec []float32
 		if p.meanPool {
-			vec = meanPool(seqHidden, poolMask[i*p.maxTokens:(i+1)*p.maxTokens], p.maxTokens, p.dim)
+			vec = meanPool(seqHidden, poolMask[i*seqLen:(i+1)*seqLen], seqLen, p.dim)
 		} else {
 			vec = clsPool(seqHidden, p.dim)
 		}
