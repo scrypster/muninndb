@@ -63,7 +63,12 @@ func (ps *PebbleStore) ClearEmbedFlagsForVault(ctx context.Context, ws [8]byte) 
 
 	var cleared int64
 	batch := ps.db.NewBatch()
-	defer batch.Close()
+	// Close whichever batch is current at return. A plain `defer batch.Close()`
+	// binds the FIRST batch, which the loop below has already closed and handed
+	// back to Pebble's pool; closing it again at return released it a second
+	// time while another writer could be committing it, and two commits then
+	// shared one batch (a re-embed hanging forever in its next synced write).
+	defer func() { batch.Close() }()
 
 	for valid := iter.First(); valid; valid = iter.Next() {
 		if ctx.Err() != nil {
