@@ -316,6 +316,14 @@ func (ps *PebbleStore) ImportVaultData(
 			}
 			gotManifest = true
 		case "data.kvs":
+			// A second data.kvs would replace the held batch and be committed
+			// after (or without) the checksum check, so refuse it.
+			if gotKV {
+				if kv != nil && !kv.committed {
+					kv.batch.Close()
+				}
+				return nil, fmt.Errorf("import: archive has a duplicate data.kvs entry")
+			}
 			gotKV = true
 
 			if !gotManifest {
@@ -506,6 +514,11 @@ func (ps *PebbleStore) ImportVaultData(
 			if kv == nil {
 				// checksum.txt before data.kvs — skip (unexpected ordering).
 				continue
+			}
+			// The first checksum.txt committed and closed the held batch; that
+			// object is back in Pebble's pool and may belong to another writer.
+			if kv.committed {
+				return nil, fmt.Errorf("import: archive has a duplicate checksum.txt entry")
 			}
 			checksumData, readErr := io.ReadAll(tr)
 			if readErr != nil {

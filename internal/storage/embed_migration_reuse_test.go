@@ -27,9 +27,10 @@ import (
 //
 // The reuse needs another goroutine to pick the object up from the same P's
 // pool slot, so the test pins GOMAXPROCS to 2. It is a stress test, not a
-// deterministic one: without the fix it failed 3 of 12 runs on an M-series
-// Mac (a hang, "batch seqnum 0 is less than memtable creation seqnum",
-// "negative WaitGroup counter"); with the fix, 0 of 12.
+// deterministic one: with the fix reverted it failed 3 of 12 runs on an
+// M-series Mac, and an independent rerun under -race failed 2 of 12. The
+// deterministic guard for the shape is TestNoDeferredCloseOfAReplacedBatch;
+// this test is the end-to-end evidence that the shape was the hang.
 func TestClearEmbedFlagsForVault_ConcurrentWritersSurvive(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(2))
 	store := newTestStore(t)
@@ -83,7 +84,16 @@ func TestClearEmbedFlagsForVault_ConcurrentWritersSurvive(t *testing.T) {
 			}
 		}(w)
 	}
-	defer func() { close(stop); wg.Wait() }()
+	defer func() {
+		close(stop)
+		joined := make(chan struct{})
+		go func() { wg.Wait(); close(joined) }()
+		select {
+		case <-joined:
+		case <-time.After(10 * time.Second):
+			t.Errorf("a concurrent writer did not return within 10s of stop (a commit is stuck)")
+		}
+	}()
 
 	setFlags := func() {
 		b := store.db.NewBatch()
