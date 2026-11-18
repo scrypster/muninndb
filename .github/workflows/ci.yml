@@ -258,16 +258,11 @@ jobs:
           Invoke-WebRequest -Uri "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json" -OutFile "internal/plugin/embed/assets/tokenizer.json"
         shell: pwsh
 
-      - name: Fetch ORT DLL
-        if: steps.asset-cache-win.outputs.cache-hit != 'true'
-        run: |
-          Write-Host "Downloading ORT 1.24.2 for windows/amd64..."
-          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip" -OutFile "$env:TEMP\ort-win-x64.zip"
-          Expand-Archive -Path "$env:TEMP\ort-win-x64.zip" -DestinationPath "$env:TEMP\ort-extract" -Force
-          $dll = Get-ChildItem -Path "$env:TEMP\ort-extract" -Recurse -Filter "onnxruntime.dll" | Select-Object -First 1
-          Copy-Item $dll.FullName -Destination "internal/plugin/embed/assets/onnxruntime_windows_amd64.dll"
-          Write-Host "DLL size: $((Get-Item 'internal/plugin/embed/assets/onnxruntime_windows_amd64.dll').Length / 1MB) MB"
-        shell: pwsh
+      # Runs on a cache hit too. The script returns at once when the cached
+      # DLL has the pinned sha256, and replaces it when it does not.
+      - name: Fetch and verify ORT DLL
+        run: bash scripts/fetch-ort-lib.sh windows-amd64
+        shell: bash
 
       - uses: actions/setup-node@v5
         with:

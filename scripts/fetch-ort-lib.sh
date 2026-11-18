@@ -36,10 +36,9 @@
 #
 # DOES NOT CATCH:
 #   - A library that is already in the assets directory when this script is
-#     never run. The CI and release workflows skip the fetch step on an asset
-#     cache hit, so a cached library is not hashed by anything.
-#   - The Windows workflow steps in ci.yml and release.yml, which still
-#     download the upstream zip directly and verify nothing.
+#     never run. The Linux and macOS workflow jobs skip the fetch step on an
+#     asset cache hit, so a cached library is not hashed there. The Windows
+#     jobs run this script on every run, cache hit or not.
 #   - A mirror and an upstream that are both unreachable. The build fails
 #     loudly, it cannot be made to succeed.
 #   - A pinned hash that was wrong when it was written. The hashes below were
@@ -53,7 +52,7 @@ set -euo pipefail
 
 ASSETS_DIR="${ASSETS_DIR:-internal/plugin/embed/assets}"
 ORT_UPSTREAM_BASE="${ORT_UPSTREAM_BASE:-https://github.com/microsoft/onnxruntime/releases/download}"
-ORT_MIRROR_BASE="${ORT_MIRROR_BASE-https://github.com/scrypster/muninndb/releases/download/ort-libs-1}"
+ORT_MIRROR_BASE="${ORT_MIRROR_BASE-https://github.com/scrypster/muninndb-deps/releases/download/ort-libs-1}"
 ORT_SKIP_UPSTREAM="${ORT_SKIP_UPSTREAM:-0}"
 
 target="${1:-}"
@@ -118,30 +117,37 @@ trap 'rm -rf "$work"' EXIT
 
 mkdir -p "$ASSETS_DIR"
 out="$ASSETS_DIR/$dest"
+if [[ -d "$out" ]]; then
+  echo "fetch-ort-lib: ERROR $out is a directory. Remove it and run again." >&2
+  exit 1
+fi
 
 # install_if_pinned <candidate> <source label>: install and return 0 only when
 # the candidate has the pinned hash. A mismatch is reported and returns 1.
 install_if_pinned() {
-  local candidate="$1" label="$2" got
+  local candidate="$1" label="$2" got tmp
   got="$(sha256_of "$candidate")" || return 1
   if [[ "$got" != "$want" ]]; then
     echo "fetch-ort-lib: WARN $label gave a file with sha256 $got, pinned is $want. Not installing it." >&2
     return 1
   fi
-  if ! cp "$candidate" "$out.tmp"; then
+  # A fresh name per run, so two runs for the same target cannot share a
+  # half-written file and a planted "$out.tmp" is never written through.
+  tmp="$(mktemp "$out.tmp.XXXXXX")" || return 1
+  if ! cp "$candidate" "$tmp"; then
     echo "fetch-ort-lib: WARN could not copy the library into $ASSETS_DIR" >&2
-    rm -f "$out.tmp"
+    rm -f "$tmp"
     return 1
   fi
   # Hash what was written, not what was read. A copy cut short by a full disk
   # must not become the installed library.
-  got="$(sha256_of "$out.tmp")" || { rm -f "$out.tmp"; return 1; }
+  got="$(sha256_of "$tmp")" || { rm -f "$tmp"; return 1; }
   if [[ "$got" != "$want" ]]; then
     echo "fetch-ort-lib: WARN the copy in $ASSETS_DIR has sha256 $got, pinned is $want. Not installing it." >&2
-    rm -f "$out.tmp"
+    rm -f "$tmp"
     return 1
   fi
-  mv "$out.tmp" "$out" || { rm -f "$out.tmp"; return 1; }
+  mv "$tmp" "$out" || { rm -f "$tmp"; return 1; }
   echo "    $target: ONNX Runtime $version from $label, sha256 verified ($(du -sh "$out" | cut -f1))"
 }
 
