@@ -26,6 +26,14 @@ func twinCos(a, b []float32) float64 {
 // distance between the twin threshold and a clear twin, so a twin embedded in
 // a DIFFERENT batch composition than its partner still clears T.
 //
+// A batch is padded to its longest text, so a text alone and the same text in
+// a batch of longer ones are also padded to different lengths. Measured on
+// Linux amd64 (the CI runtime), the same-text jitter 1-self was 0.0042 with
+// every batch padded to the full window and 0.0054 padded to fit, against a
+// margin from a clear twin to T of about 0.055: ten times smaller, not the
+// hundred once claimed here. The premise below is stated against that margin
+// rather than a fixed cosine, so it fails if jitter ever approaches T.
+//
 // Invented fixture domain: trail maintenance logs.
 func TestWriteTwin_QuantizationJitterTwinStillClearsThreshold(t *testing.T) {
 	p := newLaneProvider(t)
@@ -57,13 +65,13 @@ func TestWriteTwin_QuantizationJitterTwinStillClearsThreshold(t *testing.T) {
 	alone := vecAt([]string{older}, 0)
 	inEight := vecAt(append(filler(7, 0), older), 7)
 	self := twinCos(alone, inEight)
-	if self < 0.995 {
-		t.Fatalf("self-cosine across batch compositions = %.5f; the jitter assumption (≥0.995) no longer holds", self)
-	}
 	t.Logf("self-cosine alone vs in a batch of 8: %.5f", self)
 
 	// The twin pair in matched and mismatched compositions.
 	same := twinCos(vecAt([]string{older}, 0), vecAt([]string{newer}, 0))
+	if jitter, margin := 1-self, same-thr; jitter*5 > margin {
+		t.Fatalf("same-text jitter across batch compositions (%.5f) is more than a fifth of the clear twin's margin over T (%.4f)", jitter, margin)
+	}
 	cross := twinCos(vecAt(append(filler(7, 0), older), 7), vecAt(append(filler(3, 40), newer), 3))
 	t.Logf("twin cosine, both alone: %.5f; different batch compositions: %.5f; T=%.2f", same, cross, thr)
 	if same < thr+0.01 {

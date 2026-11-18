@@ -200,7 +200,12 @@ multilingual model on a vault that fails the self-test above.
   keep downloads small and run well on CPU.
 - **Dimension is probed, never declared.** At startup the provider runs one
   real inference and takes the output dimension from the returned tensor
-  shape. There is no dimension knob to get wrong.
+  shape. There is no dimension knob to get wrong. That probe runs at the full
+  `embed_max_tokens` window, so a window larger than the model supports stops
+  startup instead of failing on the first long memory.
+- **Short texts are not padded to the full window.** Each batch is padded to its
+  longest text, so a short recall query runs in a fraction of the time. A model
+  that only accepts its full window is detected at startup and keeps full padding.
 - **Init fails loudly.** A missing file, unloadable tokenizer, or failed probe
   stops server startup with a clear error. A configured user model is never
   silently replaced by the bundled one — the same principle #582 established
