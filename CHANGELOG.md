@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.13.0] - 2026-11-18
+
+Faster recall with the local embedder, a fix for `muninn vault reembed` hanging or
+crashing the server, and support for the standard sentence-transformers ONNX export as a
+user-supplied model. Results can reorder slightly against 0.12.1: a query is now padded to
+its own length rather than the model's full window, and the int8 models are not fully
+padding-invariant. About a quarter of top-10 lists changed in order or membership on our
+measurements, with recall quality unchanged.
+
 ### Changed
 
 - Recall is faster with the local embedder. A query used to be padded to the model's full
@@ -30,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repeated `checksum.txt` committed and closed the same batch twice, which crashed the
   import or committed another writer's batch. A `data.kvs` repeated after the checksum
   was imported without any checksum check.
+- Building from source no longer depends on the upstream ONNX Runtime release page, which
+  started returning 404 on 2026-11-17. The build installs the runtime library only when its
+  sha256 matches a pinned value, and falls back to a mirror when upstream is unavailable.
 - A user-supplied local model exported by sentence-transformers loads. Such an export
   declares two outputs, `token_embeddings` and `sentence_embedding`, and the server
   refused it with "cannot pick an output tensor". It now reads `token_embeddings` and
@@ -2564,7 +2578,8 @@ fix ships with a regression test.
 
 ## Comparison Links
 
-[Unreleased]: https://github.com/scrypster/muninndb/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/scrypster/muninndb/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/scrypster/muninndb/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/scrypster/muninndb/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/scrypster/muninndb/compare/v0.11.0...v0.12.0
 [0.4.10]: https://github.com/scrypster/muninndb/compare/v0.4.9-alpha...v0.4.10
