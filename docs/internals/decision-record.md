@@ -2456,3 +2456,42 @@ no test pinned, a cost not named, and a refusal that reached callers as a server
   commit is what closes the windows. A batch of more than about 1,400 pairs takes all 256 stripes,
   and the measured waits are in COG-27 residual 8. Chunking the batch changes how much of a
   batch commits together, which is its own decision, and is the next increment.
+
+### The local embedder pads a batch to its longest text, not the model window (2026-11-18)
+
+**The cost.** Every text was padded to the model's full window before inference: 256 tokens for
+the bundled model, `embed_max_tokens` for a user model. A ten-token recall query paid for the whole
+window. On a 2-vCPU arm64 host serving a 512-token user model, recall on a production vault took
+1.25 s, and almost all of it was query padding.
+
+**The change.** Each batch is padded to its longest truncated text. Measured on that host, empty
+vault: 0.19 s to 0.009 s with the bundled model and 1.23 s to 0.038 s with the 512-token model. On
+the production vault after the deploy, 1.25 s to 0.064 s. The user-model probe still runs at the
+full window, so an `embed_max_tokens` beyond the model's capacity still stops startup (the
+adversarial review found the first version had moved that failure to runtime, where one long
+memory flagged its whole batch as unembeddable). A model that only runs at its full window is
+detected by a second, short probe and keeps full padding.
+
+**Vectors move a little.** The int8 exports are not padding-invariant. A query's vector moves by
+cosine distance of about 8e-4 against its full-window vector, the same order as the movement a
+text already shows when its batch-mates change.
+
+**Two rules, two answers.** On 2026-11-15 the same idea for queries only failed a pre-registered
+stability rule: top-1 unchanged at least 97% and top-10 set unchanged at least 90%. On 2026-11-18,
+with no re-embed, on copies of production vaults and 2,290 questions:
+- Top-1 unchanged 97.5% (bundled) and 97.2% (512-token model). Top-10 set unchanged 72.8% and
+  73.2%, mean top-10 overlap 0.969. The same build run twice is 700 of 700 identical, so all of the
+  churn is the change. By the 2026-11-15 rule it fails.
+- The right memory in the top ten: 1,608 to 1,610 (bundled) and 1,706 to 1,711 (512-token model).
+  Questions it changed: 6 lost and 8 gained, then 1 lost and 6 gained. Own-text retrieval, nonsense
+  abstention and repeatability unchanged. By an outcome rule it passes.
+
+**Decision: ship it.** The owner chose the outcome result. A quarter of top-10 lists change, mostly
+in the lowest slots, and no measured question set finds fewer right memories. In 2026-11-15 recall
+latency was not the bottleneck. With a stronger user model on a small host it is.
+
+**The losing argument, kept whole.** The stability rule exists so that a change does not quietly
+reshuffle what users already see. A user who relied on a memory sitting at rank 9 may find a
+different one there after upgrading, with no re-embed and no notice. The outcome measurement says
+that reshuffle does not cost answers on these sets. It does not say every user's top ten is
+unchanged, because a quarter of them are not.
