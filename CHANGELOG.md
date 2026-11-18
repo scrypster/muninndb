@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `muninn vault reembed` no longer hangs or crashes the server. On a vault with more
+  than 1,000 memories, clearing the old embeddings closed one write batch twice, and the
+  second close could land while another write was using that batch. Two writes then
+  shared one batch, and the next write either hung forever, blocking every write after
+  it, or stopped the process with a fatal commit error. A schema migration had the same
+  double close, but nothing else writes while migrations run, so it could not trigger.
 - A user-supplied local model exported by sentence-transformers loads. Such an export
   declares two outputs, `token_embeddings` and `sentence_embedding`, and the server
   refused it with "cannot pick an output tensor". It now reads `token_embeddings` and

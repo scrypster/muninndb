@@ -83,7 +83,10 @@ func relocatePrefix(db *pebble.DB, oldPfx, newPfx byte) error {
 		batch = db.NewBatch()
 		return nil
 	}
-	defer batch.Close()
+	// Close whichever batch is current at return: commit() has already closed
+	// and replaced the first one, and a plain `defer batch.Close()` would close
+	// that first object a second time (see ClearEmbedFlagsForVault).
+	defer func() { batch.Close() }()
 
 	for valid := iter.First(); valid; valid = iter.Next() {
 		oldKey := append([]byte(nil), iter.Key()...)
