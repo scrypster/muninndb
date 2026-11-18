@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A user-supplied local model exported by sentence-transformers loads. Such an export
+  declares two outputs, `token_embeddings` and `sentence_embedding`, and the server
+  refused it with "cannot pick an output tensor". It now reads `token_embeddings` and
+  applies the configured pooling to it.
 - Each release reaches Packagist. The PHP SDK release tag goes on the split commit, whose
   root holds `composer.json`. It used to go on the monorepo commit, which has none, so
   Packagist listed no PHP SDK release between v0.2.3 and v0.12.1.

@@ -199,7 +199,24 @@ func TestResolveModelOutput(t *testing.T) {
 	if name, err := resolveModelOutput(mk("hidden")); err != nil || name != "hidden" {
 		t.Fatalf("single output used: got %q, %v", name, err)
 	}
+	// A sentence-transformers ONNX export declares the per-token tensor as
+	// "token_embeddings" next to a pooled "sentence_embedding", in either order.
+	for _, outs := range [][]string{
+		{"token_embeddings", "sentence_embedding"},
+		{"sentence_embedding", "token_embeddings"},
+	} {
+		if name, err := resolveModelOutput(mk(outs...)); err != nil || name != "token_embeddings" {
+			t.Fatalf("token_embeddings picked from %v: got %q, %v", outs, name, err)
+		}
+	}
+	if name, err := resolveModelOutput(mk("token_embeddings", "last_hidden_state")); err != nil || name != "last_hidden_state" {
+		t.Fatalf("last_hidden_state still preferred over token_embeddings: got %q, %v", name, err)
+	}
 	if _, err := resolveModelOutput(mk("a", "b")); err == nil {
 		t.Fatal("ambiguous outputs must be refused")
+	}
+	// A pooled vector alone beside an unknown output is not a per-token tensor.
+	if _, err := resolveModelOutput(mk("sentence_embedding", "b")); err == nil {
+		t.Fatal("sentence_embedding with an unknown second output must be refused")
 	}
 }
