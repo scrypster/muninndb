@@ -15,6 +15,7 @@ internal/plugin/embed/assets/*.so
 internal/plugin/embed/assets/*.dll
 internal/plugin/embed/assets/*.onnx
 internal/plugin/embed/assets/tokenizer.json
+internal/plugin/embed/assets/*.tmp.*
 
 # Binary artifacts — never commit
 *.muninn
