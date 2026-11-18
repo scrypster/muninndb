@@ -476,7 +476,10 @@ jobs:
           fetch-depth: 0
 
       - name: Run shellcheck
-        run: shellcheck install.sh scripts/check-build-tags.sh scripts/check-filename-build-constraints.sh scripts/check-nul-bytes.sh scripts/check-leak-tells.sh scripts/go-test-shard.sh scripts/fetch-ort-lib.sh
+        run: shellcheck install.sh scripts/check-build-tags.sh scripts/check-filename-build-constraints.sh scripts/check-nul-bytes.sh scripts/check-leak-tells.sh scripts/go-test-shard.sh scripts/fetch-ort-lib.sh scripts/fetch-ort-lib.test.sh
+
+      - name: ONNX Runtime fetch refuses wrong bytes
+        run: bash scripts/fetch-ort-lib.test.sh
 
       - name: Check build tags
         run: bash scripts/check-build-tags.sh

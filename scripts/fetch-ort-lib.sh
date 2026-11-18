@@ -20,8 +20,13 @@
 #
 # The pinned hashes are the libraries every MuninnDB release up to v0.12.1
 # embedded. A different file is never installed, whichever source it came
-# from. To move to a new ONNX Runtime version, change the version and the
-# hash together, and publish the new files to the mirror first.
+# from.
+#
+# To move to a new ONNX Runtime version: publish the new files to the mirror
+# under a NEW tag (ort-libs-2, never overwrite ort-libs-1, older checkouts
+# still fetch from it), then change the version, the hash and ORT_MIRROR_BASE
+# here together. docs/internals/drift-and-obligations.md item 5 lists the
+# workflow cache keys that move with it.
 #
 # Environment:
 #   ASSETS_DIR         destination directory (default internal/plugin/embed/assets)
@@ -29,10 +34,20 @@
 #   ORT_MIRROR_BASE    mirror base, set to an empty string to disable the mirror
 #   ORT_SKIP_UPSTREAM  set to 1 to go straight to the mirror
 #
-# DOES NOT CATCH: a mirror and an upstream that are both unreachable (the build
-# fails loudly, it cannot be made to succeed), or a pinned hash that was wrong
-# when it was written. The hashes below were read from files that were in use,
-# not from an upstream manifest.
+# DOES NOT CATCH:
+#   - A library that is already in the assets directory when this script is
+#     never run. The CI and release workflows skip the fetch step on an asset
+#     cache hit, so a cached library is not hashed by anything.
+#   - The Windows workflow steps in ci.yml and release.yml, which still
+#     download the upstream zip directly and verify nothing.
+#   - A mirror and an upstream that are both unreachable. The build fails
+#     loudly, it cannot be made to succeed.
+#   - A pinned hash that was wrong when it was written. The hashes below were
+#     read from files that were in use, not from an upstream manifest.
+#
+# Every step inside the try_ functions ends in an explicit "|| return 1".
+# They are called from an "if", where bash ignores "set -e", so a bare
+# failing command there would be silently skipped.
 
 set -euo pipefail
 
@@ -108,13 +123,25 @@ out="$ASSETS_DIR/$dest"
 # the candidate has the pinned hash. A mismatch is reported and returns 1.
 install_if_pinned() {
   local candidate="$1" label="$2" got
-  got="$(sha256_of "$candidate")"
+  got="$(sha256_of "$candidate")" || return 1
   if [[ "$got" != "$want" ]]; then
     echo "fetch-ort-lib: WARN $label gave a file with sha256 $got, pinned is $want. Not installing it." >&2
     return 1
   fi
-  cp "$candidate" "$out.tmp"
-  mv "$out.tmp" "$out"
+  if ! cp "$candidate" "$out.tmp"; then
+    echo "fetch-ort-lib: WARN could not copy the library into $ASSETS_DIR" >&2
+    rm -f "$out.tmp"
+    return 1
+  fi
+  # Hash what was written, not what was read. A copy cut short by a full disk
+  # must not become the installed library.
+  got="$(sha256_of "$out.tmp")" || { rm -f "$out.tmp"; return 1; }
+  if [[ "$got" != "$want" ]]; then
+    echo "fetch-ort-lib: WARN the copy in $ASSETS_DIR has sha256 $got, pinned is $want. Not installing it." >&2
+    rm -f "$out.tmp"
+    return 1
+  fi
+  mv "$out.tmp" "$out" || { rm -f "$out.tmp"; return 1; }
   echo "    $target: ONNX Runtime $version from $label, sha256 verified ($(du -sh "$out" | cut -f1))"
 }
 
@@ -125,17 +152,26 @@ fi
 
 try_upstream() {
   local url="$ORT_UPSTREAM_BASE/v$version/$archive" found
-  if ! curl -fsSL --retry 2 "$url" -o "$work/$archive"; then
+  if ! curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 "$url" -o "$work/$archive"; then
     echo "fetch-ort-lib: WARN upstream download failed: $url" >&2
     return 1
   fi
-  mkdir -p "$work/x"
+  mkdir -p "$work/x" || return 1
   case "$archive" in
-    *.zip) unzip -q "$work/$archive" -d "$work/x" ;;
-    *)     tar -xzf "$work/$archive" -C "$work/x" ;;
+    *.zip)
+      if ! command -v unzip >/dev/null 2>&1; then
+        echo "fetch-ort-lib: WARN unzip is not installed, cannot read the upstream archive" >&2
+        return 1
+      fi
+      unzip -q "$work/$archive" -d "$work/x" || { echo "fetch-ort-lib: WARN upstream archive could not be unpacked" >&2; return 1; }
+      ;;
+    *)
+      tar -xzf "$work/$archive" -C "$work/x" || { echo "fetch-ort-lib: WARN upstream archive could not be unpacked" >&2; return 1; }
+      ;;
   esac
   # -type f skips the unversioned symlink that sits beside the real library.
-  found="$(find "$work/x" -type f -name "$member" | sort | head -1)"
+  # LC_ALL=C keeps the pick the same on every machine.
+  found="$(find "$work/x" -type f -name "$member" | LC_ALL=C sort | head -1)" || return 1
   if [[ -z "$found" ]]; then
     echo "fetch-ort-lib: WARN upstream archive holds no file named $member" >&2
     return 1
@@ -149,7 +185,7 @@ try_mirror() {
     return 1
   fi
   local url="$ORT_MIRROR_BASE/$dest"
-  if ! curl -fsSL --retry 2 "$url" -o "$work/$dest"; then
+  if ! curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 "$url" -o "$work/$dest"; then
     echo "fetch-ort-lib: WARN mirror download failed: $url" >&2
     return 1
   fi

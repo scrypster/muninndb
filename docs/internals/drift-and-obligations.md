@@ -65,9 +65,13 @@ and remain the reviewer's job.
    Preset *names* are pinned across Go and all four web sites by
    `TestPlasticityPresets_WebConsoleParity`; values are still on you.
 
-5. **The embed model or ORT version** (`Makefile`) → update **all** of: `ci.yml` cache keys
+5. **The embed model** (`Makefile`) **or ORT version** (`scripts/fetch-ort-lib.sh`, which
+   holds each platform's version and pinned sha256) → update **all** of: `ci.yml` cache keys
    (Linux *and* Windows jobs), `release.yml` matrix cache keys (5 platforms), and the
-   `docker-compose.yml` comment. **These are already drifted today** — see the live-drift
+   `docker-compose.yml` comment. An ORT bump also needs the new libraries published to the
+   mirror under a **new** tag (never overwrite an existing one, older checkouts still fetch
+   from it), `ORT_MIRROR_BASE` in the script pointed at that tag, and the two Windows
+   workflow steps that still hardcode the upstream zip URL. **These are already drifted today** — see the live-drift
    list below.
 
 6. **`cmd/muninn/upgrade.go`** → upgrade integrity is checksum-verified as of #600. The
