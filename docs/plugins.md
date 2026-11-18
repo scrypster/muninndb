@@ -194,7 +194,9 @@ multilingual model on a vault that fails the self-test above.
   `tokenizer.json`. The model must take BERT-style inputs (`input_ids`,
   `attention_mask`, optionally `token_type_ids`) and produce a hidden-state
   tensor; the provider reads the model's declared inputs and feeds exactly
-  those. Quantized exports (e.g. the Xenova ONNX conversions on Hugging Face)
+  those. The hidden-state tensor is the output named `last_hidden_state`, or
+  the model's only output, or `token_embeddings` (what a sentence-transformers
+  export declares). Quantized exports (e.g. the Xenova ONNX conversions on Hugging Face)
   keep downloads small and run well on CPU.
 - **Dimension is probed, never declared.** At startup the provider runs one
   real inference and takes the output dimension from the returned tensor

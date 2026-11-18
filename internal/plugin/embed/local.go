@@ -368,8 +368,9 @@ func resolveModelInputs(inputs []ort.InputOutputInfo) ([]string, error) {
 }
 
 // resolveModelOutput picks the hidden-state output: "last_hidden_state" when
-// present, otherwise the model's single output. A configurable output tensor
-// name is deliberately deferred until a model actually needs it (#583).
+// present, otherwise the model's single output, otherwise "token_embeddings".
+// A configurable output tensor name is deliberately deferred until a model
+// actually needs it (#583).
 func resolveModelOutput(outputs []ort.InputOutputInfo) (string, error) {
 	for _, out := range outputs {
 		if out.Name == "last_hidden_state" {
@@ -378,6 +379,16 @@ func resolveModelOutput(outputs []ort.InputOutputInfo) (string, error) {
 	}
 	if len(outputs) == 1 {
 		return outputs[0].Name, nil
+	}
+	// A sentence-transformers ONNX export names the per-token tensor
+	// "token_embeddings" and declares a pooled "sentence_embedding" beside
+	// it. The per-token tensor has the same [batch, sequence, dim] shape as
+	// last_hidden_state, so the configured pooling applies to it unchanged.
+	// The pooled output is never picked: this provider pools for itself.
+	for _, out := range outputs {
+		if out.Name == "token_embeddings" {
+			return out.Name, nil
+		}
 	}
 	names := make([]string, len(outputs))
 	for i, out := range outputs {
