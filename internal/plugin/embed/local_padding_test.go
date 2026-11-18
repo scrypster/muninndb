@@ -4,6 +4,7 @@ package embed
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -78,5 +79,97 @@ func TestHasFixedSequenceLength(t *testing.T) {
 		if got := hasFixedSequenceLength(c.inputs); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// userModelFixture writes the bundled model and tokenizer to files so they
+// can be loaded through the user-model path.
+func userModelFixture(t *testing.T) (modelPath, tokPath string) {
+	t.Helper()
+	if !LocalAvailable() {
+		t.Skip("assets not embedded — run `make fetch-assets` and rebuild with -tags localassets")
+	}
+	dir := t.TempDir()
+	modelPath = filepath.Join(dir, "user-model.onnx")
+	tokPath = filepath.Join(dir, "tokenizer.json")
+	if err := atomicWrite(modelPath, embeddedModel); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(tokPath, embeddedTokenizer); err != nil {
+		t.Fatal(err)
+	}
+	return modelPath, tokPath
+}
+
+// An embed_max_tokens beyond the model's position capacity must fail Init,
+// as it did when every batch was padded to the window: if it passes, every
+// batch holding a long text fails at runtime instead, and the retroactive
+// processor flags all of that batch's memories as unembeddable.
+func TestUserModel_MaxTokensBeyondCapacityFailsInit(t *testing.T) {
+	modelPath, tokPath := userModelFixture(t)
+	p := &LocalProvider{}
+	_, err := p.Init(context.Background(), ProviderHTTPConfig{
+		DataDir: t.TempDir(), LocalModelPath: modelPath, LocalTokenizerPath: tokPath,
+		LocalMaxTokens: 1024, // the bundled export has 512 positions
+	})
+	if err == nil {
+		_ = p.Close()
+		t.Fatal("Init accepted embed_max_tokens 1024 on a 512-position model")
+	}
+}
+
+// A model that only runs at one sequence length keeps being fed full-window
+// batches, whether it declares that length on its inputs or hides it behind a
+// dynamic axis (testdata/gen_fixedlen.py).
+func TestUserModel_FixedLengthModelsStillEmbed(t *testing.T) {
+	_, tokPath := userModelFixture(t)
+	for _, name := range []string{"fixedlen8_declared.onnx", "fixedlen8_hidden.onnx"} {
+		t.Run(name, func(t *testing.T) {
+			p := &LocalProvider{}
+			dim, err := p.Init(context.Background(), ProviderHTTPConfig{
+				DataDir: t.TempDir(), LocalModelPath: filepath.Join("testdata", name),
+				LocalTokenizerPath: tokPath, LocalMaxTokens: 8,
+			})
+			if err != nil {
+				t.Fatalf("Init: %v", err)
+			}
+			defer p.Close()
+			if dim != 4 {
+				t.Fatalf("dim = %d, want 4", dim)
+			}
+			if !p.padToMax {
+				t.Error("padToMax = false for a model that only runs at its full window")
+			}
+			// Every text here is shorter than the 8-token window, so only
+			// full-window padding lets the model run.
+			for _, batch := range [][]string{{"short"}, {"short", "a"}} {
+				if n := tokenCount(t, p, batch[0]); n >= p.maxTokens {
+					t.Fatalf("fixture %q is %d tokens, must be under the window %d", batch[0], n, p.maxTokens)
+				}
+				v, err := p.EmbedBatch(context.Background(), batch)
+				if err != nil {
+					t.Fatalf("EmbedBatch(%q): %v", batch, err)
+				}
+				if len(v) != len(batch)*dim {
+					t.Fatalf("got %d floats, want %d", len(v), len(batch)*dim)
+				}
+			}
+		})
+	}
+}
+
+// The bundled export's sequence axis is dynamic: loaded as a user model it
+// must get fit padding, not the fixed-length fallback.
+func TestUserModel_DynamicModelGetsFitPadding(t *testing.T) {
+	modelPath, tokPath := userModelFixture(t)
+	p := &LocalProvider{}
+	if _, err := p.Init(context.Background(), ProviderHTTPConfig{
+		DataDir: t.TempDir(), LocalModelPath: modelPath, LocalTokenizerPath: tokPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if p.padToMax {
+		t.Error("padToMax = true for a dynamic-axis model")
 	}
 }

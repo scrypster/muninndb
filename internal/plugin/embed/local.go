@@ -305,11 +305,23 @@ func (p *LocalProvider) initUserModelLocked(cfg ProviderHTTPConfig) (int, error)
 	// Probe: the model's true output dimension comes from running one real
 	// inference — a user-declared number would be a second source of truth
 	// that can disagree with reality (#583).
-	dim, err := p.probeDimensionLocked()
+	dim, err := p.probeDimensionLocked(p.maxTokens)
 	if err != nil {
 		_ = session.Destroy()
 		p.session = nil
 		return 0, fmt.Errorf("local provider: user model probe failed for %s: %w", modelPath, err)
+	}
+	// The probe above ran at the full window, which is what proves
+	// embed_max_tokens fits the model's position capacity. Real batches are
+	// padded to their longest text, so also prove a short one runs: a model
+	// that only accepts its full window (even behind a dynamic axis) keeps
+	// being fed full-window batches instead of failing on every short text.
+	if !p.padToMax {
+		if _, err := p.probeDimensionLocked(0); err != nil {
+			slog.Warn("local provider: user model rejects inputs shorter than embed_max_tokens, padding every batch to the full window",
+				"model_path", modelPath, "max_tokens", p.maxTokens, "error", err)
+			p.padToMax = true
+		}
 	}
 	p.dim = dim
 
@@ -323,6 +335,7 @@ func (p *LocalProvider) initUserModelLocked(cfg ProviderHTTPConfig) (int, error)
 		"dimension", p.dim,
 		"pooling", pooling,
 		"max_tokens", p.maxTokens,
+		"pad_to_max", p.padToMax,
 		"inputs", p.inputNames,
 	)
 
@@ -427,10 +440,12 @@ func resolveModelOutput(outputs []ort.InputOutputInfo) (string, error) {
 // probeDimensionLocked runs one real inference with an ORT-allocated output
 // tensor and derives the model's output dimension from the returned shape
 // [batch, sequence, dim]. It also validates that the probe vector is finite
-// and non-zero. Caller holds p.mu; p.session, p.tok, p.maxTokens and
+// and non-zero. padTo is passed to packBatchLocked: p.maxTokens runs the
+// model at its full configured window, 0 at the probe text's own length.
+// Caller holds p.mu; p.session, p.tok, p.maxTokens and
 // p.inputNames must be set.
-func (p *LocalProvider) probeDimensionLocked() (int, error) {
-	inputs, _, seqLen, cleanup, err := p.packBatchLocked([]string{"dimension probe"})
+func (p *LocalProvider) probeDimensionLocked(padTo int) (int, error) {
+	inputs, _, seqLen, cleanup, err := p.packBatchLocked([]string{"dimension probe"}, padTo)
 	if err != nil {
 		return 0, err
 	}
@@ -492,12 +507,13 @@ func (p *LocalProvider) probeDimensionLocked() (int, error) {
 // packBatchLocked tokenizes texts and packs them into one input tensor per
 // input the model declares, in p.inputNames order. Every text is truncated to
 // p.maxTokens; the batch is padded to its longest (truncated) text, or to
-// p.maxTokens when the model only accepts a fixed length (p.padToMax). It
+// p.maxTokens when the model only accepts a fixed length (p.padToMax), or to
+// padTo when it is positive (the init probes). It
 // returns the tensors, the flat attention-mask buffer ([len(texts) * seqLen],
 // shared with the attention_mask tensor — valid until cleanup runs) for
 // pooling, the padded length seqLen, and a cleanup that destroys the tensors.
 // Caller holds p.mu.
-func (p *LocalProvider) packBatchLocked(texts []string) ([]ort.Value, []int64, int, func(), error) {
+func (p *LocalProvider) packBatchLocked(texts []string, padTo int) ([]ort.Value, []int64, int, func(), error) {
 	batchSize := len(texts)
 
 	// Tokenize first: the padded length depends on the longest text.
@@ -521,7 +537,10 @@ func (p *LocalProvider) packBatchLocked(texts []string) ([]ort.Value, []int64, i
 		}
 		encs[i] = e
 	}
-	if p.padToMax {
+	switch {
+	case padTo > 0:
+		seqLen = padTo
+	case p.padToMax:
 		seqLen = p.maxTokens
 	}
 	inShape := ort.NewShape(int64(batchSize), int64(seqLen))
@@ -614,7 +633,7 @@ func (p *LocalProvider) EmbedBatch(ctx context.Context, texts []string) ([]float
 	}
 
 	batchSize := len(texts)
-	inputs, poolMask, seqLen, cleanup, err := p.packBatchLocked(texts)
+	inputs, poolMask, seqLen, cleanup, err := p.packBatchLocked(texts, 0)
 	if err != nil {
 		return nil, err
 	}

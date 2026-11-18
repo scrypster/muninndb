@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Recall is faster with the local embedder. A query used to be padded to the model's full
+  window (256 tokens for the bundled model, `embed_max_tokens` for a user model) before
+  inference. Each batch is now padded to its longest text. On a 2-vCPU arm64 host, recall on
+  an empty vault went from 0.19 s to 0.009 s with the bundled model and from 1.23 s to 0.04 s
+  with a 512-token user model. Recall quality was unchanged on 2,290 measured questions
+  without re-embedding. A model that only runs at its full window keeps full padding.
+
 ### Fixed
 
 - A user-supplied local model exported by sentence-transformers loads. Such an export
