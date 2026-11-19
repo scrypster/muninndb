@@ -138,6 +138,48 @@ replacement links an older version's decay archived, as described in their entri
 
 ### Fixed
 
+- **Relationship records no longer collide when two unmapped predicates are
+  asserted about the same entity pair (#894).** The 0x21 key carried the
+  predicate as a 1-byte discriminant from an 11-entry hardcoded vocabulary
+  that folded every other string to `0xFF` — including `belongs_to`,
+  `integrates_with`, `deployed_on` and `alternative_to`, four of the ten
+  predicates the enrich plugin's default prompt itself suggests — so the
+  second write silently destroyed the first. The predicate component is now
+  the 8-byte `keys.PredicateHash` of the raw predicate string (the same
+  construction the key already uses for both entity-name hashes), the
+  vocabulary map is deleted, and migration v7 re-keys existing records on
+  first start. **Two behavior deltas worth knowing:** records already
+  destroyed by a pre-fix collision are not repaired (only the survivor's
+  bytes were ever on disk — the migration re-keys survivors); and the empty
+  predicate string (reachable via the plugin path) and trailing/leading-space
+  variants now get their own stable keys instead of colliding with every
+  other unmapped predicate. Predicate identity remains exact-match
+  (`"Uses"` and `"uses"` are still distinct predicates, by design).
+  **Cluster operators — upgrade the LEADER first, then followers promptly.**
+  Both mixed-version directions are hazardous, in opposite ways. (1) An
+  upgraded node replicating to a pre-upgrade follower: the follower applies
+  49-byte log entries byte-transparently but its 42-length-guarded consumers
+  silently skip relationship cleanup on hard-delete and entity-merge until it
+  is upgraded. (2) A pre-upgrade leader replicating to an upgraded,
+  already-migrated follower: the applier commits replicated batch reprs
+  byte-verbatim with no key-length or version gate, so the leader's legacy
+  42-byte writes land AFTER migration v7 has stamped — a plain reopen never
+  re-runs v7, leaving permanent strays (a re-upsert of the same assertion
+  yields two rows, entity-merge leaves the stale-name row behind, hard-delete
+  orphans its 0x26 index entries). If a replica-first upgrade has already
+  happened, run `muninn start --force-migration-rerun` on the upgraded nodes
+  and restart: v7's length discriminator re-keys the replicated strays — a
+  KEY-LAYOUT repair only. It does not re-run a relink skipped while the stray
+  was 42 bytes, nor reap orphaned 0x26 index keys; a merged-away entity name
+  stays in the row and is unrecoverable (MergeEntity refuses a second merge).
+  **Where
+  that rerun finds its destination already occupied** — the stray and this node's
+  own re-assert of the same triple are both on disk — it keeps whichever value is
+  newer (by the record's `updated_at`) and deletes the legacy key either way, so
+  the rerun converges on the newest row instead of overwriting it with a stale
+  one. A pre-upgrade binary also refuses to open a migrated data directory
+  outright.
+
 - Association decay no longer touches a `supersedes` link, and no longer erases one link with
   another. A `supersedes` link is what marks a memory as replaced, and decay treated it like any
   other link. It could archive it (one declared at a very low weight, after a day, or one that
@@ -179,6 +221,7 @@ replacement links an older version's decay archived, as described in their entri
   until it is written. Measured with a batch of 4,950 pairs, a link in another vault waited up to
   84 to 166 ms (37 to 50 ms before). During a full decay pass over 100,000 links, a batch of 45
   pairs waited 54 to 55 ms at the 99th percentile (2 to 3 ms before).
+
 - Swift SDK: `writeBatch` no longer fails on every successful batch. The SDK expected each
   item of the response to carry `created_at`, which the server has never sent, so decoding
   threw `keyNotFound` after the memories had already been stored. `BatchWriteResult` now has
@@ -187,10 +230,12 @@ replacement links an older version's decay archived, as described in their entri
   batch result must drop it, and `id` is now optional. `openapi.yaml` described the batch
   response the same wrong way (a list of single-write responses plus an `errors` array) and
   now describes what the server sends.
+
 - Cluster: stopping the coordinator now ends and waits for the periodic replication-log prune.
   It used to end only when the process's run context was cancelled, so a prune still running
   when the store was closed next panicked with "pebble: closed". Seen killing a test run under
   the race detector, and possible at server shutdown.
+
 - Vaults with `max_engrams` set could lose memories they should have kept, and so could a
   vault that was written to while it was being cleared. The server keeps a count of each
   vault's memories in memory and saves it to disk. The pruner deletes `count - max_engrams`
@@ -247,6 +292,7 @@ replacement links an older version's decay archived, as described in their entri
     - A delete of a memory whose record cannot be read (corrupt, or written in a format
       this build cannot decode) removes the record without lowering the count. The count
       stays one too high, and a clean restart keeps it.
+
 - Declaring `supersedes` inline on a new memory now retires the old one, exactly as
   `muninn_link` does. A write can carry links to existing memories: the `relationships`
   parameter of `muninn_remember` and `muninn_remember_batch`, and the `relationships` /

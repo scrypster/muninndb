@@ -52,6 +52,7 @@ func RegisterMigrations(r *Runner) {
 	r.Register(Migration{Version: 4, Description: "backfill ordered raw-tag-range index (0x2C) for existing key:value tags (S1)", Up: BackfillRawTagRange})
 	r.Register(Migration{Version: 5, Description: "relocate the replication keyspace off the double-allocated 0x19 onto 0x2F (#726)", Up: RelocateReplicationPrefix})
 	r.Register(Migration{Version: 6, Description: "vault-scope entity records: 0x1F|nameHash -> 0x1F|ws|nameHash, mention_count recomputed per vault (#683)", Up: VaultScopeEntityRecords})
+	r.Register(Migration{Version: 7, Description: "re-key relationship records from the 1-byte predicate discriminant to the 8-byte PredicateHash so distinct unmapped predicates stop colliding (#894)", Up: RekeyRelationshipPredicateHash})
 }
 
 // MaxRegisteredVersion returns the highest migration version this binary knows.
