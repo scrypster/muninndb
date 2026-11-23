@@ -2077,6 +2077,9 @@ func normalizeEntityType(typ string) string {
 
 const (
 	maxInlineEntities = 20
+	// maxInlineRelationships caps the relationships[] items read per memory.
+	// Items past it are ignored and counted in the hint.
+	maxInlineRelationships = 30
 	// entityTypeScanLimit caps the vault entity table pulled in to resolve bare
 	// names. Entities are returned mention-count descending, so the names a
 	// writer is most likely to reuse are the ones inside the cap.
@@ -2128,12 +2131,15 @@ func (s *MCPServer) entityTypeResolver(ctx context.Context, vault string) entity
 // enrichment arguments were actually interpreted. Every field here is something
 // that used to happen silently.
 type enrichmentReport struct {
-	malformed       int      // items that carried no usable name at all
-	unresolvedNames []string // caller-supplied names with no known type -> "other"
-	coercedTypes    []string // caller-supplied types outside the 14 -> "other"
-	markup          int      // entities lifted out of [[...]] in the content
-	renamedKeys     []string // near-miss item keys accepted, e.g. entity_name -> name
-	unknownArgs     []string // near-miss top-level parameters that were ignored
+	malformed        int      // items that carried no usable name at all
+	unresolvedNames  []string // caller-supplied names with no known type -> "other"
+	coercedTypes     []string // caller-supplied types outside the 14 -> "other"
+	markup           int      // entities lifted out of [[...]] in the content
+	renamedKeys      []string // near-miss item keys accepted, e.g. entity_name -> name
+	unknownArgs      []string // near-miss top-level parameters that were ignored
+	unknownRelations []string // relationships[].relation outside the 16 -> stored as relates_to
+	skippedRels      int      // relationships[] items with no object shape, target_id or relation
+	relsOverCap      int      // relationships[] items past maxInlineRelationships, not read
 }
 
 // nearMissArgs maps parameter names that evaluators actually sent to the ones
@@ -2193,6 +2199,34 @@ func (r enrichmentReport) hint() string {
 		parts = append(parts, fmt.Sprintf(
 			"Ignored unknown parameter(s) %s — did you mean %s?",
 			joinCapped(r.unknownArgs, 5), joinCapped(r.unknownArgSuggestions(), 5)))
+	}
+	// The remember-path counterpart of unknownRelationHint (muninn_link): the
+	// engine resolves an unrecognised relation to relates_to, so the
+	// declaration is lost and the caller has to hear it here.
+	if n := len(r.unknownRelations); n > 0 {
+		quoted := make([]string, n)
+		for i, rel := range r.unknownRelations {
+			quoted[i] = strconv.Quote(rel)
+		}
+		subject := fmt.Sprintf("relation %s is not recognised, so that relationship was", quoted[0])
+		lost := "the relationship you intended was"
+		if n > 1 {
+			subject = fmt.Sprintf("relations %s are not recognised, so those %d relationships were", joinCapped(quoted, 5), n)
+			lost = "the relationships you intended were"
+		}
+		parts = append(parts, fmt.Sprintf(
+			"Note: %s stored as \"relates_to\", which carries no meaning for recall — %s not recorded. Re-link with one of: %s.",
+			subject, lost, strings.Join(relationNames(), ", ")))
+	}
+	if r.skippedRels > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d relationship item(s) were skipped: each needs an object with a non-empty \"target_id\" and \"relation\".",
+			r.skippedRels))
+	}
+	if r.relsOverCap > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"Only the first %d relationships are read; %d more were ignored.",
+			maxInlineRelationships, r.relsOverCap))
 	}
 	return strings.Join(parts, " ")
 }
@@ -2292,18 +2326,29 @@ func parseEnrichmentArgs(args map[string]any, req *mbp.WriteRequest, lookup enti
 	}
 
 	if relsAny, ok := args["relationships"].([]any); ok {
+		if over := len(relsAny) - maxInlineRelationships; over > 0 {
+			rep.relsOverCap = over
+		}
 		for i, rAny := range relsAny {
-			if i >= 30 {
+			if i >= maxInlineRelationships {
 				break
 			}
 			rMap, ok := rAny.(map[string]any)
 			if !ok {
+				rep.skippedRels++
 				continue
 			}
 			targetID, _ := rMap["target_id"].(string)
 			relation, _ := rMap["relation"].(string)
 			if targetID == "" || relation == "" {
+				rep.skippedRels++
 				continue
+			}
+			// Checked here, not resolved: the relation is still passed through
+			// as written and the engine stores it exactly as before. This only
+			// records that it is not one of the 16, so hint() can say so.
+			if _, unknown := relTypeFromStringChecked(relation); unknown != "" {
+				rep.unknownRelations = append(rep.unknownRelations, unknown)
 			}
 			weight := float32(0.9)
 			if w, ok := rMap["weight"].(float64); ok {

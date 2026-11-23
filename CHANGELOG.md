@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `muninn_remember` and `muninn_remember_batch` now say so when a relationship's `relation`
+  is not one of the 16 recognised names. Such a relationship is still stored as `relates_to`
+  and nothing is rejected, but the response `hint` (per item in a batch) now names the relation
+  and lists the valid ones, as `muninn_link` has done since #745. A REST or MBP write that
+  carries `relationships` still gets no notice (#927).
+- The same `relationships` argument also dropped items without a word: an item that is not
+  an object or has no `target_id` or `relation`, and every item past the 30th. They are
+  still dropped, and the `hint` now counts both (#927).
+
 ---
 
 ## [0.13.0] - 2026-11-18
