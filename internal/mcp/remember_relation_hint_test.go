@@ -174,3 +174,49 @@ func TestRememberBatch_UnknownRelationIsReportedPerItem(t *testing.T) {
 		}
 	}
 }
+
+// The same loop dropped two more kinds of relationship without a word: an
+// item that is not an object or has no target_id or relation, and every item
+// past the 30th. Both are still dropped; the hint now counts them.
+func TestRemember_SkippedAndOverCapRelationshipsAreReported(t *testing.T) {
+	eng := &relCaptureEngine{}
+	srv := newTestServerWith(eng)
+
+	rels := []any{
+		"not an object",
+		map[string]any{"target_id": "", "relation": "supports"},
+		map[string]any{"target_id": relTargetA},
+	}
+	// 35 items against the cap of 30. Literal numbers, not
+	// maxInlineRelationships, so reverting handlers.go fails this test
+	// rather than the build.
+	for len(rels) < 35 {
+		rels = append(rels, map[string]any{"target_id": relTargetB, "relation": "supports"})
+	}
+	out := callRememberTool(t, srv, "muninn_remember", map[string]any{
+		"vault":         "default",
+		"content":       "the signal box closed when the line was resignalled",
+		"relationships": rels,
+	})
+	hint, _ := out["hint"].(string)
+	if !strings.Contains(hint, "3 relationship item(s) were skipped") {
+		t.Errorf("hint must count the 3 unusable items; got %q", hint)
+	}
+	if !strings.Contains(hint, "Only the first 30 relationships are read; 5 more were ignored") {
+		t.Errorf("hint must count the 5 items past the cap; got %q", hint)
+	}
+	// Still dropped, exactly as before: 30 read, 3 of them unusable.
+	if got := len(eng.single); got != 27 {
+		t.Errorf("engine received %d relationships, want 27", got)
+	}
+
+	// Nothing dropped: no count sentence.
+	out = callRememberTool(t, srv, "muninn_remember", map[string]any{
+		"vault":         "default",
+		"content":       "the goods loop holds forty wagons",
+		"relationships": []any{map[string]any{"target_id": relTargetA, "relation": "supports"}},
+	})
+	if hint, _ := out["hint"].(string); strings.Contains(hint, "skipped") || strings.Contains(hint, "ignored") {
+		t.Errorf("a clean relationships list produced a count notice: %q", hint)
+	}
+}

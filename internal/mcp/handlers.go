@@ -2077,6 +2077,9 @@ func normalizeEntityType(typ string) string {
 
 const (
 	maxInlineEntities = 20
+	// maxInlineRelationships caps the relationships[] items read per memory.
+	// Items past it are ignored and counted in the hint.
+	maxInlineRelationships = 30
 	// entityTypeScanLimit caps the vault entity table pulled in to resolve bare
 	// names. Entities are returned mention-count descending, so the names a
 	// writer is most likely to reuse are the ones inside the cap.
@@ -2135,6 +2138,8 @@ type enrichmentReport struct {
 	renamedKeys      []string // near-miss item keys accepted, e.g. entity_name -> name
 	unknownArgs      []string // near-miss top-level parameters that were ignored
 	unknownRelations []string // relationships[].relation outside the 16 -> stored as relates_to
+	skippedRels      int      // relationships[] items with no object shape, target_id or relation
+	relsOverCap      int      // relationships[] items past maxInlineRelationships, not read
 }
 
 // nearMissArgs maps parameter names that evaluators actually sent to the ones
@@ -2212,6 +2217,16 @@ func (r enrichmentReport) hint() string {
 		parts = append(parts, fmt.Sprintf(
 			"Note: %s stored as \"relates_to\", which carries no meaning for recall — %s not recorded. Re-link with one of: %s.",
 			subject, lost, strings.Join(relationNames(), ", ")))
+	}
+	if r.skippedRels > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"%d relationship item(s) were skipped: each needs an object with a non-empty \"target_id\" and \"relation\".",
+			r.skippedRels))
+	}
+	if r.relsOverCap > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"Only the first %d relationships are read; %d more were ignored.",
+			maxInlineRelationships, r.relsOverCap))
 	}
 	return strings.Join(parts, " ")
 }
@@ -2311,17 +2326,22 @@ func parseEnrichmentArgs(args map[string]any, req *mbp.WriteRequest, lookup enti
 	}
 
 	if relsAny, ok := args["relationships"].([]any); ok {
+		if over := len(relsAny) - maxInlineRelationships; over > 0 {
+			rep.relsOverCap = over
+		}
 		for i, rAny := range relsAny {
-			if i >= 30 {
+			if i >= maxInlineRelationships {
 				break
 			}
 			rMap, ok := rAny.(map[string]any)
 			if !ok {
+				rep.skippedRels++
 				continue
 			}
 			targetID, _ := rMap["target_id"].(string)
 			relation, _ := rMap["relation"].(string)
 			if targetID == "" || relation == "" {
+				rep.skippedRels++
 				continue
 			}
 			// Checked here, not resolved: the relation is still passed through
