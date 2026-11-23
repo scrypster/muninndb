@@ -28,21 +28,16 @@ func newWorkflowTestStore(t *testing.T) *auth.Store {
 	return auth.NewStore(db)
 }
 
-// decodeRPCResult decodes a successful JSON-RPC response's result map.
+// decodeRPCResult decodes a successful JSON-RPC response through the MCP
+// tools/call envelope and returns the inner JSON object's fields. Going through
+// extractInnerJSON pins the wire shape an MCP client actually reads (#969).
 func decodeRPCResult(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var resp JSONRPCResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v\nbody: %s", err, w.Body.String())
 	}
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: code=%d msg=%s", resp.Error.Code, resp.Error.Message)
-	}
-	m, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result is not a map: %T", resp.Result)
-	}
-	return m
+	return extractInnerJSON(t, resp)
 }
 
 // assertRPCError asserts the response is a JSON-RPC error with wantCode and a

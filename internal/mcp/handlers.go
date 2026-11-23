@@ -3518,7 +3518,7 @@ func (s *MCPServer) handleCreateWorkflowVault(ctx context.Context, w http.Respon
 		return
 	}
 
-	sendResult(w, id, map[string]any{
+	sendResult(w, id, textContent(mustJSON(map[string]any{
 		"vault":             name,
 		"capability_id":     cap.ID,
 		"capability_secret": token, // shown once
@@ -3526,5 +3526,5 @@ func (s *MCPServer) handleCreateWorkflowVault(ctx context.Context, w http.Respon
 		"expires_at":        expiresAt.Format(time.RFC3339),
 		"auto_evap_days":    7,
 		"warning":           "capability_secret is shown once; distribute it to worker agents. The vault auto-evaporates engrams after 7 days.",
-	})
+	})))
 }

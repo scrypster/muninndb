@@ -45,6 +45,9 @@ func extractInnerJSON(t *testing.T, resp JSONRPCResponse) map[string]any {
 	if !ok {
 		t.Fatalf("expected result.content[0] to be an object, got %T", contents[0])
 	}
+	if item["type"] != "text" {
+		t.Fatalf("expected result.content[0].type == \"text\", got %v", item["type"])
+	}
 	text, ok := item["text"].(string)
 	if !ok {
 		t.Fatalf("expected result.content[0].text to be a string, got %T", item["text"])
