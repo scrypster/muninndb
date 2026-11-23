@@ -102,10 +102,12 @@ func TestOllamaProvider_Embed(t *testing.T) {
 }
 
 func TestOllamaProvider_MaxBatchSize_Default(t *testing.T) {
-	// A fresh provider (useLegacyAPI=false) should return 64
+	// A fresh provider (useLegacyAPI=false, no batch_size in the URL) carries
+	// 8 texts per request: a batch request is what a recall's query embed can
+	// wait behind (#928).
 	provider := &OllamaProvider{}
-	if provider.MaxBatchSize() != 64 {
-		t.Errorf("expected batch size 64 (new batch endpoint), got %d", provider.MaxBatchSize())
+	if provider.MaxBatchSize() != 8 {
+		t.Errorf("expected batch size 8 (new batch endpoint), got %d", provider.MaxBatchSize())
 	}
 }
 

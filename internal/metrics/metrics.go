@@ -96,26 +96,27 @@ var (
 		Help: "Total activation calls that degraded to BM25-only recall because the query embed exceeded its budget, per vault.",
 	}, []string{"vault"})
 
-	// EmbedLaneWaitsTotal counts embed calls that found their lane of the
-	// bundled local embedder busy and had to queue. lane is "query" (recall's
-	// query embed) or "batch" (write-path and retroactive embeds).
+	// EmbedLaneWaitsTotal counts embed calls that found their lane busy and
+	// had to queue: a lane of the bundled local embedder, or the Ollama
+	// provider's batch lane. lane is "query" (recall's query embed) or "batch"
+	// (write-path and retroactive embeds).
 	EmbedLaneWaitsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "muninndb_embed_lane_waits_total",
-		Help: "Total local embed calls that queued for a busy lane, per lane (query|batch).",
+		Help: "Total embed calls (local or Ollama provider) that queued for a busy lane, per lane (query|batch).",
 	}, []string{"lane"})
 
 	// EmbedLaneTimeoutsTotal counts embed calls whose context ended while they
 	// were still queued for a lane, so they returned an error without running.
 	EmbedLaneTimeoutsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "muninndb_embed_lane_timeouts_total",
-		Help: "Total local embed calls abandoned because their deadline passed while queued, per lane (query|batch).",
+		Help: "Total embed calls (local or Ollama provider) abandoned because their deadline passed while queued, per lane (query|batch).",
 	}, []string{"lane"})
 
 	// EmbedLaneWaitSeconds is how long a queued embed call waited for its lane
 	// (only calls that actually queued are observed).
 	EmbedLaneWaitSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "muninndb_embed_lane_wait_seconds",
-		Help:    "Time a queued local embed call waited for its lane, per lane (query|batch).",
+		Help:    "Time a queued embed call (local or Ollama provider) waited for its lane, per lane (query|batch).",
 		Buckets: []float64{0.001, 0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5},
 	}, []string{"lane"})
 

@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Ollama embed provider sends at most 8 texts per request, down from 64. A host with
+  a GPU or more parallel Ollama slots can raise it with `batch_size` (1 to 1024) on the
+  `ollama://` URL, for example `ollama://localhost:11434/bge-m3?batch_size=32`. An invalid
+  value makes the URL invalid: the server logs `embedder service creation failed` and
+  falls back as it does for any Ollama URL it cannot use.
+- On an Ollama without `/api/embed`, each `/api/embeddings` request now times out after
+  40 s (30 s plus 10 s per text, the same rule as the batch endpoint). It had no timeout
+  of its own.
+
+### Fixed
+
+- With the Ollama embed provider, a recall's query embed no longer queues behind every
+  background embed request already sent (#928). Background embeds (backfill, new writes,
+  triggers) now go to Ollama one request at a time, and the query embed is sent at once,
+  as with the bundled local embedder since 0.12.0. On a CPU Ollama serving one request at
+  a time, the query could wait long enough to use up its embed budget, and the recall
+  degraded to keyword-only.
+
 ---
 
 ## [0.13.0] - 2026-11-18

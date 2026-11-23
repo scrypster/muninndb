@@ -110,6 +110,8 @@ Provider comparison:
 | Jina | `MUNINN_JINA_KEY` | jina-embeddings-v3 | 1024 | Per token | API |
 | Mistral | `MUNINN_MISTRAL_KEY` | mistral-embed | 1024 | Per token | API |
 
+The Ollama URL (`MUNINN_OLLAMA_URL`, or `embed_url` in `plugin_config.json`) takes an optional `batch_size` query parameter: how many texts one embed request carries, from 1 to 1024, default 8 (for example `ollama://localhost:11434/bge-m3?batch_size=32`). Ollama cannot interrupt a request it has started, so with `OLLAMA_NUM_PARALLEL=1` a recall's query embed that arrives during a background request waits for that request; the small default bounds that wait, and a host with a GPU or more parallel slots can raise it. Background embeds go to Ollama one request at a time, and a recall's query embed does not wait for the ones still queued in MuninnDB that have not been sent yet. An invalid `batch_size` makes the URL invalid, and the server treats it like any Ollama URL it cannot use: it logs `embedder service creation failed` and does not use Ollama. With `MUNINN_OLLAMA_URL` it then tries the next provider, which can be the bundled local model.
+
 `MUNINN_OPENAI_URL` can optionally override the OpenAI base URL for compatible endpoints (for example LocalAI or an internal gateway). If set to an invalid value, MuninnDB skips OpenAI initialization instead of falling back to `api.openai.com`. This override also applies to the Enrich plugin when `MUNINN_ENRICH_URL` is set to an `openai://` provider — see [Tier 3](#4-tier-3-enrich-plugin) below.
 
 ### Language Coverage

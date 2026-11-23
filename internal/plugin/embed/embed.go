@@ -44,6 +44,10 @@ type ProviderHTTPConfig struct {
 	LocalTokenizerPath string // path to its HuggingFace tokenizer.json
 	LocalPooling       string // "cls" (default) or "mean"
 	LocalMaxTokens     int    // max sequence length; 0 = provider default
+
+	// BatchSize is the most texts one request carries, from the provider
+	// URL (ollama provider only, ?batch_size=N); 0 = provider default.
+	BatchSize int
 }
 
 // EmbedService implements plugin.EmbedPlugin.
@@ -140,6 +144,7 @@ func (s *EmbedService) Init(ctx context.Context, cfg plugin.PluginConfig) error 
 		LocalTokenizerPath: cfg.LocalTokenizerPath,
 		LocalPooling:       cfg.LocalPooling,
 		LocalMaxTokens:     cfg.LocalMaxTokens,
+		BatchSize:          s.provCfg.BatchSize,
 	}
 
 	slog.Info("initializing embed provider",

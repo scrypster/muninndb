@@ -27,6 +27,38 @@ func TestParseOllamaURL(t *testing.T) {
 	}
 }
 
+// TestParseOllamaURL_BatchSize: ?batch_size=N sets how many texts one Ollama
+// embed request carries. An explicit value is honoured or refused, never
+// replaced by the default; leaving it out means the provider default (0).
+func TestParseOllamaURL_BatchSize(t *testing.T) {
+	for _, tc := range []struct {
+		url  string
+		want int
+	}{
+		{"ollama://localhost:11434/bge-m3", 0},
+		{"ollama://localhost:11434/bge-m3?batch_size=1", 1},
+		{"ollama://localhost:11434/bge-m3?batch_size=32", 32},
+		{"ollama://localhost:11434/bge-m3?batch_size=1024", 1024},
+	} {
+		config, err := ParseProviderURL(tc.url)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.url, err)
+		}
+		if config.BatchSize != tc.want {
+			t.Errorf("%s: BatchSize = %d, want %d", tc.url, config.BatchSize, tc.want)
+		}
+		if config.Model != "bge-m3" || config.BaseURL != "http://localhost:11434" {
+			t.Errorf("%s: model %q, base URL %q; the query must not leak into either", tc.url, config.Model, config.BaseURL)
+		}
+	}
+	for _, bad := range []string{"0", "-4", "1025", "eight", "8.5", ""} {
+		u := "ollama://localhost:11434/bge-m3?batch_size=" + bad
+		if config, err := ParseProviderURL(u); err == nil {
+			t.Errorf("%s: accepted (BatchSize %d), want an error", u, config.BatchSize)
+		}
+	}
+}
+
 func TestParseOpenAIURL(t *testing.T) {
 	config, err := ParseProviderURL("openai://text-embedding-3-small")
 	if err != nil {
