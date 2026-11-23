@@ -29,7 +29,18 @@ type ProviderConfig struct {
 	Port    int            // resolved port (e.g., 11434 or 443)
 	Model   string         // model name (e.g., "nomic-embed-text")
 	BaseURL string         // fully constructed base URL (e.g., "http://localhost:11434")
+	// BatchSize is an ollama:// URL's ?batch_size=N: the most texts one embed
+	// request carries. 0 = the provider's default. Only the embed provider
+	// uses it, but every ollama:// URL is parsed here: an invalid value makes
+	// an enrich URL fail to parse too (enrichment then stays off), and a
+	// valid one is ignored there.
+	BatchSize int
 }
+
+// ollamaBatchSizeLimit bounds ?batch_size= on an ollama:// URL. It is a
+// sanity bound against a typo, not a tuning: the embed pipeline allocates
+// buffers of the batch size up front.
+const ollamaBatchSizeLimit = 1024
 
 // ParseProviderURL parses a provider URL and returns a ProviderConfig.
 // Supports:
@@ -112,6 +123,18 @@ func parseOllamaURL(parsed *url.URL, config *ProviderConfig) (*ProviderConfig, e
 	config.Model = model
 
 	config.BaseURL = fmt.Sprintf("http://%s:%d", config.Host, config.Port)
+
+	// ollama://host:port/model?batch_size=N overrides how many texts one embed
+	// request carries. An explicit value is honoured or refused, never
+	// replaced by the default.
+	if q := parsed.Query(); q.Has("batch_size") {
+		raw := q.Get("batch_size")
+		n, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil || n < 1 || n > ollamaBatchSizeLimit {
+			return nil, fmt.Errorf("ollama URL batch_size must be a whole number from 1 to %d, got %q", ollamaBatchSizeLimit, raw)
+		}
+		config.BatchSize = n
+	}
 	return config, nil
 }
 

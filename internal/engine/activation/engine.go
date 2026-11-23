@@ -1099,10 +1099,10 @@ func (e *ActivationEngine) phase1(ctx context.Context, req *ActivateRequest) (*p
 	if e.embedder != nil && e.hnsw != nil {
 		embedCtx, cancelEmbed := embedBudgetContext(ctx, req.EmbedBudgetFraction)
 		defer cancelEmbed()
-		// Mark this — and only this — embed as a recall query, so an embedder
-		// with scheduling lanes (the bundled local one) serves it ahead of
-		// background batch embeds instead of queueing it behind them. The
-		// mark rides on embedCtx alone; nothing else in recall inherits it.
+		// Mark this — and only this — embed as a recall query. The providers
+		// that read the mark (the bundled local one and Ollama) keep it off
+		// the batch lane, where background embeds wait their turn. The mark
+		// rides on embedCtx alone; nothing else in recall inherits it.
 		vec, err := e.embedder.Embed(embedlane.WithQuery(embedCtx), req.Context)
 		if err != nil {
 			// Degrade to BM25+decay recall instead of aborting: FTS still

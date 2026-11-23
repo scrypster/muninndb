@@ -1471,6 +1471,19 @@ be overrun by up to one inference (~20-40 ms query, ~0.2 s batch). gRPC now carr
 keyword-only rows unmarked — silent on that transport, and the lanes made that outcome
 the common one for a deadline behind a batch.
 
+**The Ollama provider (#928, 2026-11-23).** It sent every call at once, up to 64 texts per
+request, and Ollama cannot interrupt a request it has started: with one request at a time,
+recall's query embed waited for every batch request already sent. Now every unmarked call
+holds a batch lane of capacity 1 (the same `embedLane`) while its request is in flight, and
+a marked query of at most 4 texts skips it and is sent at once. There is no client-side
+query lane: parallelism is Ollama's (`OLLAMA_NUM_PARALLEL`), and one would only serialise
+concurrent recalls on a host with parallel slots. The default request drops from 64 to 8
+texts; `?batch_size=N` on the `ollama://` URL overrides it (1-1024, an invalid value is
+refused at parse time). The measurement on a production host (2 vCPU, CPU only, `bge-m3`,
+one request at a time) confirmed 8: throughput was flat across 8-64 texts per request
+(0.93-1.11 texts/s), and a query behind one 8-text request waited p50 3.8 s, max 7.5 s,
+inside the 15 s embed budget of a 30 s recall, against p50 33 s, max 86 s behind one of 64.
+
 ### The label pipeline: labels are child rows of the recall they describe (slice 2a, 2026-11-15)
 
 **Context.** Explicit feedback taught the engine nothing: `muninn_feedback` sent an inert

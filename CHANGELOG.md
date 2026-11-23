@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Ollama embed provider sends at most 8 texts per request, down from 64. A host with
+  a GPU or more parallel Ollama slots can raise it with `batch_size` (1 to 1024) on the
+  `ollama://` URL, for example `ollama://localhost:11434/bge-m3?batch_size=32`. An invalid
+  value makes the URL invalid (see the next entry).
+- A `MUNINN_OLLAMA_URL` the server cannot parse, or one that is not an `ollama://` URL, now
+  stops startup with an error naming the variable. Before, the server logged `embedder
+  service creation failed` and silently fell back to the next embed provider configured, or
+  to the bundled local model. This covers an invalid `batch_size`, a missing port or model,
+  and an `http://` URL in place of `ollama://` (the example in `docs/plugins.md` showed
+  one). Another provider's URL, such as `local://` or `openai://`, used to start the bundled
+  model or fall back the same way. A host that has been running on that fallback changes
+  its embed model once the URL is fixed, so re-embed its vaults (`muninn vault reembed`),
+  or unset the variable to keep the embedder it has. An Ollama that cannot be reached at
+  startup is handled as before. So is an invalid `embed_url` in `plugin_config.json`: the
+  server does not use Ollama and substitutes no other model.
+- On an Ollama without `/api/embed`, each `/api/embeddings` request now times out after
+  40 s (30 s plus 10 s per text, the same rule as the batch endpoint). It had no timeout
+  of its own.
+
+### Fixed
+
+- With the Ollama embed provider, a recall's query embed no longer queues behind every
+  background embed request already sent (#928). Background embeds (backfill, new writes,
+  triggers) now go to Ollama one request at a time, and the query embed is sent at once,
+  as with the bundled local embedder since 0.12.0. On a CPU Ollama serving one request at
+  a time, the query could wait long enough to use up its embed budget, and the recall
+  degraded to keyword-only.
+
 ---
 
 ## [0.13.0] - 2026-11-18

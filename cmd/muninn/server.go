@@ -404,6 +404,23 @@ func buildEmbedder(ctx context.Context, cfg plugincfg.PluginConfig, dataDir stri
 	// 1. Env var: Ollama
 	if url := os.Getenv(ollamaURL); url != "" {
 		slog.Info("initializing Ollama embedder", "url", url)
+		// A URL the server cannot use as written (a scheme other than
+		// ollama://, a missing port or model, an invalid ?batch_size=) is a
+		// deterministic configuration error: it fails startup, as a broken
+		// user local model does (#583), instead of falling through to another
+		// provider or the bundled model. Another provider's URL parses, but
+		// local:// would start the bundled model and the others are not what
+		// this variable configures, so it fails too. Parsing does no I/O, so
+		// only that kind of error fails here. An Ollama that cannot be reached
+		// at startup is transient, and tryEmbedService still falls through as
+		// before.
+		provCfg, err := plugin.ParseProviderURL(url)
+		if err == nil && provCfg.Scheme != plugin.SchemeOllama {
+			err = fmt.Errorf("the scheme is %q, not %q", provCfg.Scheme, plugin.SchemeOllama)
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s is not a usable Ollama URL (expected ollama://host:port/model, optionally ?batch_size=N); fix or unset it, the server does not fall back to another embedder: %w", ollamaURL, err)
+		}
 		if svc := tryEmbedService(url, plugin.PluginConfig{}); svc != nil {
 			return embedpkg.NewEmbedServiceAdapter(svc), svc, nil
 		}
@@ -930,7 +947,7 @@ func runServer() {
 		fmt.Fprintf(os.Stderr, "Usage of muninndb:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nEnvironment variables (primary configuration; see docs for full list):\n")
-		fmt.Fprintf(os.Stderr, "  MUNINN_OLLAMA_URL            Ollama embedder base URL (e.g. http://localhost:11434)\n")
+		fmt.Fprintf(os.Stderr, "  MUNINN_OLLAMA_URL            Ollama embedder URL (e.g. ollama://localhost:11434/nomic-embed-text)\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_OPENAI_KEY            OpenAI embedder API key\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_OPENAI_URL            Optional OpenAI base URL or provider URL override\n")
 		fmt.Fprintf(os.Stderr, "  MUNINN_VOYAGE_KEY            Voyage embedder API key\n")

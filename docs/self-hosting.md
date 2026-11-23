@@ -116,6 +116,16 @@ Install [Ollama](https://ollama.com), then:
 ollama pull nomic-embed-text
 ```
 
+By default, one embed request to Ollama carries at most 8 texts. Ollama cannot interrupt
+a request it has started, so with `OLLAMA_NUM_PARALLEL=1` a recall's query embed that
+arrives during a background request waits for that request; the small default bounds that
+wait. A host with a GPU or more parallel slots can raise it with `batch_size` (1 to 1024)
+on the URL:
+
+```sh
+MUNINN_OLLAMA_URL="ollama://localhost:11434/nomic-embed-text?batch_size=32"
+```
+
 ### OpenAI
 
 ```sh
@@ -310,7 +320,7 @@ curl http://127.0.0.1:8750/mcp/health
 | `MUNINN_LOCAL_EMBED` | on | Set to `"0"` to disable the bundled ONNX embedder |
 | `MUNINN_OPENAI_KEY` | `""` | OpenAI API key for embeddings |
 | `MUNINN_OPENAI_URL` | `""` | Optional OpenAI base URL or provider URL override (invalid values skip OpenAI init) |
-| `MUNINN_OLLAMA_URL` | `""` | Ollama URL for embeddings, e.g. `ollama://localhost:11434/nomic-embed-text` |
+| `MUNINN_OLLAMA_URL` | `""` | Ollama URL for embeddings, e.g. `ollama://localhost:11434/nomic-embed-text`. Optional `?batch_size=N`: texts per embed request, 1 to 1024, default 8. A URL the server cannot parse, or one that is not `ollama://`, stops startup |
 | `MUNINN_VOYAGE_KEY` | `""` | Voyage AI key for embeddings |
 | `MUNINN_ENRICH_URL` | `""` | LLM enrichment URL (optional) |
 | `MUNINN_ANTHROPIC_KEY` | `""` | Anthropic API key for enrichment |

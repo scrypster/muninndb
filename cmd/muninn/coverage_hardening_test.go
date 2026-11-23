@@ -14,6 +14,7 @@ import (
 
 	plugincfg "github.com/scrypster/muninndb/internal/config"
 	"github.com/scrypster/muninndb/internal/engine/activation"
+	"github.com/scrypster/muninndb/internal/plugin"
 )
 
 // storage import is intentionally omitted — PebbleStore requires *pebble.DB.
@@ -1697,6 +1698,10 @@ func TestBuildEmbedder_Noop(t *testing.T) {
 	}
 }
 
+// TestBuildEmbedder_OllamaEnvBadURL: an explicitly set MUNINN_OLLAMA_URL the
+// server cannot parse fails startup, naming the variable, instead of falling
+// through to another provider or the bundled model. An Ollama that is only
+// unreachable keeps falling through (TestBuildEmbedder_OllamaEnvURL).
 func TestBuildEmbedder_OllamaEnvBadURL(t *testing.T) {
 	t.Setenv("MUNINN_OLLAMA_URL", "http://localhost:1/notreal")
 	t.Setenv("MUNINN_OPENAI_KEY", "")
@@ -1708,12 +1713,75 @@ func TestBuildEmbedder_OllamaEnvBadURL(t *testing.T) {
 	t.Setenv("MUNINN_LOCAL_EMBED", "0")
 
 	cfg := plugincfg.PluginConfig{EmbedProvider: "none"}
-	embedder, _, err := buildEmbedder(context.Background(), cfg, t.TempDir())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	embedder, plug, err := buildEmbedder(context.Background(), cfg, t.TempDir())
+	if err == nil {
+		t.Fatal("expected a startup error for an http:// MUNINN_OLLAMA_URL, got none")
 	}
-	if embedder == nil {
-		t.Error("expected noop embedder fallback, got nil")
+	if !strings.Contains(err.Error(), "MUNINN_OLLAMA_URL") {
+		t.Errorf("error should name the env var, got: %v", err)
+	}
+	if embedder != nil || plug != nil {
+		t.Error("no embedder may be returned for a malformed MUNINN_OLLAMA_URL")
+	}
+}
+
+// TestBuildEmbedder_OllamaEnvURL separates the two ways MUNINN_OLLAMA_URL can
+// fail. A URL the server cannot parse, or another provider's URL, is a
+// configuration error and fails startup. A well-formed URL whose Ollama cannot
+// be reached is transient: the server warns and falls through as before (here
+// to noop, since nothing else is configured). Port 1 refuses connections, so
+// no Ollama is contacted.
+func TestBuildEmbedder_OllamaEnvURL(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"batch_size zero", "ollama://localhost:1/bge-m3?batch_size=0", true},
+		{"batch_size not a number", "ollama://localhost:1/bge-m3?batch_size=eight", true},
+		{"batch_size too large", "ollama://localhost:1/bge-m3?batch_size=1025", true},
+		{"no port", "ollama://localhost/bge-m3", true},
+		{"no model", "ollama://localhost:1", true},
+		{"unknown scheme", "olama://localhost:1/bge-m3", true},
+		// These parse, as another provider's URL. Without the scheme check
+		// local:// starts the bundled model (here, without the assets, its
+		// init fails) and openai:// fails init for want of a key: both fell
+		// through instead of failing startup.
+		{"local scheme", "local://bge-m3", true},
+		{"openai scheme", "openai://text-embedding-3-small", true},
+		{"unreachable", "ollama://localhost:1/bge-m3", false},
+		{"unreachable with batch_size", "ollama://localhost:1/bge-m3?batch_size=32", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEmbedEnv(t) // leaves MUNINN_LOCAL_EMBED=0: no bundled model to fall back to
+			t.Setenv("MUNINN_OLLAMA_URL", tc.url)
+
+			cfg := plugincfg.PluginConfig{EmbedProvider: "none"}
+			var embedder activation.Embedder
+			var plug plugin.EmbedPlugin
+			var err error
+			captureStderr(func() {
+				embedder, plug, err = buildEmbedder(context.Background(), cfg, t.TempDir())
+			})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("%s: expected a startup error, got none (it fell through instead)", tc.url)
+				}
+				if !strings.Contains(err.Error(), "MUNINN_OLLAMA_URL") {
+					t.Errorf("error should name the env var, got: %v", err)
+				}
+				if embedder != nil || plug != nil {
+					t.Error("no embedder may be returned for a malformed MUNINN_OLLAMA_URL")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: an unreachable Ollama must not fail startup, got: %v", tc.url, err)
+			}
+			if embedder == nil || plug != nil {
+				t.Errorf("expected the noop fallback (embedder set, no plugin), got embedder=%v plugin=%v", embedder, plug)
+			}
+		})
 	}
 }
 
@@ -1885,7 +1953,9 @@ func TestBuildEmbedder_SavedConfigMistral(t *testing.T) {
 }
 
 func TestBuildEmbedder_AllEnvVarsTried(t *testing.T) {
-	t.Setenv("MUNINN_OLLAMA_URL", "http://localhost:1/bad")
+	// Well-formed but unreachable: a malformed MUNINN_OLLAMA_URL would fail
+	// startup before the other env vars are tried.
+	t.Setenv("MUNINN_OLLAMA_URL", "ollama://localhost:1/bad")
 	t.Setenv("MUNINN_OPENAI_KEY", "fake-key")
 	t.Setenv("MUNINN_VOYAGE_KEY", "fake-key")
 	t.Setenv("MUNINN_COHERE_KEY", "fake-key")

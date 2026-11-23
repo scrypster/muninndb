@@ -1,7 +1,7 @@
 // Package embedlane carries the caller's explicit embed-lane choice through a
 // context.Context, from the code that knows WHY it is embedding (recall's query
 // embed) to the provider that schedules the work (the bundled local ONNX
-// embedder).
+// embedder and the Ollama provider).
 //
 // It is a leaf package on purpose: the recall pipeline (internal/engine/
 // activation) sets the marker and the embed providers (internal/plugin/embed)
