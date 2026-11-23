@@ -977,7 +977,7 @@ func allToolDefinitions() []ToolDefinition {
 					"stages": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string", "enum": []string{"entities", "relationships", "classification", "summary"}},
-						"description": "Which enrichment stages to re-run. Defaults to all four: entities, relationships, classification, summary. Only memories missing these stages will be processed.",
+						"description": "Which enrichment stages to re-run. Defaults to all four: entities, relationships, classification, summary, less any the server's enrich configuration switches off; naming a switched-off stage is an error. Only memories missing these stages will be processed.",
 					},
 					"limit": map[string]any{
 						"type":        "integer",

@@ -126,3 +126,11 @@ type RetroactiveStats struct {
 type HardwareAwarePlugin interface {
 	HardwareAccelerated() bool
 }
+
+// StageReporter is implemented by an EnrichPlugin whose configuration can
+// switch pipeline stages off (enrich_mode and the enrich_* flags). It returns
+// the stages the plugin can run, named as the digest-flag surfaces name them:
+// "entities", "relationships", "classification", "summary".
+type StageReporter interface {
+	EnabledStages() []string
+}

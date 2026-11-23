@@ -9,6 +9,7 @@ import (
 
 	"github.com/scrypster/muninndb/internal/config"
 	"github.com/scrypster/muninndb/internal/engine/circuit"
+	"github.com/scrypster/muninndb/internal/plugin"
 	"github.com/scrypster/muninndb/internal/storage"
 )
 
@@ -75,3 +76,6 @@ func TestEnrichService_NothingToEnrichDoesNotOpenCircuit(t *testing.T) {
 		t.Fatalf("breaker state = %s, want closed", got)
 	}
 }
+
+// The engine's replay narrows its stages through this interface (#883).
+var _ plugin.StageReporter = (*EnrichService)(nil)

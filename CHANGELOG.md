@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opened the circuit breaker: the provider was reported unhealthy, the next memory was
   counted as an error, and the background pass stopped until the breaker let a probe
   through 30 s later. The background pass marks these memories done, as before.
+- `muninn_replay_enrichment` leaves out the stages the enrich configuration switches off.
+  Replay runs the server's enrich plugin, which never sets those stages' flags, so in
+  light mode a default replay selected the same memories on every call and a dry run
+  reported memories that were finished as work to do. Naming a switched-off stage in
+  `stages` is an error. `muninn_get_enrichment_candidates` is unchanged: it lists work for
+  an external agent, which can fill a stage the server does not run.
 
 ---
 

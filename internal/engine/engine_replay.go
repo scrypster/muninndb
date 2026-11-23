@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/scrypster/muninndb/internal/plugin"
@@ -107,7 +108,11 @@ func (e *Engine) ReplayEnrichment(ctx context.Context, vault string, stages []st
 	if err := e.refuseWrite(ctx); err != nil {
 		return nil, err
 	}
-	stageMask, validStages, seen, err := normalizeEnrichmentStages(stages)
+	_, validStages, _, err := normalizeEnrichmentStages(stages)
+	if err != nil {
+		return nil, err
+	}
+	stageMask, validStages, seen, err := e.replayableStages(len(stages) > 0, validStages)
 	if err != nil {
 		return nil, err
 	}
@@ -618,6 +623,92 @@ func normalizeEnrichmentStages(stages []string) (uint16, []string, map[string]bo
 		}
 	}
 	return stageMask, validStages, seen, nil
+}
+
+// replayableStages removes from a replay request the stages the enrich
+// plugin's configuration switches off (enrich_mode, enrich_* in
+// plugin_config.json, #883). Replay runs that plugin, so it never sets such a
+// stage's flag: counted as pending, the stage would select the same memories
+// on every call, and a dry run would report them as work. Defaulted stages are
+// narrowed to the ones the plugin runs. A switched-off stage the caller named
+// is refused rather than dropped, so a replay is never reported for a stage
+// that did not run. Without an enrich plugin that reports its stages (none
+// configured, as in a dry run), the request is kept as it is.
+func (e *Engine) replayableStages(explicit bool, requested []string) (uint16, []string, map[string]bool, error) {
+	kept := requested
+	if reporter, ok := e.enrichPlugin.(plugin.StageReporter); ok {
+		enabled := make(map[string]bool, len(defaultReplayStages))
+		for _, s := range reporter.EnabledStages() {
+			enabled[s] = true
+		}
+		kept = make([]string, 0, len(requested))
+		var off []string
+		for _, s := range requested {
+			if enabled[s] {
+				kept = append(kept, s)
+			} else {
+				off = append(off, s)
+			}
+		}
+		if len(off) > 0 && (explicit || len(kept) == 0) {
+			them := "them"
+			if len(off) == 1 {
+				them = "it"
+			}
+			return 0, nil, nil, fmt.Errorf("replay enrichment: the enrich plugin does not run %s; replay runs that plugin and cannot fill %s",
+				describeStagesOff(off, enabled), them)
+		}
+	}
+	mask := uint16(0)
+	seen := make(map[string]bool, len(kept))
+	for _, s := range kept {
+		mask |= stageToFlag[s]
+		seen[s] = true
+	}
+	return mask, kept, seen, nil
+}
+
+// describeStagesOff names the stages in off with the reason the enrich plugin
+// does not run them. The plugin reports only the stages it runs, so the reason
+// is derived: enrich_mode or the stage's enrich_* flag switched it off, except
+// relationships while entities are off. The pipeline extracts relationships
+// from the entities stage's output in the same run, so they cannot run
+// without it, whatever enrich_relationships says.
+func describeStagesOff(off []string, enabled map[string]bool) string {
+	const byConfig = "switched off by enrich_mode or an enrich_* flag in plugin_config.json"
+	var configured []string
+	needsEntities, entitiesNamed := false, false
+	for _, s := range off {
+		if s == "relationships" && !enabled["entities"] {
+			needsEntities = true
+			continue
+		}
+		configured = append(configured, s)
+		entitiesNamed = entitiesNamed || s == "entities"
+	}
+	var parts []string
+	if len(configured) > 0 {
+		parts = append(parts, stagePhrase(configured)+" ("+byConfig+")")
+	}
+	if needsEntities {
+		why := "the relationships stage (relationships are extracted from the entities stage's output"
+		if !entitiesNamed {
+			why += ", and the entities stage is " + byConfig
+		}
+		parts = append(parts, why+")")
+	}
+	return strings.Join(parts, ", nor ")
+}
+
+// stagePhrase names stages for an error message: "the summary stage", "the
+// entities and classification stages", "the entities, classification and
+// summary stages".
+func stagePhrase(stages []string) string {
+	n := len(stages)
+	if n == 1 {
+		return "the " + stages[0] + " stage"
+	}
+	return "the " + strings.Join(stages[:n-1], ", ") + " and " + stages[n-1] + " stages"
 }
 
 func normalizeExplicitEnrichmentStages(stages []string) (map[string]bool, error) {
