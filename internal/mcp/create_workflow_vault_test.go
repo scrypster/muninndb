@@ -29,36 +29,15 @@ func newWorkflowTestStore(t *testing.T) *auth.Store {
 }
 
 // decodeRPCResult decodes a successful JSON-RPC response through the MCP
-// tools/call envelope: result.content[0].text must be a JSON object, and its
-// fields are returned. Asserting the envelope here pins the wire shape an MCP
-// client actually reads (#969).
+// tools/call envelope and returns the inner JSON object's fields. Going through
+// extractInnerJSON pins the wire shape an MCP client actually reads (#969).
 func decodeRPCResult(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var resp JSONRPCResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v\nbody: %s", err, w.Body.String())
 	}
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: code=%d msg=%s", resp.Error.Code, resp.Error.Message)
-	}
-	m, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result is not a map: %T", resp.Result)
-	}
-	content, ok := m["content"].([]any)
-	if !ok || len(content) == 0 {
-		t.Fatalf("result has no content[] envelope (MCP tools/call shape, #969): %s", mustJSON(m))
-	}
-	first, ok := content[0].(map[string]any)
-	if !ok {
-		t.Fatalf("content[0] is not a map: %T", content[0])
-	}
-	text, _ := first["text"].(string)
-	inner := map[string]any{}
-	if err := json.Unmarshal([]byte(text), &inner); err != nil {
-		t.Fatalf("content[0].text is not a JSON object: %v\ntext: %s", err, text)
-	}
-	return inner
+	return extractInnerJSON(t, resp)
 }
 
 // assertRPCError asserts the response is a JSON-RPC error with wantCode and a

@@ -155,15 +155,16 @@ When unset (or any value other than `1`), the tool returns `forbidden: agent vau
 
 **Response:**
 
+The fields are returned in the standard MCP tools/call envelope, as a JSON string in `result.content[0].text`:
+
 ```json
 {
-  "vault": "wf-acme-sprint",
-  "capability_id": "A1B2C3D4",
-  "capability_secret": "cap_xK9m...",
-  "mode": "full",
-  "expires_at": "2026-07-23T12:19:21Z",
-  "auto_evap_days": 7,
-  "warning": "capability_secret is shown once; distribute it to worker agents. The vault auto-evaporates engrams after 7 days."
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"vault\":\"wf-acme-sprint\",\"capability_id\":\"A1B2C3D4\",\"capability_secret\":\"cap_xK9m...\",\"mode\":\"full\",\"expires_at\":\"2026-07-23T12:19:21Z\",\"auto_evap_days\":7,\"warning\":\"capability_secret is shown once; distribute it to worker agents. The vault auto-evaporates engrams after 7 days.\"}"
+    }
+  ]
 }
 ```
 

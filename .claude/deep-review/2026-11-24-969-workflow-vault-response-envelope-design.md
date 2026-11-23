@@ -58,3 +58,17 @@ the fix and green with it, and the full `go test -tags localassets ./...` stays 
    consumers read through MCP and already expect `content`.
 2. `mustJSON` swallows marshal failure into `{}`. The payload is static strings, a bool
    and a timestamp; marshal failure is not reachable here.
+
+## Addendum 2026-11-24 (refute fold)
+
+Adversarial refute (REFUTE, independent) reproduced the RED and found no blocking defect.
+Folded into this slice: the `docs/auth.md` response example now shows the envelope (prose
+defers to machine sources); `decodeRPCResult` delegates to the existing `extractInnerJSON`
+helper instead of duplicating it; `extractInnerJSON` pins `content[0].type == "text"` for
+every tool response. The full-gate acceptance claim is now executed, not predicted: full
+`go test -tags localassets ./...` green plus `-race` on `internal/mcp` in this checkout
+(assets fetched; the refuter's checkout lacked the dylib and ran untagged, stated as such).
+Named deferrals: the integration smoke with `MUNINN_AGENT_VAULT_CREATE=1` (turns the shared
+`mcpTool` harness into the success-envelope pin), and two pre-existing create-path races
+the refuter named but this change does not touch (non-atomic existence-check-then-register;
+a partial failure leaves a registered vault with no capability and a dead retry).
