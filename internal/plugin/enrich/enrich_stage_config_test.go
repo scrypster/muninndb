@@ -1,10 +1,15 @@
 package enrich
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/scrypster/muninndb/internal/config"
+	"github.com/scrypster/muninndb/internal/engine/circuit"
+	"github.com/scrypster/muninndb/internal/storage"
 )
 
 // TestEnrichService_EnabledStages pins the stage set the startup log reports
@@ -35,5 +40,38 @@ func TestEnrichService_EnabledStages(t *testing.T) {
 				t.Fatalf("EnabledStages() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestEnrichService_NothingToEnrichDoesNotOpenCircuit: ErrNothingToEnrich
+// means the pipeline had nothing to do, not that the provider failed, so it
+// must not count against the circuit breaker (#883). Light mode makes it
+// common: every memory that already has a summary returns it. Before the fix
+// one such memory (maxFails 1 here, 5 in production) opened the circuit and
+// the next memory, which did need a summary, got circuit.ErrOpen.
+func TestEnrichService_NothingToEnrichDoesNotOpenCircuit(t *testing.T) {
+	mock := NewMockLLMProvider()
+	pipeline := NewPipeline(mock, NewTokenBucketLimiter(100, 100))
+	pipeline.SetConfig(&config.PluginConfig{EnrichMode: "light"})
+	es := &EnrichService{provider: mock, pipeline: pipeline, breaker: circuit.New(1, time.Hour)}
+
+	summarized := &storage.Engram{ID: storage.NewULID(), Concept: "c", Content: "x", Summary: "caller summary"}
+	if _, err := es.Enrich(context.Background(), summarized); !errors.Is(err, ErrNothingToEnrich) {
+		t.Fatalf("Enrich(summarized) error = %v, want ErrNothingToEnrich", err)
+	}
+	if mock.callCount != 0 {
+		t.Fatalf("provider calls for a summarized memory in light mode = %d, want 0", mock.callCount)
+	}
+
+	needsSummary := &storage.Engram{ID: storage.NewULID(), Concept: "c", Content: "x"}
+	res, err := es.Enrich(context.Background(), needsSummary)
+	if err != nil {
+		t.Fatalf("Enrich(needs summary) error = %v, want success: nothing-to-enrich must not open the circuit", err)
+	}
+	if res.Summary == "" || mock.callCount != 1 {
+		t.Fatalf("summary = %q after %d provider calls, want a summary from exactly 1 call", res.Summary, mock.callCount)
+	}
+	if got := es.breaker.StateString(); got != "closed" {
+		t.Fatalf("breaker state = %s, want closed", got)
 	}
 }

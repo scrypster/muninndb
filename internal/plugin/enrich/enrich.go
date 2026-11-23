@@ -259,9 +259,20 @@ func (s *EnrichService) Enrich(ctx context.Context, eng *storage.Engram) (*plugi
 		var runErr error
 		result, runErr = s.pipeline.Run(ctx, eng)
 		return runErr
-	}, isCallerCancellation)
+	}, carriesNoProviderSignal)
 	s.recordProviderOutcome(err, admissionGen)
 	return result, err
+}
+
+// carriesNoProviderSignal reports whether a pipeline outcome says nothing
+// about the provider's health, so the circuit breaker must not count it:
+// the caller cancelled (#642), or the pipeline had nothing to do
+// (ErrNothingToEnrich: no stage failed and none produced output, usually
+// because every enabled stage is skipped for data the engram already has).
+// Counting the second as a failure opened the circuit after five such
+// engrams in a row, which light mode makes common (#883).
+func carriesNoProviderSignal(err error) bool {
+	return isCallerCancellation(err) || errors.Is(err, ErrNothingToEnrich)
 }
 
 // isCallerCancellation reports whether err was caused by the CALLER

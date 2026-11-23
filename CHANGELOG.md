@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warns about an `enrich_mode` other than `full` or `light`.
   `llm_verbose_logs` in `plugin_config.json` now also
   applies to enrich calls; before, only `MUNINN_LLM_VERBOSE_LOGS` did.
+- A memory the enrich pipeline has nothing left to do for, such as one that already has a
+  summary in light mode, no longer counts as an LLM provider failure. Five in a row
+  opened the circuit breaker: the provider was reported unhealthy, the next memory was
+  counted as an error, and the background pass stopped until the breaker let a probe
+  through 30 s later. The background pass marks these memories done, as before.
 
 ---
 
