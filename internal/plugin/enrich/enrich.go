@@ -170,6 +170,27 @@ func (s *EnrichService) SetEnrichConfig(cfg *config.PluginConfig) {
 	}
 }
 
+// EnabledStages returns the stages the pipeline can run under the
+// configuration given to SetEnrichConfig, in pipeline order. With no
+// configuration it is all four. Relationships are extracted from the entities
+// stage's output in the same run, so they are left out when entities are off.
+func (s *EnrichService) EnabledStages() []string {
+	s.mu.Lock()
+	cfg := s.enrichCfg
+	s.mu.Unlock()
+	stages := make([]string, 0, len(pipelineStages))
+	for _, stage := range pipelineStages {
+		if !stageEnabledFor(cfg, stage) {
+			continue
+		}
+		if stage == "relationships" && !stageEnabledFor(cfg, "entities") {
+			continue
+		}
+		stages = append(stages, stage)
+	}
+	return stages
+}
+
 // SetBreakerStateChangeHook wires a callback on the internal circuit breaker so
 // that state transitions emit structured log lines and update the plugin registry.
 // It must be called once, before concurrent use (i.e. before Start/Init).
@@ -238,9 +259,20 @@ func (s *EnrichService) Enrich(ctx context.Context, eng *storage.Engram) (*plugi
 		var runErr error
 		result, runErr = s.pipeline.Run(ctx, eng)
 		return runErr
-	}, isCallerCancellation)
+	}, carriesNoProviderSignal)
 	s.recordProviderOutcome(err, admissionGen)
 	return result, err
+}
+
+// carriesNoProviderSignal reports whether a pipeline outcome says nothing
+// about the provider's health, so the circuit breaker must not count it:
+// the caller cancelled (#642), or the pipeline had nothing to do
+// (ErrNothingToEnrich: no stage failed and none produced output, usually
+// because every enabled stage is skipped for data the engram already has).
+// Counting the second as a failure opened the circuit after five such
+// engrams in a row, which light mode makes common (#883).
+func carriesNoProviderSignal(err error) bool {
+	return isCallerCancellation(err) || errors.Is(err, ErrNothingToEnrich)
 }
 
 // isCallerCancellation reports whether err was caused by the CALLER

@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `enrich_mode` and the per-stage flags `enrich_entities`, `enrich_relationships`,
+  `enrich_classification` and `enrich_summary` in `plugin_config.json` now take effect
+  (#883). The server read them but never passed them to the enrich pipeline, so every
+  stage ran regardless of what they said. **This changes behaviour on upgrade:** a server that
+  already has any of these fields set runs only the stages they allow from the first
+  restart on. `enrich_mode: "light"` makes one LLM call per memory instead of up to four.
+  Switching a stage back on, or light mode back to full, does not backfill memories the
+  background pass finished while the stage was off: it has marked them done.
+  `muninn_replay_enrichment` fills a missing classification or summary, but not the
+  entities or relationships of a memory that already has a summary and key points (the
+  summary stage asks the model for both): the pipeline skips entity extraction for such a
+  memory, and replay selects it on every call without filling it.
+  The fields apply also when the provider URL comes from `MUNINN_ENRICH_URL`. At startup
+  the server logs the stages it runs (`enrich stages`), as a WARN when no stage can run,
+  since the background pass then marks every memory done without enriching it. It also
+  warns about an `enrich_mode` other than `full` or `light`.
+  `llm_verbose_logs` in `plugin_config.json` now also
+  applies to enrich calls; before, only `MUNINN_LLM_VERBOSE_LOGS` did.
+- A memory the enrich pipeline has nothing left to do for, such as one that already has a
+  summary in light mode, no longer counts as an LLM provider failure. Five in a row
+  opened the circuit breaker: the provider was reported unhealthy, the next memory was
+  counted as an error, and the background pass stopped until the breaker let a probe
+  through 30 s later. The background pass marks these memories done, as before.
+- `muninn_replay_enrichment` leaves out the stages the enrich configuration switches off.
+  Replay runs the server's enrich plugin, which never sets those stages' flags, so in
+  light mode a default replay selected the same memories on every call and a dry run
+  reported memories that were finished as work to do. Naming a switched-off stage in
+  `stages` is an error. `muninn_get_enrichment_candidates` is unchanged: it lists work for
+  an external agent, which can fill a stage the server does not run.
+
 ---
 
 ## [0.13.0] - 2026-11-18
