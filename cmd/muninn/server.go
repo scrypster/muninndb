@@ -708,13 +708,40 @@ func buildEnricher(ctx context.Context, cfg plugincfg.PluginConfig) (plugin.Enri
 	if apiKey == "" {
 		apiKey = cfg.EnrichAPIKey // saved config fallback
 	}
+	// enrich_mode and the enrich_* stage flags exist only in plugin_config.json,
+	// so they apply whichever source the URL came from. Set before Init so the
+	// pipeline is built with it (#883).
+	svc.SetEnrichConfig(&cfg)
 	if err := svc.Init(ctx, plugin.PluginConfig{APIKey: apiKey}); err != nil {
 		slog.Warn("enrich plugin init failed (LLM provider may be down), LLM enrichment disabled", "err", err)
 		return nil, &enrichInitFailure{name: svc.Name(), err: err}
 	}
 
 	slog.Info("enrich plugin initialized", "url", enrichURL)
+	logEnrichStages(cfg, svc.EnabledStages())
 	return svc, nil
+}
+
+// logEnrichStages states once at startup which enrich stages run, so a stage
+// switched off in plugin_config.json is visible in the log. An enrich_mode
+// value other than "full" or "light" runs full mode and gets a WARN. So does a
+// configuration under which no stage can run: the enricher still starts, and
+// the background pass marks every memory done without enriching it.
+func logEnrichStages(cfg plugincfg.PluginConfig, stages []string) {
+	if cfg.EnrichMode != "" && cfg.EnrichMode != "full" && !cfg.IsLightMode() {
+		slog.Warn(`enrich_mode in plugin_config.json is neither "full" nor "light"; running full mode`,
+			"enrich_mode", cfg.EnrichMode)
+	}
+	mode := "full"
+	if cfg.IsLightMode() {
+		mode = "light"
+	}
+	if len(stages) == 0 {
+		slog.Warn("enrich stages: no stage can run with the enrich_* flags in plugin_config.json; the background pass marks every memory done without enriching it",
+			"mode", mode, "stages", "none")
+		return
+	}
+	slog.Info("enrich stages", "mode", mode, "stages", strings.Join(stages, ","))
 }
 
 // enrichFailureName derives a stable plugin name from an enrich URL for the

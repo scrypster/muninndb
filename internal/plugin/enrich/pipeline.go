@@ -108,15 +108,24 @@ func (p *EnrichmentPipeline) recordComplete(ctx context.Context, callType string
 	}
 }
 
+// pipelineStages lists the stages in the order Run executes them.
+var pipelineStages = []string{"entities", "relationships", "classification", "summary"}
+
 // stageEnabled returns whether a named stage is enabled given config and light-mode rules.
 func (p *EnrichmentPipeline) stageEnabled(stage string) bool {
-	if p.cfg == nil {
+	return stageEnabledFor(p.cfg, stage)
+}
+
+// stageEnabledFor applies the stage rules to cfg. A nil cfg enables every
+// stage. Light mode runs the summary stage only and ignores the per-stage flags.
+func stageEnabledFor(cfg *config.PluginConfig, stage string) bool {
+	if cfg == nil {
 		return true
 	}
-	if p.cfg.IsLightMode() {
+	if cfg.IsLightMode() {
 		return stage == "summary"
 	}
-	return p.cfg.EnrichStageEnabled(stage)
+	return cfg.EnrichStageEnabled(stage)
 }
 
 // Run executes the enrichment pipeline for one engram.

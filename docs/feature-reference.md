@@ -447,7 +447,9 @@ When the enrich plugin is active, a modular 4-stage pipeline runs asynchronously
 | **full** (default) | All 4 stages | Summary, entities, relationships, classification |
 | **light** | 1 stage only | Summary + key points (minimal cost) |
 
-Each stage can be individually enabled/disabled via server config. Stages are also skipped when the caller already provided that data (inline enrichment integration).
+Each stage can be individually enabled/disabled via server config. `enrich_mode: "light"` overrides the per-stage flags and runs the summary stage only, even with `enrich_summary: false`; relationships are extracted from the entities stage's output, so `enrich_entities: false` switches them off too. Stages are also skipped when the caller already provided that data (inline enrichment integration).
+
+The stage flags and `enrich_mode` are read from `plugin_config.json` only, so they also apply when the provider URL comes from `MUNINN_ENRICH_URL`; the server logs the stages it runs at startup.
 
 ---
 

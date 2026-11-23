@@ -170,6 +170,27 @@ func (s *EnrichService) SetEnrichConfig(cfg *config.PluginConfig) {
 	}
 }
 
+// EnabledStages returns the stages the pipeline can run under the
+// configuration given to SetEnrichConfig, in pipeline order. With no
+// configuration it is all four. Relationships are extracted from the entities
+// stage's output in the same run, so they are left out when entities are off.
+func (s *EnrichService) EnabledStages() []string {
+	s.mu.Lock()
+	cfg := s.enrichCfg
+	s.mu.Unlock()
+	stages := make([]string, 0, len(pipelineStages))
+	for _, stage := range pipelineStages {
+		if !stageEnabledFor(cfg, stage) {
+			continue
+		}
+		if stage == "relationships" && !stageEnabledFor(cfg, "entities") {
+			continue
+		}
+		stages = append(stages, stage)
+	}
+	return stages
+}
+
 // SetBreakerStateChangeHook wires a callback on the internal circuit breaker so
 // that state transitions emit structured log lines and update the plugin registry.
 // It must be called once, before concurrent use (i.e. before Start/Init).
