@@ -320,7 +320,7 @@ curl http://127.0.0.1:8750/mcp/health
 | `MUNINN_LOCAL_EMBED` | on | Set to `"0"` to disable the bundled ONNX embedder |
 | `MUNINN_OPENAI_KEY` | `""` | OpenAI API key for embeddings |
 | `MUNINN_OPENAI_URL` | `""` | Optional OpenAI base URL or provider URL override (invalid values skip OpenAI init) |
-| `MUNINN_OLLAMA_URL` | `""` | Ollama URL for embeddings, e.g. `ollama://localhost:11434/nomic-embed-text`. Optional `?batch_size=N`: texts per embed request, 1 to 1024, default 8 |
+| `MUNINN_OLLAMA_URL` | `""` | Ollama URL for embeddings, e.g. `ollama://localhost:11434/nomic-embed-text`. Optional `?batch_size=N`: texts per embed request, 1 to 1024, default 8. A URL the server cannot parse, or one that is not `ollama://`, stops startup |
 | `MUNINN_VOYAGE_KEY` | `""` | Voyage AI key for embeddings |
 | `MUNINN_ENRICH_URL` | `""` | LLM enrichment URL (optional) |
 | `MUNINN_ANTHROPIC_KEY` | `""` | Anthropic API key for enrichment |

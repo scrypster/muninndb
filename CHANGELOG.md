@@ -14,8 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Ollama embed provider sends at most 8 texts per request, down from 64. A host with
   a GPU or more parallel Ollama slots can raise it with `batch_size` (1 to 1024) on the
   `ollama://` URL, for example `ollama://localhost:11434/bge-m3?batch_size=32`. An invalid
-  value makes the URL invalid: the server logs `embedder service creation failed` and
-  falls back as it does for any Ollama URL it cannot use.
+  value makes the URL invalid (see the next entry).
+- A `MUNINN_OLLAMA_URL` the server cannot parse, or one that is not an `ollama://` URL, now
+  stops startup with an error naming the variable. Before, the server logged `embedder
+  service creation failed` and silently fell back to the next embed provider configured, or
+  to the bundled local model. This covers an invalid `batch_size`, a missing port or model,
+  and an `http://` URL in place of `ollama://` (the example in `docs/plugins.md` showed
+  one). Another provider's URL, such as `local://` or `openai://`, used to start the bundled
+  model or fall back the same way. A host that has been running on that fallback changes
+  its embed model once the URL is fixed, so re-embed its vaults (`muninn vault reembed`),
+  or unset the variable to keep the embedder it has. An Ollama that cannot be reached at
+  startup is handled as before. So is an invalid `embed_url` in `plugin_config.json`: the
+  server does not use Ollama and substitutes no other model.
 - On an Ollama without `/api/embed`, each `/api/embeddings` request now times out after
   40 s (30 s plus 10 s per text, the same rule as the batch endpoint). It had no timeout
   of its own.
