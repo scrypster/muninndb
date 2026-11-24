@@ -1001,6 +1001,22 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 			slog.Warn("handleStatus: label stats failed", "err", err)
 		}
 	}
+	// Workflow-vault expiry notice (#973). Only a wf-* vault with a non-nil
+	// expiry inside its final 24 hours — or past expiry, not yet reclaimed —
+	// gets expires_at + a notice. The auth.IsWorkflowVaultName prefix guard
+	// plus the nil check mean an operator vault never sees either field, so
+	// the notice can never fire on someone's long-lived data vault.
+	if s.authStore != nil && auth.IsWorkflowVaultName(vault) {
+		if cfg, err := s.authStore.GetVaultConfig(vault); err == nil && cfg.ExpiresAt != nil {
+			const noticeWindow = 24 * time.Hour
+			if time.Until(*cfg.ExpiresAt) <= noticeWindow {
+				status.ExpiresAt = cfg.ExpiresAt.Format(time.RFC3339)
+				status.ExpiryNotice = fmt.Sprintf(
+					"this workflow vault expires at %s; create a fresh vault with muninn_create_workflow_vault and move the work across",
+					status.ExpiresAt)
+			}
+		}
+	}
 	sendResult(w, id, textContent(mustJSON(status)))
 }
 
@@ -3413,15 +3429,10 @@ func (s *MCPServer) handleRelease(ctx context.Context, w http.ResponseWriter, id
 // This is the structural anti-clobber guard (RedTeam finding CRITICAL #1):
 // it makes muninn_create_workflow_vault incapable of targeting an operator
 // vault such as "default" or "production", because those names lack the prefix.
+// Delegates to auth.IsWorkflowVaultName so the creation path, the status
+// notice, and the engine's reclamation sweep all share one predicate (#973).
 func isWorkflowVaultName(name string) bool {
-	const prefix = "wf-"
-	if !strings.HasPrefix(name, prefix) {
-		return false
-	}
-	if len(name) <= len(prefix) {
-		return false // "wf-" alone has no body
-	}
-	return auth.IsValidVaultName(name)
+	return auth.IsWorkflowVaultName(name)
 }
 
 // handleCreateWorkflowVault implements muninn_create_workflow_vault (RFC #597).
@@ -3501,9 +3512,16 @@ func (s *MCPServer) handleCreateWorkflowVault(ctx context.Context, w http.Respon
 
 	// 2. Configure the vault: working preset (default cognition + 7-day
 	// auto-evaporation) + multi_user (guidance steers toward per-user recall).
+	// The SAME expiresAt instant goes on the config and (step 3) on the
+	// capability (#973): the reclamation sweep and the status notice read the
+	// config's expiry, so a config stamped earlier or later than the credential
+	// would reclaim a vault under a live cap or advertise a deadline nothing
+	// honors. One variable, two uses — they cannot diverge.
+	expiresAt := time.Now().Add(time.Duration(ttlHours) * time.Hour)
 	mu := true
 	if err := s.authStore.SetVaultConfig(auth.VaultConfig{
 		Name:       name,
+		ExpiresAt:  &expiresAt,
 		Plasticity: &auth.PlasticityConfig{Preset: "working", MultiUser: &mu},
 	}); err != nil {
 		sendError(w, id, -32603, "set vault config: "+err.Error())
@@ -3511,7 +3529,6 @@ func (s *MCPServer) handleCreateWorkflowVault(ctx context.Context, w http.Respon
 	}
 
 	// 3. Mint a full-mode capability with the TTL. The token is shown once.
-	expiresAt := time.Now().Add(time.Duration(ttlHours) * time.Hour)
 	token, cap, err := s.authStore.GenerateCapability(name, label, auth.ModeFull, "workflow_vault", &expiresAt)
 	if err != nil {
 		sendError(w, id, -32603, "mint capability: "+err.Error())

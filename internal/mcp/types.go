@@ -384,6 +384,14 @@ type VaultStatus struct {
 	// never ids. muninn_feedback's response is uniform, so this is where an
 	// operator sees whether labels are landing.
 	Labels *LabelsStatus `json:"labels,omitempty"`
+
+	// Workflow-vault expiry notice (#973), muninn_status only. Populated for a
+	// wf-* vault whose config carries an ExpiresAt inside the final 24 hours,
+	// or already past it and not yet reclaimed. Both fields stay empty for
+	// every other vault: the guard is the wf- prefix plus a non-nil expiry, so
+	// an operator vault can never see a notice, with or without an expiry set.
+	ExpiresAt    string `json:"expires_at,omitempty"` // RFC3339
+	ExpiryNotice string `json:"expiry_notice,omitempty"`
 }
 
 // LabelsStatus is muninn_status's `labels` block.

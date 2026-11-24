@@ -375,6 +375,51 @@ func TestSSEMessage_CapRevokedMidSession_RejectedOnPost(t *testing.T) {
 	}
 }
 
+// TestCreateWorkflowVault_StampSameExpiryOnConfigAndCap pins #973's
+// invariant: the vault config and the minted capability carry the SAME
+// ExpiresAt instant, so the reclamation sweep (which reads the config) and
+// the status notice can never disagree with the credential's deadline — a
+// config stamped later would reclaim a vault under a still-live cap, earlier
+// would advertise a deadline no credential honors. Zero tolerance: the
+// handler must stamp one shared instant, not two nearby ones.
+func TestCreateWorkflowVault_StampSameExpiryOnConfigAndCap(t *testing.T) {
+	store := newWorkflowTestStore(t)
+	mkToken, _, err := store.GenerateAPIKey("admin", "admin", auth.ModeFull, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", &fakeEngine{}, "", store, store, nil)
+	srv.agentVaultCreate = true
+	t.Setenv("MUNINN_WORKFLOW_CAP_TTL_HOURS", "")
+
+	body := mkToolCallBody("muninn_create_workflow_vault", map[string]any{
+		"name":      "wf-stamp",
+		"ttl_hours": float64(6),
+	})
+	w := doAuthenticatedPost(srv, mkToken, body)
+	result := decodeRPCResult(t, w)
+
+	capSecret, _ := result["capability_secret"].(string)
+	cap, err := store.ValidateCapability(capSecret)
+	if err != nil {
+		t.Fatalf("validate minted cap: %v", err)
+	}
+	if cap.ExpiresAt == nil {
+		t.Fatal("minted capability has nil ExpiresAt — TTL not applied")
+	}
+
+	cfg, err := store.GetVaultConfig("wf-stamp")
+	if err != nil {
+		t.Fatalf("get vault config: %v", err)
+	}
+	if cfg.ExpiresAt == nil {
+		t.Fatalf("vault config ExpiresAt = nil, want the instant stamped on the capability (%v) — config and capability expiry must never diverge", cap.ExpiresAt)
+	}
+	if !cfg.ExpiresAt.Equal(*cap.ExpiresAt) {
+		t.Errorf("vault config expiry %v != capability expiry %v — the two must carry the SAME instant", *cfg.ExpiresAt, *cap.ExpiresAt)
+	}
+}
+
 // TestCreateWorkflowVault_RejectsExistingVault closes the coverage gap on the
 // "vault already exists" rejection branch (issue #614). fakeEngine.VaultNameExists
 // is toggled true for "wf-taken", so the handler must reject with -32602 and

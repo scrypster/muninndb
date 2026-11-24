@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/cockroachdb/pebble"
@@ -200,4 +201,44 @@ func (ps *PebbleStore) ListVaultNames() ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// VaultHasEngrams reports whether the vault holds at least one engram record,
+// via a key-only scan of the vault's 0x01 range that stops at the first key. It exists for
+// the workflow-vault reclamation sweep (#973), whose delete decision must not
+// rest on the vault counter (STO-30: the in-memory count is a cache of the
+// records, and a stale read can be one low — a false empty deletes real data)
+// or on any time-bounded id range (a caller-backdated created_at row can sit
+// outside it). No values, no timestamps: one range probe, the same
+// next-prefix bounds the clone path uses (incrementWS), so a returned key is
+// inside 0x01|ws by construction and needs no second prefix test. The caller's
+// only use of "absent" is "safe to delete", so every failure mode fails that
+// way: an unusable bound and a failed scan both return an error, never nil.
+func (ps *PebbleStore) VaultHasEngrams(ctx context.Context, wsPrefix [8]byte) (bool, error) {
+	wsNext, err := incrementWS(wsPrefix)
+	if err != nil {
+		return false, fmt.Errorf("vault has engrams: %w", err)
+	}
+	lo := make([]byte, 9)
+	lo[0] = prefix.Engram
+	copy(lo[1:], wsPrefix[:])
+	hi := make([]byte, 9)
+	hi[0] = prefix.Engram
+	copy(hi[1:], wsNext[:])
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+	if err != nil {
+		return false, fmt.Errorf("vault has engrams: new iter: %w", err)
+	}
+	defer iter.Close()
+	if !iter.First() {
+		if err := iter.Error(); err != nil {
+			return false, fmt.Errorf("vault has engrams: scan: %w", err)
+		}
+		return false, nil
+	}
+	// The first key in the range is enough: the caller only asks whether the
+	// vault is empty. A key that somehow falls outside 0x01|ws still reads as
+	// PRESENT — every failure mode has to land on "do not delete".
+	return true, nil
 }

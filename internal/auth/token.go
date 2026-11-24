@@ -44,3 +44,21 @@ func IsValidVaultName(name string) bool {
 	}
 	return true
 }
+
+// IsWorkflowVaultName reports whether name is a workflow-vault identifier: the
+// "wf-" namespace prefix, a non-empty body after it, and a name that satisfies
+// IsValidVaultName. This is the structural guard the workflow-vault lifecycle
+// hangs on (#973) — creation, expiry stamping, the status expiry notice, and
+// the engine's reclamation sweep all ask this one predicate — so an operator
+// vault ("default", "production", ...) is structurally incapable of matching
+// it, not merely discouraged from it.
+func IsWorkflowVaultName(name string) bool {
+	const prefix = "wf-"
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	if len(name) <= len(prefix) {
+		return false // "wf-" alone has no body
+	}
+	return IsValidVaultName(name)
+}
