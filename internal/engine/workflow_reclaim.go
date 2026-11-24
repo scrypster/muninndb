@@ -25,8 +25,12 @@ import (
 //   - the vault config carries a non-nil ExpiresAt. An ABSENT expiry is never
 //     a delete reason (fail-safe, not fail-open).
 //   - the expiry has passed (now is not before it).
-//   - the vault holds zero engrams (GetVaultCount). Expiry alone never
-//     outranks content — a vault past expiry with data in it survives whole.
+//   - the vault holds zero engrams (VaultHasEngrams: a key-only scan of the
+//     0x01 range, limit 1 — NOT GetVaultCount, whose cached count can read
+//     stale, and not any time-bounded id range, which a caller-backdated
+//     created_at can escape; either false-empty would delete real data).
+//     Expiry alone never outranks content — a vault past expiry with data in
+//     it survives whole.
 //   - no active clone/merge job targets the vault.
 //
 // Ordering inside a reclaim: capabilities first, vault delete last. Each
@@ -35,6 +39,12 @@ import (
 // data is lost; the delete is last and idempotent, so a partial failure
 // (some caps revoked, delete not reached) retries cleanly on the next tick.
 // A capability that vanished mid-sweep is already-done, not a failure.
+//
+// Cluster residual, pre-existing and shared with the admin REST delete: auth
+// writes (config, capability records) ride the replication log (auth
+// SetReplicator), but the 0x0E/0x0F vault-name keys and ClearVault's range
+// tombstones do not — a follower learns the config and caps are gone, not
+// that the name was. Closing that is not this change's job.
 func (e *Engine) reclaimExpiredWorkflowVaults(ctx context.Context, vaults []string) {
 	// Single-writer gate (#596), same as decayAllVaults: on a Lobe this sweep
 	// must not attempt the writes at all — the leader's reclamation reaches
@@ -62,7 +72,7 @@ func (e *Engine) reclaimExpiredWorkflowVaults(ctx context.Context, vaults []stri
 		if time.Now().Before(*cfg.ExpiresAt) {
 			continue
 		}
-		if n := e.store.GetVaultCount(ctx, e.store.ResolveVaultPrefix(name)); n != 0 {
+		if e.store.VaultHasEngrams(ctx, e.store.ResolveVaultPrefix(name)) {
 			continue // data present: expiry does not outrank content
 		}
 		if e.jobManager != nil && e.jobManager.HasActiveJobTargeting(name) {

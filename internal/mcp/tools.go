@@ -1163,7 +1163,7 @@ func allToolDefinitions() []ToolDefinition {
 		// RFC #597: privileged workflow-vault creation (recursion-guarded in dispatchToolCall).
 		{
 			Name:        "muninn_create_workflow_vault",
-			Description: "Create a shared working vault for an agentic workflow and mint a scoped, TTL'd capability token a worker agent can use to access it. The vault uses the `working` preset (default cognition + 7-day auto-evaporation) with multi_user enabled. Requires a full-mode mk_ key and the MUNINN_AGENT_VAULT_CREATE opt-in. The returned capability_secret is shown once — distribute it to worker agents out-of-band. Recursion-safe: a capability cannot call this tool.",
+			Description: "Create a shared working vault for an agentic workflow and mint a scoped, TTL'd capability token a worker agent can use to access it. The vault uses the `working` preset (default cognition + 7-day auto-evaporation) with multi_user enabled. The SAME expiry instant is stamped on the vault config and the capability; once that expiry has passed and the vault holds zero engrams, the engine reclaims the vault (name, config, capabilities — muninn_status reports the expiry inside the final 24 hours). Requires a full-mode mk_ key and the MUNINN_AGENT_VAULT_CREATE opt-in. The returned capability_secret is shown once — distribute it to worker agents out-of-band. Recursion-safe: a capability cannot call this tool.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

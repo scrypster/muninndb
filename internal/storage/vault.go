@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/cockroachdb/pebble"
@@ -200,4 +201,35 @@ func (ps *PebbleStore) ListVaultNames() ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// VaultHasEngrams reports whether the vault holds at least one engram record,
+// via a key-only scan of the vault's 0x01 range with limit 1. It exists for
+// the workflow-vault reclamation sweep (#973), whose delete decision must not
+// rest on the vault counter (eventually consistent — a stale read reports
+// empty on a vault that holds data) or on any time-bounded id range (a
+// caller-backdated created_at row can sit outside it). No timestamps, no
+// cache: one range probe, the same bounds the clone path uses.
+func (ps *PebbleStore) VaultHasEngrams(ctx context.Context, wsPrefix [8]byte) bool {
+	lo := make([]byte, 9)
+	lo[0] = prefix.Engram
+	copy(lo[1:], wsPrefix[:])
+	hi := make([]byte, 9)
+	hi[0] = prefix.Engram
+	copy(hi[1:], wsPrefix[:])
+	for i := len(hi) - 1; i >= 1; i-- {
+		hi[i]++
+		if hi[i] != 0 {
+			break
+		}
+	}
+
+	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+	if err != nil {
+		// A probe that cannot run must read as "not empty": the caller's only
+		// use of false is "safe to delete".
+		return true
+	}
+	defer iter.Close()
+	return iter.First()
 }

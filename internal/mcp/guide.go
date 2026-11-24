@@ -109,7 +109,7 @@ func generateGuide(vaultName string, resolved auth.ResolvedPlasticity, stats eng
 	b.WriteString("- **muninn_remember_tree** — Store a nested engram tree in one call\n")
 	b.WriteString("- **muninn_recall_tree** — Retrieve the complete ordered tree from a root ID\n")
 	b.WriteString("- **muninn_add_child** — Append or insert a child node under a parent\n")
-	b.WriteString("- **muninn_create_workflow_vault** — Create a shared working vault + mint a TTL'd cap_ capability (requires operator opt-in `MUNINN_AGENT_VAULT_CREATE` and a full-mode mk_ key; off by default)\n")
+	b.WriteString("- **muninn_create_workflow_vault** — Create a shared working vault + mint a TTL'd cap_ capability (requires operator opt-in `MUNINN_AGENT_VAULT_CREATE` and a full-mode mk_ key; off by default). The vault config carries the same expiry as the cap_; once expired and empty the engine reclaims the vault — muninn_status warns in the final 24 hours\n")
 
 	// Vault Configuration Summary
 	b.WriteString("\n## Vault Configuration\n\n")

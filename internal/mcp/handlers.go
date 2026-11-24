@@ -1011,7 +1011,7 @@ func (s *MCPServer) handleStatus(ctx context.Context, w http.ResponseWriter, id 
 			const noticeWindow = 24 * time.Hour
 			if time.Until(*cfg.ExpiresAt) <= noticeWindow {
 				status.ExpiresAt = cfg.ExpiresAt.Format(time.RFC3339)
-				status.Notice = fmt.Sprintf(
+				status.ExpiryNotice = fmt.Sprintf(
 					"this workflow vault expires at %s; create a fresh vault with muninn_create_workflow_vault and move the work across",
 					status.ExpiresAt)
 			}

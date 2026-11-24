@@ -390,8 +390,8 @@ type VaultStatus struct {
 	// or already past it and not yet reclaimed. Both fields stay empty for
 	// every other vault: the guard is the wf- prefix plus a non-nil expiry, so
 	// an operator vault can never see a notice, with or without an expiry set.
-	ExpiresAt string `json:"expires_at,omitempty"` // RFC3339
-	Notice    string `json:"notice,omitempty"`
+	ExpiresAt    string `json:"expires_at,omitempty"` // RFC3339
+	ExpiryNotice string `json:"expiry_notice,omitempty"`
 }
 
 // LabelsStatus is muninn_status's `labels` block.

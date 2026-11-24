@@ -71,7 +71,7 @@ func TestStatus_WorkflowVaultExpiryNotice(t *testing.T) {
 			})
 
 			_, hasExpiry := status["expires_at"]
-			notice, _ := status["notice"].(string)
+			notice, _ := status["expiry_notice"].(string)
 			if tc.wantNotice {
 				if !hasExpiry {
 					t.Errorf("muninn_status for %q carries no expires_at, want one inside the notice window", tc.vault)

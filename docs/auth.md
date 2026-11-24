@@ -169,6 +169,18 @@ When unset (or any value other than `1`), the tool returns `forbidden: agent vau
 
 The vault is created with the `working` preset (default cognition + 7-day auto-evaporation) and `multi_user` enabled, so the agent guide steers worker agents toward per-user-scoped recall. `capability_secret` is returned **once** — distribute it to worker agents out-of-band.
 
+### Vault expiry and reclamation
+
+The same `expires_at` instant the tool stamps on the capability is also stamped on the vault's config, so the two can never diverge. Once that instant has passed **and the vault holds zero engrams**, the engine's periodic prune sweep reclaims the vault: the name registration, the config, and every capability for it are deleted, so an abandoned workflow vault does not live in `ListVaults` forever. Reclamation is fail-safe on every axis:
+
+- **wf- only.** The `wf-` prefix is the structural guard — an operator vault is incapable of matching, whether or not someone set an `expires_at` on its config.
+- **Absent expiry never deletes.** A config without `expires_at` (every operator-created vault) is never a reclamation candidate.
+- **Empty only.** Emptiness is probed by a direct key scan of the vault's engram range, not the (eventually consistent) vault counter — and a vault past expiry that still holds data survives whole; expiry never outranks content.
+- **Leader-gated.** On a cluster, only the leader reclaims; a follower attempts nothing.
+- **Capabilities before vault.** Caps are revoked first and the vault delete is last and idempotent, so a partial failure retries cleanly on the next sweep.
+
+`muninn_status` is the only notice surface: for a `wf-` vault whose expiry sits inside the final 24 hours — or has already passed while the vault awaits reclamation — the response carries `expires_at` and an `expiry_notice` advising a fresh `muninn_create_workflow_vault` call. Vaults without an expiry never see either field.
+
 ### TTL configuration
 
 - **Per-call:** the `ttl_hours` arg (default `168`).
