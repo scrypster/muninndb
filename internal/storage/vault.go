@@ -210,10 +210,10 @@ func (ps *PebbleStore) ListVaultNames() ([]string, error) {
 // records, and a stale read can be one low — a false empty deletes real data)
 // or on any time-bounded id range (a caller-backdated created_at row can sit
 // outside it). No values, no timestamps: one range probe, the same
-// next-prefix bounds the clone path uses (incrementWS). The found key is
-// re-checked against the 0x01|ws prefix rather than trusted from the iterator
-// bounds alone, and a mismatch still reads as PRESENT — the caller's only use
-// of "absent" is "safe to delete", so every failure mode fails that way.
+// next-prefix bounds the clone path uses (incrementWS), so a returned key is
+// inside 0x01|ws by construction and needs no second prefix test. The caller's
+// only use of "absent" is "safe to delete", so every failure mode fails that
+// way: an unusable bound and a failed scan both return an error, never nil.
 func (ps *PebbleStore) VaultHasEngrams(ctx context.Context, wsPrefix [8]byte) (bool, error) {
 	wsNext, err := incrementWS(wsPrefix)
 	if err != nil {

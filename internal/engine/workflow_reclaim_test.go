@@ -275,3 +275,64 @@ func TestReclaimExpiredWorkflowVaults_OnlyTargetVaultTouched(t *testing.T) {
 		}
 	}
 }
+
+// TestReclaimExpiredWorkflowVaults_JobActiveSkipsReclaim pins the skip-and-retry
+// ordering (#973): an active clone/merge job targeting the vault must stop the
+// reclaim BEFORE any capability is revoked, so a job that is still writing does
+// not lose its credentials mid-flight; the next tick retries once it ends.
+func TestReclaimExpiredWorkflowVaults_JobActiveSkipsReclaim(t *testing.T) {
+	eng, as, store, cleanup := testEnvWithAuth(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	past := time.Now().Add(-2 * time.Hour)
+	capToken := reclaimVault(t, eng, as, store, "wf-busy", &past, false)
+
+	job, err := eng.jobManager.Create("clone", "some-source", "wf-busy")
+	if err != nil {
+		t.Fatalf("jobManager.Create: %v", err)
+	}
+
+	eng.reclaimExpiredWorkflowVaults(ctx, []string{"wf-busy"})
+
+	if !vaultRegistered(t, store, "wf-busy") {
+		t.Fatal("vault reclaimed while a clone job targeted it")
+	}
+	if got := capabilityCount(t, as, "wf-busy"); got != 1 {
+		t.Errorf("skipped reclaim left %d capabilities, want the live one untouched — revocation precedes the job check", got)
+	}
+	if _, err := as.ValidateCapability(capToken); err != nil {
+		t.Errorf("live capability died with a skipped reclaim: %v", err)
+	}
+
+	eng.jobManager.Complete(job)
+	eng.reclaimExpiredWorkflowVaults(ctx, []string{"wf-busy"})
+
+	if vaultRegistered(t, store, "wf-busy") {
+		t.Error("vault not reclaimed after the job finished — the skip never retried")
+	}
+}
+
+// TestReclaimExpiredWorkflowVaults_FollowerGateSkipsReclaim mirrors
+// TestDecayAllVaults_FollowerSkipsDecay: on a Lobe the sweep attempts nothing —
+// no capability is revoked, no vault is deleted. The leader owns the writes.
+func TestReclaimExpiredWorkflowVaults_FollowerGateSkipsReclaim(t *testing.T) {
+	eng, as, store, cleanup := testEnvWithAuth(t)
+	defer cleanup()
+
+	past := time.Now().Add(-2 * time.Hour)
+	capToken := reclaimVault(t, eng, as, store, "wf-lobe", &past, false)
+
+	eng.SetWriteGate(followerGate) // this node is a Lobe, not the Cortex
+	eng.reclaimExpiredWorkflowVaults(context.Background(), []string{"wf-lobe"})
+
+	if !vaultRegistered(t, store, "wf-lobe") {
+		t.Error("follower reclaimed a vault — a role-blind sweep writes on a node that does not own writes")
+	}
+	if got := capabilityCount(t, as, "wf-lobe"); got != 1 {
+		t.Errorf("follower revoked capabilities (%d left, want 1)", got)
+	}
+	if _, err := as.ValidateCapability(capToken); err != nil {
+		t.Errorf("follower revoked the live capability: %v", err)
+	}
+}

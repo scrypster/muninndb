@@ -173,7 +173,7 @@ The vault is created with the `working` preset (default cognition + 7-day auto-e
 
 The same `expires_at` instant the tool stamps on the capability is also stamped on the vault's config, so the two can never diverge. Once that instant has passed **and the vault holds zero engrams**, the engine's periodic prune sweep reclaims the vault: the name registration, the config, and every capability for it are deleted, so an abandoned workflow vault does not live in `ListVaults` forever. Reclamation is fail-safe on every axis:
 
-- **wf- only.** The `wf-` prefix is the structural guard — an operator vault is incapable of matching, whether or not someone set an `expires_at` on its config.
+- **wf- only.** The `wf-` prefix is the structural guard. `muninn_create_workflow_vault` cannot target an operator vault, because an operator vault's name lacks the prefix. Separately, **only the create path can stamp `expires_at`**: `PUT /api/admin/vaults/config` carries the stored value forward and ignores the field in the request body, so an admin edit cannot mint an expiry, and a vault renamed into the `wf-` namespace still has none and is never a candidate.
 - **Absent expiry never deletes.** A config without `expires_at` (every operator-created vault) is never a reclamation candidate.
 - **Empty only.** Emptiness is probed by a direct key scan of the vault's engram range, not the (eventually consistent) vault counter — and a vault past expiry that still holds data survives whole; expiry never outranks content.
 - **Leader-gated.** On a cluster, only the leader reclaims; a follower attempts nothing.

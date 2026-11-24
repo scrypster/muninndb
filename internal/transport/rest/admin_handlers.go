@@ -343,6 +343,20 @@ func (s *Server) handleSetVaultConfig(authStore *auth.Store) http.HandlerFunc {
 			}
 		}
 
+		// ExpiresAt belongs to muninn_create_workflow_vault, which stamps the
+		// vault's expiry and its capability with one instant (#973). An admin
+		// edit must not mint or clear it: accepting the field here would let a
+		// hand-written body put ANY vault into the reclamation sweep's path,
+		// including one renamed into the wf- namespace, and the sweep deletes
+		// the vault's name, config and capabilities. Carry the stored value
+		// forward instead, exactly as the plasticity PUT carries the rest of
+		// the config forward.
+		if existing, gErr := authStore.GetVaultConfig(cfg.Name); gErr == nil {
+			cfg.ExpiresAt = existing.ExpiresAt
+		} else {
+			cfg.ExpiresAt = nil
+		}
+
 		if err := authStore.SetVaultConfig(cfg); err != nil {
 			s.sendError(r, w, http.StatusInternalServerError, ErrStorageError, err.Error())
 			return
