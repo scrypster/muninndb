@@ -217,11 +217,20 @@ func (ps *PebbleStore) VaultHasEngrams(ctx context.Context, wsPrefix [8]byte) bo
 	hi := make([]byte, 9)
 	hi[0] = prefix.Engram
 	copy(hi[1:], wsPrefix[:])
+	wrapped := true
 	for i := len(hi) - 1; i >= 1; i-- {
 		hi[i]++
 		if hi[i] != 0 {
+			wrapped = false
 			break
 		}
+	}
+	if wrapped {
+		// A workspace of all 0xFF bytes carries past its last byte. Keeping
+		// the wrapped bound would put hi BELOW lo, the iterator would find
+		// nothing, and this probe would answer "empty" on a full vault — a
+		// delete decision reading fail-open. Move to the next prefix instead.
+		hi = []byte{prefix.Engram + 1}
 	}
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
@@ -231,5 +240,11 @@ func (ps *PebbleStore) VaultHasEngrams(ctx context.Context, wsPrefix [8]byte) bo
 		return true
 	}
 	defer iter.Close()
-	return iter.First()
+	found := iter.First()
+	if err := iter.Error(); err != nil {
+		// Same rule for a scan that fails part-way: an unreadable range is
+		// never evidence that the range is empty.
+		return true
+	}
+	return found
 }

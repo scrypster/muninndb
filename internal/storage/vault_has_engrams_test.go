@@ -54,6 +54,17 @@ func TestVaultHasEngrams(t *testing.T) {
 	if store.VaultHasEngrams(ctx, wsPlain) {
 		t.Error("vault reports engrams after its only row was deleted")
 	}
+
+	// A workspace of all 0xFF bytes carries the upper bound past its last
+	// byte. The row must still be found: a wrapped bound puts hi below lo,
+	// the scan finds nothing, and the probe reads fail-open on a full vault.
+	wsMax := [8]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+	if _, err := store.WriteEngram(ctx, wsMax, &Engram{Concept: "c", Content: "max workspace"}); err != nil {
+		t.Fatalf("WriteEngram max workspace: %v", err)
+	}
+	if !store.VaultHasEngrams(ctx, wsMax) {
+		t.Error("vault in an all-0xFF workspace reports empty — the wrapped upper bound reads fail-open")
+	}
 }
 
 // keys_VaultPrefixForTest registers the vault name and resolves its ws prefix.
