@@ -5981,6 +5981,9 @@ func (e *Engine) runPruneWorker() {
 				}
 			}
 			e.decayAllVaults(e.stopCtx, vaults)
+			// After prune + decay: a wf-* vault whose engrams this very tick
+			// evaporated can be reclaimed in the same pass (#973).
+			e.reclaimExpiredWorkflowVaults(e.stopCtx, vaults)
 			jitter = time.Duration(rand.Intn(10)) * time.Second
 			timer.Reset(60*time.Second + jitter)
 		case <-e.stopCtx.Done():
