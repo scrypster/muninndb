@@ -1732,6 +1732,15 @@ components:
           type: string
         public:
           type: boolean
+        expires_at:
+          type: string
+          nullable: true
+          description: >-
+            Workflow-vault expiry instant (RFC3339), stamped by
+            muninn_create_workflow_vault on wf-* vaults only. The engine
+            reclaims an expired wf-* vault once it holds zero engrams, and
+            muninn_status reports it inside the final 24 hours. Absent (null)
+            means no expiry and is never a delete reason.
         plasticity:
           $ref: "#/components/schemas/PlasticityConfig"
 
