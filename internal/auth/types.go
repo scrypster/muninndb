@@ -22,6 +22,12 @@ type VaultConfig struct {
 	Name       string            `json:"name"`
 	Public     bool              `json:"public"`
 	Plasticity *PlasticityConfig `json:"plasticity,omitempty"` // per-vault cognitive pipeline config
+	// ExpiresAt is the workflow-vault expiry instant (#973). muninn_create_workflow_vault
+	// stamps the SAME instant here and on the minted capability. The engine's reclamation
+	// sweep and muninn_status's expiry notice read it — for wf-* vaults only. nil (the
+	// default for every operator-created vault) is NEVER a delete reason: absent expiry
+	// means no expiry, fail-safe not fail-open.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 // API key mode constants.
