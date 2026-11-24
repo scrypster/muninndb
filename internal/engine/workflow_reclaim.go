@@ -72,7 +72,14 @@ func (e *Engine) reclaimExpiredWorkflowVaults(ctx context.Context, vaults []stri
 		if time.Now().Before(*cfg.ExpiresAt) {
 			continue
 		}
-		if e.store.VaultHasEngrams(ctx, e.store.ResolveVaultPrefix(name)) {
+		has, err := e.store.VaultHasEngrams(ctx, e.store.ResolveVaultPrefix(name))
+		if err != nil {
+			// A probe that cannot run must not delete: skip this vault this
+			// tick and let the failure say itself (one WARN per attempt).
+			slog.Warn("workflow vault reclaim: emptiness probe failed", "vault", name, "err", err)
+			continue
+		}
+		if has {
 			continue // data present: expiry does not outrank content
 		}
 		if e.jobManager != nil && e.jobManager.HasActiveJobTargeting(name) {

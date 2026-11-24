@@ -204,47 +204,41 @@ func (ps *PebbleStore) ListVaultNames() ([]string, error) {
 }
 
 // VaultHasEngrams reports whether the vault holds at least one engram record,
-// via a key-only scan of the vault's 0x01 range with limit 1. It exists for
+// via a key-only scan of the vault's 0x01 range that stops at the first key. It exists for
 // the workflow-vault reclamation sweep (#973), whose delete decision must not
-// rest on the vault counter (eventually consistent — a stale read reports
-// empty on a vault that holds data) or on any time-bounded id range (a
-// caller-backdated created_at row can sit outside it). No timestamps, no
-// cache: one range probe, the same bounds the clone path uses.
-func (ps *PebbleStore) VaultHasEngrams(ctx context.Context, wsPrefix [8]byte) bool {
+// rest on the vault counter (STO-30: the in-memory count is a cache of the
+// records, and a stale read can be one low — a false empty deletes real data)
+// or on any time-bounded id range (a caller-backdated created_at row can sit
+// outside it). No values, no timestamps: one range probe, the same
+// next-prefix bounds the clone path uses (incrementWS). The found key is
+// re-checked against the 0x01|ws prefix rather than trusted from the iterator
+// bounds alone, and a mismatch still reads as PRESENT — the caller's only use
+// of "absent" is "safe to delete", so every failure mode fails that way.
+func (ps *PebbleStore) VaultHasEngrams(ctx context.Context, wsPrefix [8]byte) (bool, error) {
+	wsNext, err := incrementWS(wsPrefix)
+	if err != nil {
+		return false, fmt.Errorf("vault has engrams: %w", err)
+	}
 	lo := make([]byte, 9)
 	lo[0] = prefix.Engram
 	copy(lo[1:], wsPrefix[:])
 	hi := make([]byte, 9)
 	hi[0] = prefix.Engram
-	copy(hi[1:], wsPrefix[:])
-	wrapped := true
-	for i := len(hi) - 1; i >= 1; i-- {
-		hi[i]++
-		if hi[i] != 0 {
-			wrapped = false
-			break
-		}
-	}
-	if wrapped {
-		// A workspace of all 0xFF bytes carries past its last byte. Keeping
-		// the wrapped bound would put hi BELOW lo, the iterator would find
-		// nothing, and this probe would answer "empty" on a full vault — a
-		// delete decision reading fail-open. Move to the next prefix instead.
-		hi = []byte{prefix.Engram + 1}
-	}
+	copy(hi[1:], wsNext[:])
 
 	iter, err := ps.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
 	if err != nil {
-		// A probe that cannot run must read as "not empty": the caller's only
-		// use of false is "safe to delete".
-		return true
+		return false, fmt.Errorf("vault has engrams: new iter: %w", err)
 	}
 	defer iter.Close()
-	found := iter.First()
-	if err := iter.Error(); err != nil {
-		// Same rule for a scan that fails part-way: an unreadable range is
-		// never evidence that the range is empty.
-		return true
+	if !iter.First() {
+		if err := iter.Error(); err != nil {
+			return false, fmt.Errorf("vault has engrams: scan: %w", err)
+		}
+		return false, nil
 	}
-	return found
+	// The first key in the range is enough: the caller only asks whether the
+	// vault is empty. A key that somehow falls outside 0x01|ws still reads as
+	// PRESENT — every failure mode has to land on "do not delete".
+	return true, nil
 }

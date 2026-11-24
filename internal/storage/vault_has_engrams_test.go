@@ -17,7 +17,11 @@ func TestVaultHasEngrams(t *testing.T) {
 	ctx := context.Background()
 
 	wsEmpty := keys_VaultPrefixForTest(t, store, "wf-probe-empty")
-	if store.VaultHasEngrams(ctx, wsEmpty) {
+	has, err := store.VaultHasEngrams(ctx, wsEmpty)
+	if err != nil {
+		t.Fatalf("probe never-written vault: %v", err)
+	}
+	if has {
 		t.Error("never-written vault reports engrams present, want none")
 	}
 
@@ -30,12 +34,20 @@ func TestVaultHasEngrams(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("WriteEngram backdated: %v", err)
 	}
-	if !store.VaultHasEngrams(ctx, wsBackdated) {
+	has, err = store.VaultHasEngrams(ctx, wsBackdated)
+	if err != nil {
+		t.Fatalf("probe backdated vault: %v", err)
+	}
+	if !has {
 		t.Error("vault holding one backdated engram reports empty — a time-bounded probe would delete real data")
 	}
 
 	// Isolation: engrams in another vault must not satisfy this vault's probe.
-	if store.VaultHasEngrams(ctx, wsEmpty) {
+	has, err = store.VaultHasEngrams(ctx, wsEmpty)
+	if err != nil {
+		t.Fatalf("probe empty vault again: %v", err)
+	}
+	if has {
 		t.Error("empty vault reports engrams after an unrelated vault was written — probe is not vault-scoped")
 	}
 
@@ -45,25 +57,36 @@ func TestVaultHasEngrams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteEngram plain: %v", err)
 	}
-	if !store.VaultHasEngrams(ctx, wsPlain) {
+	has, err = store.VaultHasEngrams(ctx, wsPlain)
+	if err != nil {
+		t.Fatalf("probe plain vault: %v", err)
+	}
+	if !has {
 		t.Fatal("vault holding one engram reports empty")
 	}
 	if err := store.DeleteEngram(ctx, wsPlain, id); err != nil {
 		t.Fatalf("DeleteEngram: %v", err)
 	}
-	if store.VaultHasEngrams(ctx, wsPlain) {
+	has, err = store.VaultHasEngrams(ctx, wsPlain)
+	if err != nil {
+		t.Fatalf("probe after delete: %v", err)
+	}
+	if has {
 		t.Error("vault reports engrams after its only row was deleted")
 	}
 
-	// A workspace of all 0xFF bytes carries the upper bound past its last
-	// byte. The row must still be found: a wrapped bound puts hi below lo,
-	// the scan finds nothing, and the probe reads fail-open on a full vault.
+	// A workspace of all 0xFF bytes cannot have a finite upper bound (the
+	// next prefix wraps). incrementWS refuses it — the same refusal the clone
+	// path applies — and the error, not a wrapped bound, is what the caller
+	// sees: the sweep treats a failed probe as "do not delete", so the vault
+	// in an unprobeable workspace survives rather than reading fail-open.
 	wsMax := [8]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 	if _, err := store.WriteEngram(ctx, wsMax, &Engram{Concept: "c", Content: "max workspace"}); err != nil {
 		t.Fatalf("WriteEngram max workspace: %v", err)
 	}
-	if !store.VaultHasEngrams(ctx, wsMax) {
-		t.Error("vault in an all-0xFF workspace reports empty — the wrapped upper bound reads fail-open")
+	has, err = store.VaultHasEngrams(ctx, wsMax)
+	if err == nil {
+		t.Fatalf("all-0xFF workspace: probe returned (%v, nil), want the incrementWS overflow error", has)
 	}
 }
 
